@@ -457,10 +457,12 @@ $recentDesc
     }
 
     private fun defaultCategoryForType(type: TransactionType): String = when (type) {
-        TransactionType.EXPENSE -> "日常-消费"
-        TransactionType.INCOME -> "其他-收入"
+        TransactionType.EXPENSE -> "餐饮"
+        TransactionType.INCOME -> "其他收入"
         TransactionType.TRANSFER -> "内部转账"
         TransactionType.REPAYMENT -> "信用还款"
-        TransactionType.REFUND_OFFSET -> "退款冲销"
+        TransactionType.REFUND_OFFSET -> "退款入账"
+        TransactionType.LOAN_IN -> "借入"
+        TransactionType.LOAN_OUT -> "借出"
     }
 }

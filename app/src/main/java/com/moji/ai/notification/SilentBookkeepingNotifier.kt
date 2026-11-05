@@ -71,6 +71,8 @@ class SilentBookkeepingNotifier(private val context: Context) {
             TransactionType.TRANSFER -> "已自动记内部转账 $amountStr"
             TransactionType.REPAYMENT -> "已自动记信用还款 $amountStr"
             TransactionType.REFUND_OFFSET -> "已自动冲销原支出 +$amountStr"
+            TransactionType.LOAN_IN -> "已自动记借入 +$amountStr"
+            TransactionType.LOAN_OUT -> "已自动记借出 -$amountStr"
         }
 
         val sourceName = tx.sourceWalletId?.let { walletMap[it]?.name }
@@ -81,6 +83,8 @@ class SilentBookkeepingNotifier(private val context: Context) {
             TransactionType.TRANSFER -> "${sourceName ?: "转出"} ➔ ${targetName ?: "转入"}"
             TransactionType.REPAYMENT -> "${sourceName ?: "储蓄账户"} ➔ 偿还 ${targetName ?: "信用账户"}"
             TransactionType.REFUND_OFFSET -> "退回至：${targetName ?: sourceName ?: "原账户"}（已自动扣减原消费净支出）"
+            TransactionType.LOAN_IN -> "借入至：${targetName ?: sourceName ?: "未指定"}"
+            TransactionType.LOAN_OUT -> "借出自：${sourceName ?: "未指定"}"
         }
 
         val bodyText = buildString {
