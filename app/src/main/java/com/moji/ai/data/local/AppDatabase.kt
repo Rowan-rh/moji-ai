@@ -106,7 +106,7 @@ interface RecurringRuleDao {
 
 @Database(
     entities = [WalletEntity::class, TransactionEntity::class, RecurringRuleEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 @TypeConverters(LedgerTypeConverters::class)
@@ -126,16 +126,18 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "moji_ai.db"
                 )
+                    .fallbackToDestructiveMigration()
                     .addCallback(object : Callback() {
-                        override fun onCreate(db: SupportSQLiteDatabase) {
-                            super.onCreate(db)
-                            // 首次启动预置高频国内钱包模板与 iCost 风格示例流水，开箱即用
+                        override fun onOpen(db: SupportSQLiteDatabase) {
+                            super.onOpen(db)
                             CoroutineScope(Dispatchers.IO).launch {
                                 val database = getInstance(context)
-                                database.walletDao().insertAll(defaultWallets())
-                                database.recurringRuleDao().insertRule(defaultRecurringRule())
-                                defaultSampleTransactions().forEach { tx ->
-                                    database.transactionDao().insertTransaction(tx)
+                                if (database.walletDao().getAllWallets().isEmpty()) {
+                                    database.walletDao().insertAll(defaultWallets())
+                                    database.recurringRuleDao().insertRule(defaultRecurringRule())
+                                    defaultSampleTransactions().forEach { tx ->
+                                        database.transactionDao().insertTransaction(tx)
+                                    }
                                 }
                             }
                         }
@@ -199,6 +201,7 @@ abstract class AppDatabase : RoomDatabase() {
                     amountCnyCents = 500L,
                     category = "退款入账",
                     merchant = "零食 · 唐久(环普产业园店)",
+                    sourceWalletId = null,
                     targetWalletId = 2L,
                     relatedTransactionId = 1L,
                     timestamp = now - 3600_000L,
