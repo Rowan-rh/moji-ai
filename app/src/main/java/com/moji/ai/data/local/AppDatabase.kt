@@ -129,10 +129,14 @@ abstract class AppDatabase : RoomDatabase() {
                     .addCallback(object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
                             super.onCreate(db)
-                            // 首次启动预置高频国内钱包模板，开箱即用
+                            // 首次启动预置高频国内钱包模板与 iCost 风格示例流水，开箱即用
                             CoroutineScope(Dispatchers.IO).launch {
-                                getInstance(context).walletDao().insertAll(defaultWallets())
-                                getInstance(context).recurringRuleDao().insertRule(defaultRecurringRule())
+                                val database = getInstance(context)
+                                database.walletDao().insertAll(defaultWallets())
+                                database.recurringRuleDao().insertRule(defaultRecurringRule())
+                                defaultSampleTransactions().forEach { tx ->
+                                    database.transactionDao().insertTransaction(tx)
+                                }
                             }
                         }
                     })
@@ -140,6 +144,80 @@ abstract class AppDatabase : RoomDatabase() {
                 INSTANCE = instance
                 instance
             }
+        }
+
+        private fun defaultSampleTransactions(): List<TransactionEntity> {
+            val now = System.currentTimeMillis()
+            return listOf(
+                TransactionEntity(
+                    id = 1,
+                    type = TransactionType.EXPENSE,
+                    amountCents = 500L,
+                    currency = "CNY",
+                    exchangeRateToCny = 1.0,
+                    amountCnyCents = 500L,
+                    category = "餐饮-零食",
+                    merchant = "唐久(环普产业园店)",
+                    note = "全额退款冲销演示",
+                    sourceWalletId = 2L,
+                    refundedAmountCents = 500L, // 已全额退款
+                    timestamp = now - 7200_000L,
+                    captureSource = "AI_NOTIFICATION"
+                ),
+                TransactionEntity(
+                    id = 2,
+                    type = TransactionType.EXPENSE,
+                    amountCents = 500L,
+                    currency = "CNY",
+                    exchangeRateToCny = 1.0,
+                    amountCnyCents = 500L,
+                    category = "餐饮-零食",
+                    merchant = "唐久(环普产业园店)",
+                    sourceWalletId = 2L,
+                    timestamp = now - 7100_000L,
+                    captureSource = "AI_NOTIFICATION"
+                ),
+                TransactionEntity(
+                    id = 3,
+                    type = TransactionType.EXPENSE,
+                    amountCents = 2739L,
+                    currency = "CNY",
+                    exchangeRateToCny = 1.0,
+                    amountCnyCents = 2739L,
+                    category = "购物",
+                    merchant = "京东-订单编号3673486013948720",
+                    sourceWalletId = 5L, // 招商银行信用卡
+                    timestamp = now - 5400_000L,
+                    captureSource = "AI_MERGED"
+                ),
+                TransactionEntity(
+                    id = 4,
+                    type = TransactionType.REFUND_OFFSET,
+                    amountCents = 500L,
+                    currency = "CNY",
+                    exchangeRateToCny = 1.0,
+                    amountCnyCents = 500L,
+                    category = "退款入账",
+                    merchant = "零食 · 唐久(环普产业园店)",
+                    targetWalletId = 2L,
+                    relatedTransactionId = 1L,
+                    timestamp = now - 3600_000L,
+                    captureSource = "AI_NOTIFICATION"
+                ),
+                TransactionEntity(
+                    id = 5,
+                    type = TransactionType.EXPENSE,
+                    amountCents = 1584L,
+                    currency = "CNY",
+                    exchangeRateToCny = 1.0,
+                    amountCnyCents = 1584L,
+                    category = "餐饮",
+                    merchant = "盒马",
+                    sourceWalletId = 2L,
+                    timestamp = now - 1200_000L,
+                    captureSource = "AI_NOTIFICATION"
+                )
+            )
         }
 
         private fun defaultWallets(): List<WalletEntity> = listOf(
