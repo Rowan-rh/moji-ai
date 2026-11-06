@@ -70,6 +70,9 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions ORDER BY timestamp DESC")
     fun observeAllTransactions(): Flow<List<TransactionEntity>>
 
+    @Query("SELECT * FROM transactions ORDER BY timestamp DESC")
+    suspend fun getAllTransactions(): List<TransactionEntity>
+
     @Query("SELECT * FROM transactions WHERE type = 'EXPENSE' AND (amountCnyCents - refundedAmountCents) > 0 ORDER BY timestamp DESC LIMIT :limit")
     suspend fun getRecentRefundableExpenses(limit: Int = 15): List<TransactionEntity>
 
@@ -78,6 +81,9 @@ interface TransactionDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertTransaction(tx: TransactionEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAllTransactions(items: List<TransactionEntity>)
 
     @Update
     suspend fun updateTransaction(tx: TransactionEntity)
@@ -91,11 +97,17 @@ interface RecurringRuleDao {
     @Query("SELECT * FROM recurring_rules ORDER BY nextTriggerTimeMillis ASC")
     fun observeAllRules(): Flow<List<RecurringRuleEntity>>
 
+    @Query("SELECT * FROM recurring_rules ORDER BY id ASC")
+    suspend fun getAllRules(): List<RecurringRuleEntity>
+
     @Query("SELECT * FROM recurring_rules WHERE enabled = 1 AND nextTriggerTimeMillis <= :nowMillis")
     suspend fun getDueRules(nowMillis: Long): List<RecurringRuleEntity>
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertRule(rule: RecurringRuleEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertAllRules(rules: List<RecurringRuleEntity>)
 
     @Update
     suspend fun updateRule(rule: RecurringRuleEntity)

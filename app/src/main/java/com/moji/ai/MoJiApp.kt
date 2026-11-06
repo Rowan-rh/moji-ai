@@ -3,6 +3,7 @@ package com.moji.ai
 import android.app.Application
 import com.moji.ai.ai.AiAccountingEngine
 import com.moji.ai.ai.AiConfigManager
+import com.moji.ai.ai.MerchantMemoryManager
 import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.SilentBookkeepingNotifier
@@ -25,6 +26,9 @@ class MoJiApp : Application() {
     lateinit var aiConfigManager: AiConfigManager
         private set
 
+    lateinit var merchantMemoryManager: MerchantMemoryManager
+        private set
+
     lateinit var aiEngine: AiAccountingEngine
         private set
 
@@ -39,7 +43,8 @@ class MoJiApp : Application() {
         database = AppDatabase.getInstance(this)
         repository = LedgerRepository(database)
         aiConfigManager = AiConfigManager(this)
-        aiEngine = AiAccountingEngine(aiConfigManager)
+        merchantMemoryManager = MerchantMemoryManager(this)
+        aiEngine = AiAccountingEngine(aiConfigManager, merchantMemoryManager)
         notifier = SilentBookkeepingNotifier(this)
         captureCoordinator = CapturePipelineCoordinator(
             repository = repository,

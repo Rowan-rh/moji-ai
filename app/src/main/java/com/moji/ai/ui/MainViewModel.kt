@@ -6,12 +6,16 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.moji.ai.MoJiApp
 import com.moji.ai.ai.AiConfig
+import com.moji.ai.ai.MerchantMemoryEntry
+import com.moji.ai.data.backup.BackupAndCsvTransferEngine
+import com.moji.ai.data.backup.CsvParsePreviewResult
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.service.CaptureObservabilityLogEntry
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -70,6 +74,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val recurringRules: StateFlow<List<RecurringRuleEntity>> = repository.recurringRulesFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val merchantMemories: StateFlow<List<MerchantMemoryEntry>> = app.merchantMemoryManager.memoriesFlow
+
+    val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = app.captureCoordinator.observabilityLogs
 
     private val _ledgers = MutableStateFlow(loadSavedLedgers())
     val ledgers: StateFlow<List<String>> = _ledgers.asStateFlow()
@@ -394,6 +402,111 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 repository.updateExistingTransaction(tx)
             }
+            app.merchantMemoryManager.learnFromTransaction(tx)
+        }
+    }
+
+    fun upsertMerchantMemory(keyword: String, category: String, preferredWalletId: Long? = null) {
+        app.merchantMemoryManager.upsertMemory(keyword, category, preferredWalletId)
+    }
+
+    fun deleteMerchantMemory(keyword: String) {
+        app.merchantMemoryManager.deleteMemory(keyword)
+    }
+
+    fun clearObservabilityLogs() {
+        app.captureCoordinator.clearObservabilityLogs()
+    }
+
+    /**
+     * 账户真实余额锚点登记 + 差额自动生成平账流水
+     */
+    fun reconcileWalletBalance(
+        walletId: Long,
+        actualBalanceYuan: Double,
+        recordAdjustmentTx: Boolean = true,
+        customNote: String = ""
+    ) {
+        viewModelScope.launch {
+            val actualCents = (actualBalanceYuan * 100.0).roundToLong().coerceAtLeast(0L)
+            repository.reconcileWalletBalance(
+                walletId = walletId,
+                actualBalanceCents = actualCents,
+                ledgerName = _currentLedger.value,
+                recordAdjustmentTx = recordAdjustmentTx,
+                customNote = customNote
+            )
+        }
+    }
+
+    fun generateFullBackupJson(): String {
+        return BackupAndCsvTransferEngine.exportFullBackupJson(
+            ledgers = _ledgers.value,
+            monthlyBudgetCents = _monthlyBudgetCents.value,
+            wallets = wallets.value,
+            transactions = transactions.value,
+            recurringRules = recurringRules.value,
+            merchantMemories = merchantMemories.value
+        )
+    }
+
+    fun generateCsvExportString(): String {
+        return BackupAndCsvTransferEngine.exportTransactionsToCsv(
+            transactions = transactions.value,
+            wallets = wallets.value
+        )
+    }
+
+    fun previewCsvImport(rawCsv: String): CsvParsePreviewResult {
+        return BackupAndCsvTransferEngine.parseExternalCsv(
+            rawCsv = rawCsv,
+            defaultLedger = _currentLedger.value,
+            wallets = wallets.value,
+            merchantMemoryManager = app.merchantMemoryManager
+        )
+    }
+
+    fun commitCsvImport(
+        rawCsv: String,
+        applyToWalletBalance: Boolean,
+        onResult: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val preview = previewCsvImport(rawCsv)
+            if (preview.parsedTransactions.isEmpty()) {
+                onResult("⚠️ 未识别到可导入的有效账单记录（格式：${preview.detectedSourceFormat}）")
+                return@launch
+            }
+            val importedCount = repository.importExternalTransactions(
+                candidates = preview.parsedTransactions,
+                applyToWalletBalance = applyToWalletBalance
+            )
+            onResult("✅ 已从【${preview.detectedSourceFormat}】导入 $importedCount 笔账单（自动去重跳过 ${preview.parsedTransactions.size - importedCount} 笔，忽略非金融行 ${preview.skippedNonFinancialRows} 行）")
+        }
+    }
+
+    fun restoreFromBackupJson(
+        rawJson: String,
+        onResult: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val parsed = BackupAndCsvTransferEngine.parseFullBackupJson(rawJson)
+            if (parsed == null) {
+                onResult("❌ 备份 JSON 格式无效或已损坏，无法恢复")
+                return@launch
+            }
+            val (backupWallets, backupTxs, snapshot) = parsed
+            val backupRules = BackupAndCsvTransferEngine.toRecurringRuleEntities(snapshot.recurringRules)
+            val txCount = repository.restoreFullSnapshot(backupWallets, backupTxs, backupRules)
+            snapshot.merchantMemories.forEach { m ->
+                app.merchantMemoryManager.upsertMemory(m.merchantKeyword, m.category, m.preferredWalletId)
+            }
+            snapshot.ledgers.forEach { createLedger(it) }
+            if (snapshot.monthlyBudgetCents > 0L) {
+                _monthlyBudgetCents.value = snapshot.monthlyBudgetCents
+                uiPrefs.edit().putLong("monthly_budget_cents", snapshot.monthlyBudgetCents).apply()
+            }
+            onResult("✅ 全量备份恢复成功：恢复账户 ${backupWallets.size} 个、账单 $txCount 笔、商户记忆 ${snapshot.merchantMemories.size} 条")
         }
     }
 

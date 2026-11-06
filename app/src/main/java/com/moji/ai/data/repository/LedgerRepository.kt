@@ -17,8 +17,161 @@ class LedgerRepository(private val db: AppDatabase) {
 
     suspend fun getAllWallets(): List<WalletEntity> = db.walletDao().getAllWallets()
 
+    suspend fun getAllTransactions(): List<TransactionEntity> = db.transactionDao().getAllTransactions()
+
+    suspend fun getAllRecurringRules(): List<RecurringRuleEntity> = db.recurringRuleDao().getAllRules()
+
     suspend fun getRecentRefundableExpenses(limit: Int = 15): List<TransactionEntity> =
         db.transactionDao().getRecentRefundableExpenses(limit)
+
+    /**
+     * 账户真实余额锚点登记 + 差额自动生成平账流水（对标 blue-whale-keeper 与 moneywallet）：
+     * - 当 recordAdjustmentTx = true 时，自动计算「真实余额 - 账面余额」的差额，生成一笔「平账」支出/收入/冲销流水并原子化校准余额；
+     * - 当 recordAdjustmentTx = false 时，仅直接调整期初/账面余额。
+     */
+    suspend fun reconcileWalletBalance(
+        walletId: Long,
+        actualBalanceCents: Long,
+        ledgerName: String = "默认账本",
+        recordAdjustmentTx: Boolean = true,
+        customNote: String = ""
+    ): TransactionEntity? = db.withTransaction {
+        val walletDao = db.walletDao()
+        val wallet = walletDao.getWalletById(walletId) ?: return@withTransaction null
+        val sanitizedActual = actualBalanceCents.coerceAtLeast(0L)
+        val currentBook = wallet.balanceCents
+        val diff = sanitizedActual - currentBook
+        if (diff == 0L) return@withTransaction null
+
+        if (!recordAdjustmentTx) {
+            walletDao.updateWallet(wallet.copy(balanceCents = sanitizedActual))
+            return@withTransaction null
+        }
+
+        val rate = CurrencyCode.fromCode(wallet.currency).defaultRateToCny
+        val absDiff = kotlin.math.abs(diff)
+        val absCnyCents = (absDiff * rate).roundToLong()
+
+        val adjustmentTx = if (!wallet.type.isLiability) {
+            // 资产账户：真实余额 < 账面余额 => 期间有漏记支出；真实余额 > 账面余额 => 期间有漏记收入
+            if (diff < 0L) {
+                TransactionEntity(
+                    ledgerName = ledgerName,
+                    type = TransactionType.EXPENSE,
+                    amountCents = absDiff,
+                    currency = wallet.currency,
+                    exchangeRateToCny = rate,
+                    amountCnyCents = absCnyCents,
+                    category = "平账",
+                    merchant = "${wallet.name} 余额锚点校准",
+                    note = customNote.ifBlank { "真实余额比账面少 ${String.format("%.2f", absDiff / 100.0)}，自动生成漏记支出补差" },
+                    sourceWalletId = wallet.id,
+                    tags = "平账",
+                    captureSource = "BALANCE_ANCHOR"
+                )
+            } else {
+                TransactionEntity(
+                    ledgerName = ledgerName,
+                    type = TransactionType.INCOME,
+                    amountCents = absDiff,
+                    currency = wallet.currency,
+                    exchangeRateToCny = rate,
+                    amountCnyCents = absCnyCents,
+                    category = "平账",
+                    merchant = "${wallet.name} 余额锚点校准",
+                    note = customNote.ifBlank { "真实余额比账面多 ${String.format("%.2f", absDiff / 100.0)}，自动生成漏记收入补差" },
+                    sourceWalletId = null,
+                    targetWalletId = wallet.id,
+                    tags = "平账",
+                    captureSource = "BALANCE_ANCHOR"
+                )
+            }
+        } else {
+            // 信用账户（balanceCents 为待还欠款）：真实欠款 > 账面欠款 => 漏记消费；真实欠款 < 账面欠款 => 冲减欠款
+            if (diff > 0L) {
+                TransactionEntity(
+                    ledgerName = ledgerName,
+                    type = TransactionType.EXPENSE,
+                    amountCents = absDiff,
+                    currency = wallet.currency,
+                    exchangeRateToCny = rate,
+                    amountCnyCents = absCnyCents,
+                    category = "平账",
+                    merchant = "${wallet.name} 欠款锚点校准",
+                    note = customNote.ifBlank { "真实待还比账面多 ${String.format("%.2f", absDiff / 100.0)}，自动补记信用消费" },
+                    sourceWalletId = wallet.id,
+                    tags = "平账",
+                    captureSource = "BALANCE_ANCHOR"
+                )
+            } else {
+                TransactionEntity(
+                    ledgerName = ledgerName,
+                    type = TransactionType.REFUND_OFFSET,
+                    amountCents = absDiff,
+                    currency = wallet.currency,
+                    exchangeRateToCny = rate,
+                    amountCnyCents = absCnyCents,
+                    category = "平账",
+                    merchant = "${wallet.name} 欠款锚点校准",
+                    note = customNote.ifBlank { "真实待还比账面少 ${String.format("%.2f", absDiff / 100.0)}，自动冲减信用欠款" },
+                    sourceWalletId = null,
+                    targetWalletId = wallet.id,
+                    tags = "平账",
+                    captureSource = "BALANCE_ANCHOR"
+                )
+            }
+        }
+
+        val id = recordTransaction(adjustmentTx)
+        adjustmentTx.copy(id = id)
+    }
+
+    /**
+     * 批量导入 CSV 流水（带重复流水过滤与可选余额联动）
+     */
+    suspend fun importExternalTransactions(
+        candidates: List<TransactionEntity>,
+        applyToWalletBalance: Boolean = false
+    ): Int = db.withTransaction {
+        val existing = db.transactionDao().getAllTransactions()
+        val existingKeys = existing.map {
+            "${it.timestamp / 60_000L}_${it.type.name}_${it.amountCents}_${it.merchant.take(8)}"
+        }.toMutableSet()
+
+        var importedCount = 0
+        for (item in candidates) {
+            val dedupKey = "${item.timestamp / 60_000L}_${item.type.name}_${item.amountCents}_${item.merchant.take(8)}"
+            if (dedupKey in existingKeys) continue
+            existingKeys.add(dedupKey)
+            if (applyToWalletBalance) {
+                recordTransaction(item.copy(id = 0L))
+            } else {
+                db.transactionDao().insertTransaction(item.copy(id = 0L))
+            }
+            importedCount++
+        }
+        importedCount
+    }
+
+    /**
+     * 全量备份恢复（原子化合并或恢复钱包、交易与周期规则）
+     */
+    suspend fun restoreFullSnapshot(
+        wallets: List<WalletEntity>,
+        transactions: List<TransactionEntity>,
+        recurringRules: List<RecurringRuleEntity>
+    ): Int = db.withTransaction {
+        if (wallets.isNotEmpty()) {
+            db.walletDao().insertAll(wallets)
+        }
+        if (transactions.isNotEmpty()) {
+            db.transactionDao().insertAllTransactions(transactions)
+        }
+        if (recurringRules.isNotEmpty()) {
+            db.recurringRuleDao().insertAllRules(recurringRules)
+        }
+        transactions.size
+    }
 
     suspend fun recordTransaction(tx: TransactionEntity): Long = db.withTransaction {
         val txDao = db.transactionDao()

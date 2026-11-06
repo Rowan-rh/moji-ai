@@ -137,6 +137,7 @@ fun ICostAssetsScreen(
     installmentPlans: List<InstallmentPlanItem> = emptyList(),
     onDepositSavingPlan: (Long, Double) -> Unit = { _, _ -> },
     onPayInstallmentPeriod: (InstallmentPlanItem) -> Unit = {},
+    onReconcileWallet: (Long, Double, Boolean, String) -> Unit = { _, _, _, _ -> },
     onOpenSettingsPage: () -> Unit = {},
     onSubpageActiveChange: (Boolean) -> Unit = {}
 ) {
@@ -165,6 +166,7 @@ fun ICostAssetsScreen(
     var showSelectTypeFullScreen by remember { mutableStateOf(false) }
     var selectedPresetForEditor by remember { mutableStateOf<AccountBrandOption?>(null) }
     var editingWallet by remember { mutableStateOf<WalletEntity?>(null) }
+    var reconcilingWallet by remember { mutableStateOf<WalletEntity?>(null) }
 
     val subpageActive = inspectingWallet != null || showSelectTypeFullScreen
     androidx.compose.runtime.LaunchedEffect(subpageActive) {
@@ -569,7 +571,7 @@ fun ICostAssetsScreen(
                                                 label = "调平",
                                                 iconAsset = "asset_pen.webp",
                                                 backgroundColor = ICostGreenIncome,
-                                                onClick = { editingWallet = w }
+                                                onClick = { reconcilingWallet = w }
                                             ),
                                             SwipeActionItem(
                                                 label = "删除",
@@ -656,7 +658,7 @@ fun ICostAssetsScreen(
                                                 label = "调平",
                                                 iconAsset = "asset_pen.webp",
                                                 backgroundColor = ICostGreenIncome,
-                                                onClick = { editingWallet = w }
+                                                onClick = { reconcilingWallet = w }
                                             ),
                                             SwipeActionItem(
                                                 label = "删除",
@@ -916,6 +918,9 @@ fun ICostAssetsScreen(
                     onEditWallet = {
                         editingWallet = activeWallet
                     },
+                    onReconcileBalance = {
+                        reconcilingWallet = activeWallet
+                    },
                     onRepayOrTransfer = {
                         val wid = activeWallet.id
                         if (activeWallet.type.isLiability) {
@@ -975,6 +980,19 @@ fun ICostAssetsScreen(
                 onSaveWallet(saved)
                 selectedPresetForEditor = null
                 editingWallet = null
+            }
+        )
+    }
+
+    // 账户真实余额锚点登记 + 差额自动生成平账流水弹窗
+    val targetReconcile = reconcilingWallet
+    if (targetReconcile != null) {
+        WalletBalanceReconcileSheet(
+            wallet = targetReconcile,
+            onDismiss = { reconcilingWallet = null },
+            onConfirmReconcile = { actualYuan, recordAdjustmentTx, note ->
+                onReconcileWallet(targetReconcile.id, actualYuan, recordAdjustmentTx, note)
+                reconcilingWallet = null
             }
         )
     }
@@ -1142,6 +1160,7 @@ private fun ICostWalletDetailFullScreen(
     walletTransactions: List<TransactionEntity>,
     onBack: () -> Unit,
     onEditWallet: () -> Unit,
+    onReconcileBalance: () -> Unit = {},
     onRepayOrTransfer: () -> Unit,
     onAddRecordWithWallet: () -> Unit,
     onDeleteWallet: () -> Unit,
@@ -1215,6 +1234,13 @@ private fun ICostWalletDetailFullScreen(
                             containerColor = ICostCardWhite
                         ) {
                             DropdownMenuItem(
+                                text = { Text("校准真实余额（自动平账）", fontSize = 14.sp, fontWeight = FontWeight.Medium) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    onReconcileBalance()
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("编辑账户信息", fontSize = 14.sp) },
                                 onClick = {
                                     showMoreMenu = false
@@ -1276,11 +1302,41 @@ private fun ICostWalletDetailFullScreen(
 
                             Spacer(modifier = Modifier.height(16.dp))
 
-                            Text(
-                                text = if (wallet.type.isLiability) "当前欠款" else "账户余额",
-                                fontSize = 12.sp,
-                                color = ICostTextSecondary
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (wallet.type.isLiability) "当前欠款" else "账户余额",
+                                    fontSize = 12.sp,
+                                    color = ICostTextSecondary
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = Color(0xFFF3F4F6),
+                                    modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
+                                        onReconcileBalance()
+                                    }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        ICostAssetImage(
+                                            assetFile = "asset_pen.webp",
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "校准平账",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ICostTextPrimary
+                                        )
+                                    }
+                                }
+                            }
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = formatMoneyCents(wallet.balanceCents, wallet.currency),
@@ -1841,6 +1897,136 @@ private fun WalletEditorSheet(
                     Text("保存账户", fontWeight = FontWeight.Bold)
                 }
             }
+        }
+    }
+}
+
+/**
+ * 账户「真实余额锚点登记 + 差额自动生成平账流水」弹窗（对标 blue-whale-keeper 与 moneywallet）
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WalletBalanceReconcileSheet(
+    wallet: WalletEntity,
+    onDismiss: () -> Unit,
+    onConfirmReconcile: (actualYuan: Double, recordAdjustmentTx: Boolean, note: String) -> Unit
+) {
+    val bookYuan = wallet.balanceCents / 100.0
+    var actualInput by remember(wallet) {
+        mutableStateOf(String.format(Locale.US, "%.2f", bookYuan))
+    }
+    var recordAdjustmentTx by remember { mutableStateOf(true) }
+    var customNote by remember { mutableStateOf("") }
+
+    val parsedActualYuan = actualInput.toDoubleOrNull() ?: bookYuan
+    val actualCents = (parsedActualYuan * 100.0).roundToLong().coerceAtLeast(0L)
+    val diffCents = actualCents - wallet.balanceCents
+    val absDiffYuan = kotlin.math.abs(diffCents) / 100.0
+    val sym = CurrencyCode.fromCode(wallet.currency).symbol
+
+    val diffSummary = when {
+        diffCents == 0L -> "当前输入的真实金额与账面一致，无需平账"
+        !wallet.type.isLiability && diffCents < 0L ->
+            "比账面少了 $sym${String.format(Locale.US, "%.2f", absDiffYuan)} ➔ 将自动生成一笔「平账支出（漏记补差）」"
+        !wallet.type.isLiability && diffCents > 0L ->
+            "比账面多了 $sym${String.format(Locale.US, "%.2f", absDiffYuan)} ➔ 将自动生成一笔「平账收入（漏记补差）」"
+        wallet.type.isLiability && diffCents > 0L ->
+            "真实待还比账面多 $sym${String.format(Locale.US, "%.2f", absDiffYuan)} ➔ 将自动补记一笔「信用消费」"
+        else ->
+            "真实待还比账面少 $sym${String.format(Locale.US, "%.2f", absDiffYuan)} ➔ 将自动生成一笔「欠款冲减」"
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = ICostCardWhite,
+        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 8.dp)
+                .navigationBarsPadding(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                WalletBrandAvatar(wallet, size = 34.dp)
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = "校准真实余额（平账锚点）",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = ICostTextPrimary
+                    )
+                    Text(
+                        text = "${wallet.name} · 当前账面${if (wallet.type.isLiability) "待还" else "余额"} ${formatMoneyCents(wallet.balanceCents, wallet.currency)}",
+                        fontSize = 12.sp,
+                        color = ICostTextSecondary
+                    )
+                }
+            }
+
+            OutlinedTextField(
+                value = actualInput,
+                onValueChange = { actualInput = it },
+                label = { Text(if (wallet.type.isLiability) "输入银行 App 当前真实待还欠款 ($sym)" else "输入微信/银行卡当前真实余额 ($sym)") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = if (diffCents == 0L) ICostBgGray else Color(0xFFEEF4FF),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = diffSummary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (diffCents == 0L) ICostTextSecondary else ICostBlueAccent,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                    Text("自动生成差额平账流水（推荐）", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = ICostTextPrimary)
+                    Text("开启后自动补记差额账单，支持随时撤销回滚；关闭则仅直接修改余额", fontSize = 12.sp, color = ICostTextSecondary)
+                }
+                Switch(checked = recordAdjustmentTx, onCheckedChange = { recordAdjustmentTx = it })
+            }
+
+            if (recordAdjustmentTx && diffCents != 0L) {
+                OutlinedTextField(
+                    value = customNote,
+                    onValueChange = { customNote = it },
+                    label = { Text("平账备注 (选填，默认自动注明差额原因)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+            }
+
+            Button(
+                onClick = {
+                    onConfirmReconcile(parsedActualYuan, recordAdjustmentTx, customNote.trim())
+                },
+                enabled = diffCents != 0L,
+                colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+            ) {
+                Text(
+                    text = if (recordAdjustmentTx) "确认校准并生成平账流水" else "仅修改账面余额",
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
         }
     }
 }

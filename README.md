@@ -6,18 +6,18 @@
 
 ## 核心亮点
 
-1. **AI 双通道无感采集 + 智能防重合并**：
+1. **AI 双通道无感采集 + 1.1s 滑动窗口聚合 + 30s 跨通道事后证据融合 (`AI_FUSED`)**：
    - [`PaymentNotificationListenerService`](app/src/main/java/com/moji/ai/service/PaymentNotificationListenerService.kt)：实时捕获微信支付、支付宝、云闪付、银行 App 及扣款短信通知。
    - [`PaymentAccessibilityService`](app/src/main/java/com/moji/ai/service/PaymentAccessibilityService.kt)：包名白名单前置过滤 + 350ms 节流机制，轻量级提取支付完成页、转账详情页文本节点树（无需截屏 OCR，极速省电且绝不拖慢宿主应用滚动帧率）。
-   - [`CapturePipelineCoordinator`](app/src/main/java/com/moji/ai/service/CapturePipelineCoordinator.kt)：1.1 秒滑动聚合窗口，将同一笔交易的“页面商户文本”与“银行卡扣款通知”合并后统一交给 AI 解析，杜绝重复入账。
-2. **通用大模型兼容 + 离线高智商语义兜底**：
-   - [`AiAccountingEngine`](app/src/main/java/com/moji/ai/ai/AiAccountingEngine.kt)：支持任意 OpenAI 兼容接口（DeepSeek、通义千问、硅基流动、OpenAI、本地 Ollama）及 Google Gemini 官方接口，未填 Key 或离线时自动启用本地语义引擎兜底。
+   - [`CapturePipelineCoordinator`](app/src/main/java/com/moji/ai/service/CapturePipelineCoordinator.kt)：1.1 秒滑动聚合窗口 + **30 秒跨通道事后证据融合（Evidence Fusion Patch）**——若银行扣款通知比支付页面晚到 3~30 秒，自动用后到的银行卡尾号或具体商户名增量补全原账单并原子联动钱包余额；同时内置 **最近 50 条采集可观测性日志队列**（支持一键重放）。
+2. **通用大模型兼容 + 商户记忆自学习 + 带排除词权重的离线语义引擎**：
+   - [`AiAccountingEngine`](app/src/main/java/com/moji/ai/ai/AiAccountingEngine.kt) & [`MerchantMemoryAndWeightedClassifier.kt`](app/src/main/java/com/moji/ai/ai/MerchantMemoryAndWeightedClassifier.kt)：支持任意 OpenAI 兼容接口（DeepSeek、通义千问、硅基流动、OpenAI、本地 Ollama）及 Google Gemini 官方接口；内置 **商户记忆自学习引擎 (`MerchantMemoryManager`)**（保存/编辑账单时自动记住商户与分类偏好）与 **带排除词一票否决权重的离线分类器 (`WeightedCategoryClassifier`)**（如“外卖”自动阻止“美团”误入购物/旅游并归入“餐饮-三餐”）。
 3. **1:1 iCost 级视觉、模块侧滑扩展功能与丝滑弹簧动效体系**：
    - **原生字体、图标、弹簧按压与模块侧滑扩展容器**（[`ICostTheme.kt`](app/src/main/java/com/moji/ai/ui/theme/ICostTheme.kt)）：内置 `ICDIN-Bold` 凝缩数字字体与 200 枚线性分类/银行品牌圆形图标，全端搭载 `iCostPressScale` 弹簧按压回弹 + 轻触觉震动反馈（`LocalHapticFeedback`）、`AnimatedMoneyText` 数字滚动过渡，以及 `ICostSwipeActionRow` 双向阻尼侧滑扩展功能容器与 `iCostHorizontalSwipeTrigger` 手势切换修饰符。
    - **账本首页**（[`LedgerHomeTab.kt`](app/src/main/java/com/moji/ai/ui/screens/LedgerHomeTab.kt)）：多账本切换、标题栏右滑/点击展开 **快捷记账模板抽屉**（点击模板一键秒记）、关键词实时搜索、`HorizontalPager` 三页左右滑动月度概览卡片、年月栏左右滑动切月、全屏收支日历页、按日弹簧收折卡片组，以及 **单笔账单行右滑/左滑呼出「编辑 / 复制 / 报销 / 退款 / 删除」扩展胶囊**。
    - **记账计算器面板**（[`ICostCalculatorSheet.kt`](app/src/main/java/com/moji/ai/ui/components/ICostCalculatorSheet.kt)）：支出/收入/转账三态手势滑动与点击平滑过渡、5 列线性分类网格（选中弹簧放大 + 二级子分类盒平滑展开）、转账账户 `180°` 旋转互换动效、支持 `+ - × ÷` 连续运算的 `4×4` 触觉圆角键盘。
-   - **全能资产管理**（[`AssetsTab.kt`](app/src/main/java/com/moji/ai/ui/screens/AssetsTab.kt)）：净资产双页可滑动大卡（第 1 页净资产/总资产/总负债，右滑/左滑切换第 2 页 **存钱计划进度与信用卡分期管理概览**）、总借入/总借出双卡、**单个信用/资金账户行右滑/左滑呼出「还款(转账) / 记一笔 / 调平 / 删除」扩展胶囊**、全屏账户详情页及账户类型选择页。
-   - **多维统计与设置中心**（[`StatisticsTab.kt`](app/src/main/java/com/moji/ai/ui/screens/StatisticsTab.kt)、[`MoJiMainScreen.kt`](app/src/main/java/com/moji/ai/ui/MoJiMainScreen.kt)）：周/月/年/全部/范围五段切换，收支/报销/流转三大可收折 Bento 宫格卡片，外加 **支持模块右滑/左滑直接切换维度** 且带渐进生长/铺展动效的每日收支柱状图、净资产平滑趋势图、多彩分类环形图。
+   - **全能资产管理与余额锚点平账**（[`AssetsTab.kt`](app/src/main/java/com/moji/ai/ui/screens/AssetsTab.kt)）：净资产双页可滑动大卡（第 1 页净资产/总资产/总负债，右滑/左滑切换第 2 页 **存钱计划进度与信用卡分期管理概览**）、总借入/总借出双卡、**单个信用/资金账户行右滑/左滑呼出「还款(转账) / 记一笔 / 调平 / 删除」扩展胶囊**、以及账户详情页 **「校准真实余额（自动计算差额并生成 `BALANCE_ANCHOR` 平账流水）」**。
+   - **多维统计、CSV 账单导入导出与全量快照备份**（[`StatisticsTab.kt`](app/src/main/java/com/moji/ai/ui/screens/StatisticsTab.kt)、[`BackupAndCsvTransferEngine.kt`](app/src/main/java/com/moji/ai/data/backup/BackupAndCsvTransferEngine.kt)）：周/月/年/全部/范围五段切换、支持手势切换维度的图表卡片，以及支持 **微信支付官方 CSV / 支付宝官方 CSV / 钱迹 / iCost CSV 自动识别预览与防重导入**、标准 CSV 报表导出与带 `BackupSchemaGuard` 兼容守卫的 `.mojibackup` 全量 JSON 快照备份恢复。
 4. **纯后台静默入账 + 通知栏一键撤销**：
    - [`SilentBookkeepingNotifier`](app/src/main/java/com/moji/ai/notification/SilentBookkeepingNotifier.kt)：后台自动入账后推送系统通知，点击通知栏上的 **「撤销入账」** 即可原子化回滚账单、账户余额与退款冲销额度。
 
