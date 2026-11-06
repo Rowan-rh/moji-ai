@@ -30,25 +30,49 @@ class PaymentAccessibilityService : AccessibilityService() {
         "已收钱", "已存入零钱", "还款成功", "提现已发起", "退款成功", "账单详情"
     )
 
+    private var lastInspectedPackage: String = ""
+    private var lastInspectTimeMillis: Long = 0L
+
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        val eventType = event.eventType
+        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+        ) {
+            return
+        }
+
         val pkg = event.packageName?.toString() ?: return
-        if (pkg == "com.moji.ai") return
+        if (pkg !in targetFinancialPackages) return
+
+        // 对高频内容变更事件做 350ms 节流，彻底避免微信/支付宝列表滚动掉帧
+        val now = System.currentTimeMillis()
+        if (eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+            pkg == lastInspectedPackage &&
+            (now - lastInspectTimeMillis) < 350L
+        ) {
+            return
+        }
+        lastInspectedPackage = pkg
+        lastInspectTimeMillis = now
 
         val app = applicationContext as? MoJiApp ?: return
         if (!app.aiConfigManager.getConfig().enableAccessibilityCapture) return
 
-        // 仅关注主流支付/银行应用或包含金融触发词的窗口
+        // 仅在目标支付/银行应用内轻量级提取当前窗口文本节点
         val rootNode = rootInActiveWindow ?: return
         val snippets = mutableListOf<String>()
-        collectNodeTextRecursive(rootNode, snippets, depth = 0)
+        try {
+            collectNodeTextRecursive(rootNode, snippets, depth = 0)
+        } catch (_: Throwable) {
+            return
+        }
 
         if (snippets.isEmpty()) return
         val fullPageText = snippets.distinct().joinToString(" | ")
 
-        // 只有当页面文本包含“支付成功/转账成功/还款成功/退款”等完成态关键词，或者属于目标金融App且包含明确金额时才触发
+        // 只有当页面文本包含“支付成功/转账成功/还款成功/退款”等完成态关键词时才触发
         val hasCompletionSignal = pageTriggerKeywords.any { fullPageText.contains(it) }
-        if (!hasCompletionSignal && pkg !in targetFinancialPackages) return
         if (!hasCompletionSignal) return
 
         app.captureCoordinator.onRawFinancialEventCaptured(

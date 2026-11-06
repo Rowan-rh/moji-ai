@@ -5,6 +5,21 @@ import android.content.Context
 import android.content.Intent
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -63,6 +78,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -93,6 +109,7 @@ import com.moji.ai.ui.theme.ICostTextMuted
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.formatMoneyCents
+import com.moji.ai.ui.theme.iCostPressScale
 import java.util.Calendar
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -140,69 +157,110 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var showAiSettingsSheet by remember { mutableStateOf(false) }
     var showBudgetDialog by remember { mutableStateOf(false) }
 
+    // 缓存最后一次打开的全屏日历与账单详情数据，确保退出动画期间内容不闪空
+    var cachedCalendarMonthTxs by remember { mutableStateOf<List<TransactionEntity>>(emptyList()) }
+    if (calendarMonthTxs != null) {
+        cachedCalendarMonthTxs = calendarMonthTxs!!
+    }
+    val activeTx = inspectingTx?.let { target -> transactions.firstOrNull { it.id == target.id } ?: target }
+    var cachedInspectingTx by remember { mutableStateOf<TransactionEntity?>(null) }
+    if (activeTx != null) {
+        cachedInspectingTx = activeTx
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(ICostBgGray)
             .statusBarsPadding()
     ) {
-        when (selectedTab) {
-            0 -> ICostLedgerHomeScreen(
-                currentLedger = currentLedger,
-                ledgers = ledgers,
-                onSelectLedger = { viewModel.selectLedger(it) },
-                onCreateLedger = { viewModel.createLedger(it) },
-                wallets = wallets,
-                transactions = transactions,
-                selectedYear = selectedYear,
-                selectedMonth = selectedMonth,
-                monthlyBudgetCents = monthlyBudgetCents,
-                onUpdateBudgetYuan = { viewModel.updateMonthlyBudgetYuan(it) },
-                onPrevMonth = {
-                    if (selectedMonth == 1) { selectedMonth = 12; selectedYear -= 1 } else selectedMonth -= 1
-                },
-                onNextMonth = {
-                    if (selectedMonth == 12) { selectedMonth = 1; selectedYear += 1 } else selectedMonth += 1
-                },
-                onOpenCalendar = { list -> calendarMonthTxs = list },
-                onOpenAiSandbox = { showAiSandboxSheet = true },
-                onOpenSettingsPage = { showSettingsPage = true },
-                onClickTransaction = { tx -> inspectingTx = tx }
-            )
+        AnimatedContent(
+            targetState = selectedTab,
+            transitionSpec = {
+                val direction = if (targetState >= initialState) 1 else -1
+                (slideInHorizontally(
+                    initialOffsetX = { fullWidth -> direction * (fullWidth / 7) },
+                    animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing)
+                ) + fadeIn(animationSpec = tween(durationMillis = 220))) togetherWith
+                    (slideOutHorizontally(
+                        targetOffsetX = { fullWidth -> -direction * (fullWidth / 7) },
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                    ) + fadeOut(animationSpec = tween(durationMillis = 160)))
+            },
+            label = "MainTabTransition"
+        ) { tabIndex ->
+            when (tabIndex) {
+                0 -> ICostLedgerHomeScreen(
+                    currentLedger = currentLedger,
+                    ledgers = ledgers,
+                    onSelectLedger = { viewModel.selectLedger(it) },
+                    onCreateLedger = { viewModel.createLedger(it) },
+                    wallets = wallets,
+                    transactions = transactions,
+                    selectedYear = selectedYear,
+                    selectedMonth = selectedMonth,
+                    monthlyBudgetCents = monthlyBudgetCents,
+                    onUpdateBudgetYuan = { viewModel.updateMonthlyBudgetYuan(it) },
+                    onPrevMonth = {
+                        if (selectedMonth == 1) { selectedMonth = 12; selectedYear -= 1 } else selectedMonth -= 1
+                    },
+                    onNextMonth = {
+                        if (selectedMonth == 12) { selectedMonth = 1; selectedYear += 1 } else selectedMonth += 1
+                    },
+                    onOpenCalendar = { list -> calendarMonthTxs = list },
+                    onOpenAiSandbox = { showAiSandboxSheet = true },
+                    onOpenSettingsPage = { showSettingsPage = true },
+                    onClickTransaction = { tx -> inspectingTx = tx }
+                )
 
-            1 -> ICostAssetsScreen(
-                wallets = wallets,
-                transactions = transactions,
-                recurringRules = recurringRules,
-                hideAmounts = hideAssetAmounts,
-                onToggleHideAmounts = { viewModel.toggleHideAssetAmounts() },
-                onSaveWallet = { viewModel.saveOrUpdateWallet(it) },
-                onDeleteWallet = { viewModel.deleteWallet(it) },
-                onQuickActionWithWallet = { type, srcId, dstId ->
-                    editingTx = null
-                    calcInitialType = type
-                    calcInitialSourceWalletId = srcId
-                    calcInitialTargetWalletId = dstId
-                    showCalculatorSheet = true
-                },
-                onSelectTransaction = { tx -> inspectingTx = tx },
-                onTriggerRuleNow = { viewModel.triggerRecurringRuleNow(it) },
-                onOpenSettingsPage = { showSettingsPage = true },
-                onSubpageActiveChange = { isAssetSubpageOpen = it }
-            )
+                1 -> ICostAssetsScreen(
+                    wallets = wallets,
+                    transactions = transactions,
+                    recurringRules = recurringRules,
+                    hideAmounts = hideAssetAmounts,
+                    onToggleHideAmounts = { viewModel.toggleHideAssetAmounts() },
+                    onSaveWallet = { viewModel.saveOrUpdateWallet(it) },
+                    onDeleteWallet = { viewModel.deleteWallet(it) },
+                    onQuickActionWithWallet = { type, srcId, dstId ->
+                        editingTx = null
+                        calcInitialType = type
+                        calcInitialSourceWalletId = srcId
+                        calcInitialTargetWalletId = dstId
+                        showCalculatorSheet = true
+                    },
+                    onSelectTransaction = { tx -> inspectingTx = tx },
+                    onTriggerRuleNow = { viewModel.triggerRecurringRuleNow(it) },
+                    onOpenSettingsPage = { showSettingsPage = true },
+                    onSubpageActiveChange = { isAssetSubpageOpen = it }
+                )
 
-            2 -> ICostStatisticsScreen(
-                transactions = transactions,
-                wallets = wallets,
-                initialYear = selectedYear,
-                initialMonth = selectedMonth,
-                onOpenAiSandbox = { showAiSandboxSheet = true },
-                onOpenSettingsPage = { showSettingsPage = true }
-            )
+                else -> ICostStatisticsScreen(
+                    transactions = transactions,
+                    wallets = wallets,
+                    initialYear = selectedYear,
+                    initialMonth = selectedMonth,
+                    onOpenAiSandbox = { showAiSandboxSheet = true },
+                    onOpenSettingsPage = { showSettingsPage = true }
+                )
+            }
         }
 
-        // 1:1 iCost 底部半透明毛玻璃悬浮胶囊导航栏 + 右下角独立白色大圆 "+" 记账按钮（全屏二级页打开时自动隐藏）
-        if (!hasFullScreenOverlay) {
+        // 1:1 iCost 底部半透明毛玻璃悬浮胶囊导航栏 + 右下角独立白色大圆 "+" 记账按钮（进出全屏二级页时平滑升降隐藏）
+        AnimatedVisibility(
+            visible = !hasFullScreenOverlay,
+            enter = slideInVertically(
+                initialOffsetY = { it * 2 },
+                animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+            ) + fadeIn(tween(200)),
+            exit = slideOutVertically(
+                targetOffsetY = { it * 2 },
+                animationSpec = tween(200, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(150)),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(horizontal = 20.dp, vertical = 12.dp)
+        ) {
             ICostFloatingBottomBar(
                 selectedTab = selectedTab,
                 onSelectTab = { selectedTab = it },
@@ -212,20 +270,26 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     calcInitialSourceWalletId = null
                     calcInitialTargetWalletId = null
                     showCalculatorSheet = true
-                },
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .navigationBarsPadding()
-                    .padding(horizontal = 20.dp, vertical = 12.dp)
+                }
             )
         }
 
-        // 全屏收支日历页面（06_calendar_full.png）
-        if (calendarMonthTxs != null) {
+        // 全屏收支日历页面（06_calendar_full.png）—— 弹簧上浮转场
+        AnimatedVisibility(
+            visible = calendarMonthTxs != null,
+            enter = slideInVertically(
+                initialOffsetY = { it / 4 },
+                animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow)
+            ) + fadeIn(tween(220)),
+            exit = slideOutVertically(
+                targetOffsetY = { it / 4 },
+                animationSpec = tween(200, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(160))
+        ) {
             MonthlyCalendarSheet(
                 year = selectedYear,
                 month = selectedMonth,
-                monthTransactions = calendarMonthTxs!!,
+                monthTransactions = cachedCalendarMonthTxs,
                 onDismiss = { calendarMonthTxs = null },
                 onSelectTransaction = { tx ->
                     inspectingTx = tx
@@ -233,32 +297,53 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             )
         }
 
-        // 全屏账单详情页面（05_detail_full.png）
-        val activeTx = inspectingTx?.let { target -> transactions.firstOrNull { it.id == target.id } ?: target }
-        if (activeTx != null) {
-            TransactionDetailSheet(
-                tx = activeTx,
-                wallets = wallets,
-                onDismiss = { inspectingTx = null },
-                onEdit = { toEdit ->
-                    editingTx = toEdit
-                    showCalculatorSheet = true
-                },
-                onRefund = { expId, yuan, recvId, note ->
-                    viewModel.refundExpense(expId, yuan, recvId, note)
-                },
-                onSettleReimburse = { expId, recvId ->
-                    viewModel.settleReimbursement(expId, recvId)
-                },
-                onDelete = { txId ->
-                    viewModel.deleteTransaction(txId)
-                    inspectingTx = null
-                }
-            )
+        // 全屏账单详情页面（05_detail_full.png）—— 丝滑侧滑推入转场
+        AnimatedVisibility(
+            visible = activeTx != null,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            cachedInspectingTx?.let { detailTx ->
+                TransactionDetailSheet(
+                    tx = detailTx,
+                    wallets = wallets,
+                    onDismiss = { inspectingTx = null },
+                    onEdit = { toEdit ->
+                        editingTx = toEdit
+                        showCalculatorSheet = true
+                    },
+                    onRefund = { expId, yuan, recvId, note ->
+                        viewModel.refundExpense(expId, yuan, recvId, note)
+                    },
+                    onSettleReimburse = { expId, recvId ->
+                        viewModel.settleReimbursement(expId, recvId)
+                    },
+                    onDelete = { txId ->
+                        viewModel.deleteTransaction(txId)
+                        inspectingTx = null
+                    }
+                )
+            }
         }
 
-        // 全屏「设置」页面（09_settings_full.png）
-        if (showSettingsPage) {
+        // 全屏「设置」页面（09_settings_full.png）—— 丝滑侧滑推入转场
+        AnimatedVisibility(
+            visible = showSettingsPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
             ICostSettingsFullScreen(
                 currentLedger = currentLedger,
                 monthlyBudgetCents = monthlyBudgetCents,
@@ -270,8 +355,18 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             )
         }
 
-        // 全屏「智能记账」页面（09_smart_bookkeeping.png）
-        if (showSmartBookkeepingPage) {
+        // 全屏「智能记账」页面（09_smart_bookkeeping.png）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showSmartBookkeepingPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
             ICostSmartBookkeepingFullScreen(
                 aiConfig = aiConfig,
                 onUpdateAiConfig = { viewModel.updateAiConfig(it) },
@@ -411,30 +506,47 @@ private fun ICostFloatingBottomBar(
                 )
                 tabs.forEach { (index, label, assetFile) ->
                     val isSelected = selectedTab == index
+                    val pillColor by animateColorAsState(
+                        targetValue = if (isSelected) Color(0xFFE9E9EC) else Color.Transparent,
+                        animationSpec = tween(durationMillis = 220),
+                        label = "BottomTabPillColor"
+                    )
+                    val contentColor by animateColorAsState(
+                        targetValue = if (isSelected) ICostBlueAccent else ICostTextPrimary,
+                        animationSpec = tween(durationMillis = 220),
+                        label = "BottomTabContentColor"
+                    )
+                    val iconScale by animateFloatAsState(
+                        targetValue = if (isSelected) 1.08f else 1.0f,
+                        animationSpec = spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMedium),
+                        label = "BottomTabIconScale"
+                    )
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight()
                             .clip(RoundedCornerShape(25.dp))
-                            .background(if (isSelected) Color(0xFFE9E9EC) else Color.Transparent)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null
-                            ) { onSelectTab(index) },
+                            .background(pillColor)
+                            .iCostPressScale(pressedScale = 0.92f) { onSelectTab(index) },
                         contentAlignment = Alignment.Center
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             ICostAssetImage(
                                 assetFile = assetFile,
-                                tint = if (isSelected) ICostBlueAccent else ICostTextPrimary,
-                                modifier = Modifier.size(21.dp)
+                                tint = contentColor,
+                                modifier = Modifier
+                                    .size(21.dp)
+                                    .graphicsLayer {
+                                        scaleX = iconScale
+                                        scaleY = iconScale
+                                    }
                             )
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = label,
                                 fontSize = 11.sp,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                color = if (isSelected) ICostBlueAccent else ICostTextPrimary
+                                color = contentColor
                             )
                         }
                     }
@@ -445,6 +557,7 @@ private fun ICostFloatingBottomBar(
         Box(
             modifier = Modifier
                 .size(58.dp)
+                .iCostPressScale(pressedScale = 0.88f, onClick = onPlusClick)
                 .shadow(
                     elevation = 10.dp,
                     shape = CircleShape,
@@ -453,12 +566,7 @@ private fun ICostFloatingBottomBar(
                 )
                 .clip(CircleShape)
                 .background(Color.White.copy(alpha = 0.90f))
-                .border(0.8.dp, Color.White.copy(alpha = 0.96f), CircleShape)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onPlusClick
-                ),
+                .border(0.8.dp, Color.White.copy(alpha = 0.96f), CircleShape),
             contentAlignment = Alignment.Center
         ) {
             ICostAssetImage(

@@ -1,21 +1,29 @@
 package com.moji.ai.ui.theme
 
 import android.graphics.BitmapFactory
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.CornerRadius
@@ -28,12 +36,16 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.R
@@ -151,7 +163,73 @@ fun daysUntilRepaymentText(repaymentDay: Int?): String {
 }
 
 /**
- * 顶部圆形白底图标按钮（用于 `<` 返回、账本切换、`•••` 更多等）
+ * iCost 级丝滑按压微缩回弹修饰符（自带阻尼弹簧缩放 + 细腻触觉反馈）
+ */
+fun Modifier.iCostPressScale(
+    pressedScale: Float = 0.93f,
+    enableHaptic: Boolean = true,
+    onClick: () -> Unit
+): Modifier = composed {
+    val interactionSource = remember { MutableInteractionSource() }
+    val isPressed by interactionSource.collectIsPressedAsState()
+    val haptic = LocalHapticFeedback.current
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) pressedScale else 1f,
+        animationSpec = spring(
+            dampingRatio = 0.62f,
+            stiffness = Spring.StiffnessMedium
+        ),
+        label = "iCostPressScale"
+    )
+    this
+        .graphicsLayer {
+            scaleX = scale
+            scaleY = scale
+        }
+        .clickable(
+            interactionSource = interactionSource,
+            indication = null,
+            onClick = {
+                if (enableHaptic) {
+                    runCatching { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+                }
+                onClick()
+            }
+        )
+}
+
+/**
+ * 核心大金额数字平滑滚动过渡组件（切换月份或新增账单时数字平滑增减）
+ */
+@Composable
+fun AnimatedMoneyText(
+    cents: Long,
+    currency: String = "CNY",
+    hideAmounts: Boolean = false,
+    fontSize: TextUnit = 36.sp,
+    fontWeight: FontWeight = FontWeight.Bold,
+    color: Color = ICostTextPrimary,
+    modifier: Modifier = Modifier
+) {
+    val animatedCents by animateFloatAsState(
+        targetValue = cents.toFloat(),
+        animationSpec = tween(durationMillis = 360, easing = FastOutSlowInEasing),
+        label = "AnimatedMoneyCents"
+    )
+    Text(
+        text = formatMoneyCents(animatedCents.toLong(), currency, hideAmounts),
+        fontFamily = ICDinFontFamily,
+        fontSize = fontSize,
+        fontWeight = fontWeight,
+        color = color,
+        maxLines = 1,
+        softWrap = false,
+        modifier = modifier
+    )
+}
+
+/**
+ * 顶部圆形白底图标按钮（用于 `<` 返回、账本切换、`•••` 更多等，自带弹簧按压回弹）
  */
 @Composable
 fun ICostCircleIconButton(
@@ -161,9 +239,9 @@ fun ICostCircleIconButton(
     content: @Composable () -> Unit
 ) {
     Surface(
-        onClick = onClick,
         modifier = modifier
             .size(size)
+            .iCostPressScale(pressedScale = 0.90f, onClick = onClick)
             .shadow(
                 elevation = 2.dp,
                 shape = CircleShape,
@@ -180,7 +258,7 @@ fun ICostCircleIconButton(
 }
 
 /**
- * 1:1 iCost 右上角薄荷绿插画头像按钮（点击进入全屏「设置」）
+ * 1:1 iCost 右上角薄荷绿插画头像按钮（点击进入全屏「设置」，自带弹簧按压回弹）
  */
 @Composable
 fun ICostAvatarButton(
@@ -191,6 +269,7 @@ fun ICostAvatarButton(
     Box(
         modifier = modifier
             .size(size)
+            .iCostPressScale(pressedScale = 0.90f, onClick = onClick)
             .shadow(
                 elevation = 3.dp,
                 shape = CircleShape,
@@ -199,12 +278,7 @@ fun ICostAvatarButton(
             )
             .clip(CircleShape)
             .background(Color(0xFFC6F3EA))
-            .border(2.dp, Color.White, CircleShape)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onClick
-            ),
+            .border(2.dp, Color.White, CircleShape),
         contentAlignment = Alignment.Center
     ) {
         Canvas(modifier = Modifier.size(size * 0.78f)) {

@@ -1,6 +1,17 @@
 package com.moji.ai.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -34,6 +45,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -51,6 +63,8 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -75,6 +89,7 @@ import com.moji.ai.ui.theme.ICostTextMuted
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.formatMoneyCents
+import com.moji.ai.ui.theme.iCostPressScale
 import java.util.Calendar
 import java.util.Locale
 import kotlin.math.abs
@@ -116,6 +131,25 @@ fun ICostStatisticsScreen(
     var barChartMetric by remember { mutableIntStateOf(0) } // 0: 支出, 1: 收入, 2: 结余
     var trendMetric by remember { mutableIntStateOf(0) }    // 0: 净资产, 1: 总资产, 2: 总负债
     var donutMetric by remember { mutableIntStateOf(0) }    // 0: 支出, 1: 收入
+
+    // 三大图表入场/切换动效进度（柱状拔高 / 趋势曲线铺展 / 环形展开）
+    val barProgress = remember { Animatable(0f) }
+    LaunchedEffect(rangeMode, year, month, weekOffset, filterWalletId, barChartMetric) {
+        barProgress.snapTo(0f)
+        barProgress.animateTo(1f, tween(durationMillis = 520, easing = FastOutSlowInEasing))
+    }
+
+    val trendProgress = remember { Animatable(0f) }
+    LaunchedEffect(rangeMode, year, month, weekOffset, filterWalletId, trendMetric) {
+        trendProgress.snapTo(0f)
+        trendProgress.animateTo(1f, tween(durationMillis = 600, easing = FastOutSlowInEasing))
+    }
+
+    val donutProgress = remember { Animatable(0f) }
+    LaunchedEffect(rangeMode, year, month, weekOffset, filterWalletId, donutMetric) {
+        donutProgress.snapTo(0f)
+        donutProgress.animateTo(1f, tween(durationMillis = 560, easing = FastOutSlowInEasing))
+    }
 
     // 根据维度与筛选账户过滤账单
     val filteredTxs = remember(transactions, rangeMode, year, month, weekOffset, filterWalletId) {
@@ -352,16 +386,18 @@ fun ICostStatisticsScreen(
                 ) {
                     StatsRangeMode.entries.forEach { mode ->
                         val selected = rangeMode == mode
+                        val segBg by animateColorAsState(
+                            targetValue = if (selected) Color(0xFFECECEE) else Color.Transparent,
+                            animationSpec = tween(180),
+                            label = "StatsRangeSegBg"
+                        )
                         Box(
                             modifier = Modifier
                                 .weight(1f)
                                 .height(36.dp)
                                 .clip(RoundedCornerShape(19.dp))
-                                .background(if (selected) Color(0xFFECECEE) else Color.Transparent)
-                                .clickable(
-                                    interactionSource = remember { MutableInteractionSource() },
-                                    indication = null
-                                ) { rangeMode = mode },
+                                .background(segBg)
+                                .iCostPressScale(pressedScale = 0.92f) { rangeMode = mode },
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
@@ -390,7 +426,7 @@ fun ICostStatisticsScreen(
                         modifier = Modifier
                             .size(30.dp)
                             .clip(CircleShape)
-                            .clickable {
+                            .iCostPressScale(pressedScale = 0.85f) {
                                 when (rangeMode) {
                                     StatsRangeMode.MONTH, StatsRangeMode.CUSTOM ->
                                         if (month == 1) { month = 12; year -= 1 } else month -= 1
@@ -418,7 +454,7 @@ fun ICostStatisticsScreen(
                         modifier = Modifier
                             .size(30.dp)
                             .clip(CircleShape)
-                            .clickable {
+                            .iCostPressScale(pressedScale = 0.85f) {
                                 when (rangeMode) {
                                     StatsRangeMode.MONTH, StatsRangeMode.CUSTOM ->
                                         if (month == 12) { month = 1; year += 1 } else month += 1
@@ -512,7 +548,13 @@ fun ICostStatisticsScreen(
                         onToggle = { barChartExpanded = !barChartExpanded }
                     )
 
-                    AnimatedVisibility(visible = barChartExpanded) {
+                    AnimatedVisibility(
+                        visible = barChartExpanded,
+                        enter = expandVertically(
+                            animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+                        ) + fadeIn(tween(180)),
+                        exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                    ) {
                         Column(modifier = Modifier.padding(top = 14.dp)) {
                             val maxVal = (dailyBars.maxOrNull() ?: 0L).coerceAtLeast(1000L)
                             val maxIdx = dailyBars.indexOfFirst { it == dailyBars.maxOrNull() }.coerceAtLeast(0)
@@ -521,6 +563,7 @@ fun ICostStatisticsScreen(
                                 1 -> ICostGreenIncome
                                 else -> Color(0xFF3B82F6)
                             }
+                            val animFrac = barProgress.value
 
                             // 峰值提示胶囊
                             val peakCents = dailyBars.getOrElse(maxIdx) { 0L }
@@ -582,7 +625,7 @@ fun ICostStatisticsScreen(
                                     val bh = if (v <= 0L) {
                                         3.dp.toPx()
                                     } else {
-                                        (v.toFloat() / maxVal.toFloat() * usableH).coerceAtLeast(5.dp.toPx())
+                                        ((v.toFloat() / maxVal.toFloat() * usableH) * animFrac).coerceAtLeast(4.dp.toPx())
                                     }
                                     val x = i * slotW + (slotW - barW) / 2f
                                     drawRoundRect(
@@ -637,13 +680,20 @@ fun ICostStatisticsScreen(
                         onToggle = { trendChartExpanded = !trendChartExpanded }
                     )
 
-                    AnimatedVisibility(visible = trendChartExpanded) {
+                    AnimatedVisibility(
+                        visible = trendChartExpanded,
+                        enter = expandVertically(
+                            animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+                        ) + fadeIn(tween(180)),
+                        exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                    ) {
                         Column(modifier = Modifier.padding(top = 14.dp)) {
                             val lineColor = when (trendMetric) {
                                 0 -> ICostAmberGold
                                 1 -> Color(0xFF3B82F6)
                                 else -> ICostCoralRed
                             }
+                            val trendFrac = trendProgress.value
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -723,22 +773,26 @@ fun ICostStatisticsScreen(
                                     close()
                                 }
 
-                                drawPath(
-                                    path = fillPath,
-                                    brush = Brush.verticalGradient(
-                                        colors = listOf(lineColor.copy(alpha = 0.24f), lineColor.copy(alpha = 0.0f)),
-                                        startY = 0f,
-                                        endY = h
+                                clipRect(right = w * trendFrac) {
+                                    drawPath(
+                                        path = fillPath,
+                                        brush = Brush.verticalGradient(
+                                            colors = listOf(lineColor.copy(alpha = 0.24f), lineColor.copy(alpha = 0.0f)),
+                                            startY = 0f,
+                                            endY = h
+                                        )
                                     )
-                                )
-                                drawPath(
-                                    path = linePath,
-                                    color = lineColor,
-                                    style = Stroke(width = 2.6.dp.toPx(), cap = StrokeCap.Round)
-                                )
-                                coords.lastOrNull()?.let { lastPt ->
-                                    drawCircle(color = Color.White, radius = 5.dp.toPx(), center = lastPt)
-                                    drawCircle(color = lineColor, radius = 3.5.dp.toPx(), center = lastPt)
+                                    drawPath(
+                                        path = linePath,
+                                        color = lineColor,
+                                        style = Stroke(width = 2.6.dp.toPx(), cap = StrokeCap.Round)
+                                    )
+                                }
+                                if (trendFrac > 0.92f) {
+                                    coords.lastOrNull()?.let { lastPt ->
+                                        drawCircle(color = Color.White, radius = 5.dp.toPx(), center = lastPt)
+                                        drawCircle(color = lineColor, radius = 3.5.dp.toPx(), center = lastPt)
+                                    }
                                 }
                             }
 
@@ -781,9 +835,16 @@ fun ICostStatisticsScreen(
                         onToggle = { donutChartExpanded = !donutChartExpanded }
                     )
 
-                    AnimatedVisibility(visible = donutChartExpanded) {
+                    AnimatedVisibility(
+                        visible = donutChartExpanded,
+                        enter = expandVertically(
+                            animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+                        ) + fadeIn(tween(180)),
+                        exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                    ) {
                         Column(modifier = Modifier.padding(top = 14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                             val totalTargetCents = if (donutMetric == 0) netExpenseCents else totalIncomeCents
+                            val donutFrac = donutProgress.value
 
                             if (categoryBreakdown.isEmpty() || totalTargetCents <= 0L) {
                                 Text(
@@ -807,12 +868,12 @@ fun ICostStatisticsScreen(
                                         var startDeg = -90f
 
                                         categoryBreakdown.forEachIndexed { idx, (_, pair) ->
-                                            val sweep = (pair.first.toFloat() / totalTargetCents.toFloat()) * 360f
+                                            val sweep = (pair.first.toFloat() / totalTargetCents.toFloat()) * 360f * donutFrac
                                             val sliceColor = ICostChartPalette[idx % ICostChartPalette.size]
                                             drawArc(
                                                 color = sliceColor,
                                                 startAngle = startDeg,
-                                                sweepAngle = (sweep - 1.5f).coerceAtLeast(1f),
+                                                sweepAngle = (sweep - 1.5f).coerceAtLeast(0.5f),
                                                 useCenter = false,
                                                 topLeft = topLeft,
                                                 size = Size(diameter, diameter),
@@ -820,21 +881,23 @@ fun ICostStatisticsScreen(
                                             )
 
                                             // 绘制引出短指示线与外圆点
-                                            val midRad = Math.toRadians((startDeg + sweep / 2f).toDouble())
-                                            val outerR = diameter / 2f + strokePx / 2f + 4.dp.toPx()
-                                            val tipR = outerR + 10.dp.toPx()
-                                            val cx = size.width / 2f
-                                            val cy = size.height / 2f
-                                            val p1 = Offset(
-                                                cx + (outerR * cos(midRad)).toFloat(),
-                                                cy + (outerR * sin(midRad)).toFloat()
-                                            )
-                                            val p2 = Offset(
-                                                cx + (tipR * cos(midRad)).toFloat(),
-                                                cy + (tipR * sin(midRad)).toFloat()
-                                            )
-                                            drawLine(sliceColor, p1, p2, strokeWidth = 1.5.dp.toPx())
-                                            drawCircle(sliceColor, radius = 2.5.dp.toPx(), center = p2)
+                                            if (donutFrac > 0.65f) {
+                                                val midRad = Math.toRadians((startDeg + sweep / 2f).toDouble())
+                                                val outerR = diameter / 2f + strokePx / 2f + 4.dp.toPx()
+                                                val tipR = outerR + 10.dp.toPx()
+                                                val cx = size.width / 2f
+                                                val cy = size.height / 2f
+                                                val p1 = Offset(
+                                                    cx + (outerR * cos(midRad)).toFloat(),
+                                                    cy + (outerR * sin(midRad)).toFloat()
+                                                )
+                                                val p2 = Offset(
+                                                    cx + (tipR * cos(midRad)).toFloat(),
+                                                    cy + (tipR * sin(midRad)).toFloat()
+                                                )
+                                                drawLine(sliceColor, p1, p2, strokeWidth = 1.5.dp.toPx())
+                                                drawCircle(sliceColor, radius = 2.5.dp.toPx(), center = p2)
+                                            }
 
                                             startDeg += sweep
                                         }
@@ -955,7 +1018,7 @@ fun ICostStatisticsScreen(
                                             }
                                             Spacer(modifier = Modifier.height(6.dp))
                                             LinearProgressIndicator(
-                                                progress = { ratio },
+                                                progress = { (ratio * donutFrac).coerceIn(0f, 1f) },
                                                 color = itemColor,
                                                 trackColor = ICostCellGray,
                                                 modifier = Modifier
@@ -982,14 +1045,15 @@ private fun StatsCardHeader(
     expanded: Boolean,
     onToggle: () -> Unit
 ) {
+    val chevronRot by animateFloatAsState(
+        targetValue = if (expanded) 0f else -90f,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMedium),
+        label = "StatsHeaderChevron"
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = onToggle
-            )
+            .iCostPressScale(pressedScale = 0.98f, onClick = onToggle)
             .padding(vertical = 2.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -1003,10 +1067,12 @@ private fun StatsCardHeader(
             Text(title, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = ICostTextPrimary)
         }
         Icon(
-            imageVector = if (expanded) Icons.Default.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            imageVector = Icons.Default.KeyboardArrowDown,
             contentDescription = null,
             tint = ICostTextSecondary,
-            modifier = Modifier.size(18.dp)
+            modifier = Modifier
+                .size(18.dp)
+                .graphicsLayer { rotationZ = chevronRot }
         )
     }
 }
@@ -1025,14 +1091,16 @@ private fun ChartMiniSegmentToggle(
             Row(modifier = Modifier.padding(3.dp)) {
                 options.forEachIndexed { idx, text ->
                     val sel = selectedIndex == idx
+                    val pillBg by animateColorAsState(
+                        targetValue = if (sel) ICostCardWhite else Color.Transparent,
+                        animationSpec = tween(180),
+                        label = "MiniSegBg"
+                    )
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(13.dp))
-                            .background(if (sel) ICostCardWhite else Color.Transparent)
-                            .clickable(
-                                interactionSource = remember { MutableInteractionSource() },
-                                indication = null
-                            ) { onSelect(idx) }
+                            .background(pillBg)
+                            .iCostPressScale(pressedScale = 0.92f) { onSelect(idx) }
                             .padding(horizontal = 16.dp, vertical = 5.dp),
                         contentAlignment = Alignment.Center
                     ) {
@@ -1072,7 +1140,13 @@ private fun ICostBentoStatsCard(
                 onToggle = onToggle
             )
 
-            AnimatedVisibility(visible = expanded) {
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically(
+                    animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+                ) + fadeIn(tween(180)),
+                exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+            ) {
                 Column(
                     modifier = Modifier.padding(top = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)

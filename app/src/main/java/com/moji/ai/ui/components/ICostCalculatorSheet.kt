@@ -1,5 +1,20 @@
 package com.moji.ai.ui.components
 
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -41,6 +56,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -48,6 +64,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -74,6 +91,7 @@ import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.WalletBrandAvatar
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
+import com.moji.ai.ui.theme.iCostPressScale
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -338,11 +356,16 @@ fun ICostCalculatorSheet(
                         )
                         modes.forEach { (mode, label) ->
                             val selected = txType == mode
+                            val modeBgColor by animateColorAsState(
+                                targetValue = if (selected) Color(0xFFECECEE) else Color.Transparent,
+                                animationSpec = tween(200),
+                                label = "CalcModePillBg"
+                            )
                             Box(
                                 modifier = Modifier
                                     .clip(RoundedCornerShape(19.dp))
-                                    .background(if (selected) Color(0xFFECECEE) else Color.Transparent)
-                                    .clickable {
+                                    .background(modeBgColor)
+                                    .iCostPressScale(pressedScale = 0.92f) {
                                         txType = mode
                                         if (mode == TransactionType.INCOME) {
                                             selectedMainCategory = CategoryCatalog.incomeCategories.first().name
@@ -372,20 +395,41 @@ fun ICostCalculatorSheet(
                     fontWeight = FontWeight.Medium,
                     color = ICostBlueAccent,
                     modifier = Modifier
-                        .clickable { showLedgerPicker = true }
+                        .iCostPressScale(pressedScale = 0.92f) { showLedgerPicker = true }
                         .padding(horizontal = 4.dp, vertical = 4.dp)
                 )
             }
 
             // 2. 中部：5 列分类网格（含右上角 `•••` 子分类角标 + 展开式 5 列二级分类盒） 或 转账双账户卡片
-            Box(modifier = Modifier.weight(1f)) {
-                if (txType == TransactionType.EXPENSE || txType == TransactionType.INCOME) {
-                    val categories = if (txType == TransactionType.EXPENSE) {
+            var swapRotCount by remember { mutableIntStateOf(0) }
+            val swapAngle by animateFloatAsState(
+                targetValue = swapRotCount * 180f,
+                animationSpec = spring(dampingRatio = 0.62f, stiffness = Spring.StiffnessMedium),
+                label = "TransferSwapAngle"
+            )
+
+            AnimatedContent(
+                targetState = txType,
+                transitionSpec = {
+                    (slideInHorizontally(
+                        initialOffsetX = { it / 8 },
+                        animationSpec = tween(220, easing = FastOutSlowInEasing)
+                    ) + fadeIn(tween(180))) togetherWith
+                        (slideOutHorizontally(
+                            targetOffsetX = { -it / 8 },
+                            animationSpec = tween(180, easing = FastOutSlowInEasing)
+                        ) + fadeOut(tween(140)))
+                },
+                modifier = Modifier.weight(1f),
+                label = "CalculatorModeBodyTransition"
+            ) { currentMode ->
+                if (currentMode == TransactionType.EXPENSE || currentMode == TransactionType.INCOME) {
+                    val categories = if (currentMode == TransactionType.EXPENSE) {
                         CategoryCatalog.expenseCategories
                     } else {
                         CategoryCatalog.incomeCategories
                     }
-                    val activeColor = if (txType == TransactionType.EXPENSE) ICostCoralRed else ICostGreenIncome
+                    val activeColor = if (currentMode == TransactionType.EXPENSE) ICostCoralRed else ICostGreenIncome
                     val rows = remember(categories) { categories.chunked(5) }
 
                     LazyColumn(
@@ -402,24 +446,39 @@ fun ICostCalculatorSheet(
                                     ) {
                                         rowItems.forEach { cat ->
                                             val isSelected = selectedMainCategory == cat.name
+                                            val circleBg by animateColorAsState(
+                                                targetValue = if (isSelected) activeColor else Color(0xFFECECEE),
+                                                animationSpec = tween(180),
+                                                label = "CatCircleBg"
+                                            )
+                                            val circleScale by animateFloatAsState(
+                                                targetValue = if (isSelected) 1.07f else 1.0f,
+                                                animationSpec = spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMedium),
+                                                label = "CatCircleScale"
+                                            )
                                             Column(
                                                 modifier = Modifier
                                                     .weight(1f)
-                                                    .clickable(
-                                                        interactionSource = remember { MutableInteractionSource() },
-                                                        indication = null
-                                                    ) {
+                                                    .iCostPressScale(pressedScale = 0.88f) {
                                                         selectedMainCategory = cat.name
                                                         selectedSubCategory = ""
                                                     },
                                                 horizontalAlignment = Alignment.CenterHorizontally
                                             ) {
-                                                Box(modifier = Modifier.size(52.dp), contentAlignment = Alignment.Center) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(52.dp)
+                                                        .graphicsLayer {
+                                                            scaleX = circleScale
+                                                            scaleY = circleScale
+                                                        },
+                                                    contentAlignment = Alignment.Center
+                                                ) {
                                                     Box(
                                                         modifier = Modifier
                                                             .size(48.dp)
                                                             .clip(CircleShape)
-                                                            .background(if (isSelected) activeColor else Color(0xFFECECEE)),
+                                                            .background(circleBg),
                                                         contentAlignment = Alignment.Center
                                                     ) {
                                                         ICostAssetImage(
@@ -462,65 +521,72 @@ fun ICostCalculatorSheet(
                                         }
                                     }
 
-                                    // 1:1 展开当前选中主分类的 5 列浅灰圆角二级分类盒（对齐 04_add_record_sheet.png）
+                                    // 1:1 展开当前选中主分类的 5 列浅灰圆角二级分类盒（弹簧展开/收起过渡）
                                     val expandedCat = rowItems.firstOrNull {
                                         it.name == selectedMainCategory && it.subCategories.isNotEmpty()
                                     }
-                                    if (expandedCat != null) {
-                                        Spacer(modifier = Modifier.height(10.dp))
-                                        Surface(
-                                            shape = RoundedCornerShape(18.dp),
-                                            color = Color(0xFFECECEE),
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            val subRows = expandedCat.subCategories.chunked(5)
-                                            Column(
-                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
-                                                verticalArrangement = Arrangement.spacedBy(10.dp)
-                                            ) {
-                                                subRows.forEach { subRow ->
-                                                    Row(
-                                                        modifier = Modifier.fillMaxWidth(),
-                                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    AnimatedVisibility(
+                                        visible = expandedCat != null,
+                                        enter = expandVertically(
+                                            animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+                                        ) + fadeIn(tween(180)),
+                                        exit = shrinkVertically(tween(160)) + fadeOut(tween(120))
+                                    ) {
+                                        if (expandedCat != null) {
+                                            Column {
+                                                Spacer(modifier = Modifier.height(10.dp))
+                                                Surface(
+                                                    shape = RoundedCornerShape(18.dp),
+                                                    color = Color(0xFFECECEE),
+                                                    modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                    val subRows = expandedCat.subCategories.chunked(5)
+                                                    Column(
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
+                                                        verticalArrangement = Arrangement.spacedBy(10.dp)
                                                     ) {
-                                                        subRow.forEach { sub ->
-                                                            val subSelected = selectedSubCategory == sub.name
-                                                            Column(
-                                                                modifier = Modifier
-                                                                    .weight(1f)
-                                                                    .clickable(
-                                                                        interactionSource = remember { MutableInteractionSource() },
-                                                                        indication = null
-                                                                    ) {
-                                                                        selectedSubCategory = if (subSelected) "" else sub.name
-                                                                    },
-                                                                horizontalAlignment = Alignment.CenterHorizontally
+                                                        subRows.forEach { subRow ->
+                                                            Row(
+                                                                modifier = Modifier.fillMaxWidth(),
+                                                                horizontalArrangement = Arrangement.SpaceBetween
                                                             ) {
-                                                                Box(
-                                                                    modifier = Modifier
-                                                                        .size(40.dp)
-                                                                        .clip(CircleShape)
-                                                                        .background(if (subSelected) activeColor else Color.Transparent),
-                                                                    contentAlignment = Alignment.Center
-                                                                ) {
-                                                                    ICostAssetImage(
-                                                                        assetFile = sub.assetFile,
-                                                                        tint = if (subSelected) Color.White else ICostSlateIcon,
-                                                                        modifier = Modifier.size(23.dp)
-                                                                    )
+                                                                subRow.forEach { sub ->
+                                                                    val subSelected = selectedSubCategory == sub.name
+                                                                    Column(
+                                                                        modifier = Modifier
+                                                                            .weight(1f)
+                                                                            .iCostPressScale(pressedScale = 0.88f) {
+                                                                                selectedSubCategory = if (subSelected) "" else sub.name
+                                                                            },
+                                                                        horizontalAlignment = Alignment.CenterHorizontally
+                                                                    ) {
+                                                                        Box(
+                                                                            modifier = Modifier
+                                                                                .size(40.dp)
+                                                                                .clip(CircleShape)
+                                                                                .background(if (subSelected) activeColor else Color.Transparent),
+                                                                            contentAlignment = Alignment.Center
+                                                                        ) {
+                                                                            ICostAssetImage(
+                                                                                assetFile = sub.assetFile,
+                                                                                tint = if (subSelected) Color.White else ICostSlateIcon,
+                                                                                modifier = Modifier.size(23.dp)
+                                                                            )
+                                                                        }
+                                                                        Spacer(modifier = Modifier.height(3.dp))
+                                                                        Text(
+                                                                            text = sub.name,
+                                                                            fontSize = 11.sp,
+                                                                            color = if (subSelected) activeColor else ICostTextPrimary,
+                                                                            fontWeight = if (subSelected) FontWeight.Bold else FontWeight.Normal,
+                                                                            maxLines = 1
+                                                                        )
+                                                                    }
                                                                 }
-                                                                Spacer(modifier = Modifier.height(3.dp))
-                                                                Text(
-                                                                    text = sub.name,
-                                                                    fontSize = 11.sp,
-                                                                    color = if (subSelected) activeColor else ICostTextPrimary,
-                                                                    fontWeight = if (subSelected) FontWeight.Bold else FontWeight.Normal,
-                                                                    maxLines = 1
-                                                                )
+                                                                repeat(5 - subRow.size) {
+                                                                    Spacer(modifier = Modifier.weight(1f))
+                                                                }
                                                             }
-                                                        }
-                                                        repeat(5 - subRow.size) {
-                                                            Spacer(modifier = Modifier.weight(1f))
                                                         }
                                                     }
                                                 }
@@ -532,7 +598,7 @@ fun ICostCalculatorSheet(
                         }
                     }
                 } else {
-                    // 1:1 iCost 转账模式（对齐 12_transfer_mode.png）：两张白卡 + 中间 ⇅ 互换按钮
+                    // 1:1 iCost 转账模式（对齐 12_transfer_mode.png）：两张白卡 + 中间 ⇅ 旋转互换按钮
                     val fromWallet = wallets.firstOrNull { it.id == sourceWalletId }
                     val toWallet = wallets.firstOrNull { it.id == targetWalletId }
 
@@ -543,12 +609,12 @@ fun ICostCalculatorSheet(
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Surface(
-                            onClick = { showWalletPickerForTarget = false },
                             shape = RoundedCornerShape(20.dp),
                             color = ICostCardWhite,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(66.dp)
+                                .iCostPressScale(pressedScale = 0.97f) { showWalletPickerForTarget = false }
                         ) {
                             Row(
                                 modifier = Modifier
@@ -588,13 +654,16 @@ fun ICostCalculatorSheet(
                         ) {
                             Box(
                                 modifier = Modifier
-                                    .size(32.dp)
+                                    .size(36.dp)
                                     .clip(CircleShape)
-                                    .clickable {
+                                    .background(ICostCardWhite)
+                                    .iCostPressScale(pressedScale = 0.85f) {
+                                        swapRotCount += 1
                                         val tmp = sourceWalletId
                                         sourceWalletId = targetWalletId
                                         targetWalletId = tmp
-                                    },
+                                    }
+                                    .graphicsLayer { rotationZ = swapAngle },
                                 contentAlignment = Alignment.Center
                             ) {
                                 ICostAssetImage(
@@ -605,12 +674,12 @@ fun ICostCalculatorSheet(
                         }
 
                         Surface(
-                            onClick = { showWalletPickerForTarget = true },
                             shape = RoundedCornerShape(20.dp),
                             color = ICostCardWhite,
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(66.dp)
+                                .iCostPressScale(pressedScale = 0.97f) { showWalletPickerForTarget = true }
                         ) {
                             Row(
                                 modifier = Modifier
@@ -843,7 +912,7 @@ fun ICostCalculatorSheet(
                     ) {
                         row.forEach { key ->
                             val isDoneKey = key == "DONE"
-                            val bgColor = if (isDoneKey) {
+                            val targetBgColor = if (isDoneKey) {
                                 when (txType) {
                                     TransactionType.EXPENSE -> ICostCoralRed
                                     TransactionType.INCOME -> ICostGreenIncome
@@ -852,42 +921,47 @@ fun ICostCalculatorSheet(
                             } else {
                                 ICostCardWhite
                             }
+                            val bgColor by animateColorAsState(
+                                targetValue = targetBgColor,
+                                animationSpec = tween(200),
+                                label = "CalcKeyBg"
+                            )
 
                             Surface(
-                                onClick = {
-                                    when (key) {
-                                        "BACK" -> if (expr.isNotEmpty()) expr = expr.dropLast(1)
-                                        "+×" -> appendOperator('+', '×')
-                                        "-÷" -> appendOperator('-', '÷')
-                                        "." -> {
-                                            val lastPart = expr.split('+', '-', '×', '÷').lastOrNull() ?: ""
-                                            if (!lastPart.contains('.')) {
-                                                expr = if (lastPart.isEmpty()) "${expr}0." else "$expr."
-                                            }
-                                        }
-                                        "AGAIN" -> buildAndSubmit(keepOpen = true)
-                                        "DONE" -> {
-                                            if (hasPendingOperator) {
-                                                val res = evaluateExpr(expr)
-                                                expr = String.format(Locale.US, "%.2f", res).trimEnd('0').trimEnd('.')
-                                            } else {
-                                                buildAndSubmit(keepOpen = false)
-                                            }
-                                        }
-                                        else -> {
-                                            val lastPart = expr.split('+', '-', '×', '÷').lastOrNull() ?: ""
-                                            val decimals = lastPart.substringAfter('.', missingDelimiterValue = "")
-                                            if (!lastPart.contains('.') || decimals.length < 2) {
-                                                expr += key
-                                            }
-                                        }
-                                    }
-                                },
                                 shape = RoundedCornerShape(16.dp),
                                 color = bgColor,
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(48.dp)
+                                    .iCostPressScale(pressedScale = 0.91f) {
+                                        when (key) {
+                                            "BACK" -> if (expr.isNotEmpty()) expr = expr.dropLast(1)
+                                            "+×" -> appendOperator('+', '×')
+                                            "-÷" -> appendOperator('-', '÷')
+                                            "." -> {
+                                                val lastPart = expr.split('+', '-', '×', '÷').lastOrNull() ?: ""
+                                                if (!lastPart.contains('.')) {
+                                                    expr = if (lastPart.isEmpty()) "${expr}0." else "$expr."
+                                                }
+                                            }
+                                            "AGAIN" -> buildAndSubmit(keepOpen = true)
+                                            "DONE" -> {
+                                                if (hasPendingOperator) {
+                                                    val res = evaluateExpr(expr)
+                                                    expr = String.format(Locale.US, "%.2f", res).trimEnd('0').trimEnd('.')
+                                                } else {
+                                                    buildAndSubmit(keepOpen = false)
+                                                }
+                                            }
+                                            else -> {
+                                                val lastPart = expr.split('+', '-', '×', '÷').lastOrNull() ?: ""
+                                                val decimals = lastPart.substringAfter('.', missingDelimiterValue = "")
+                                                if (!lastPart.contains('.') || decimals.length < 2) {
+                                                    expr += key
+                                                }
+                                            }
+                                        }
+                                    }
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
                                     when (key) {
@@ -1125,10 +1199,15 @@ private fun ICostOptionPill(
     activeTextColor: Color = ICostTextPrimary,
     onClick: () -> Unit
 ) {
+    val bgColor by animateColorAsState(
+        targetValue = if (active) activeBg else ICostCardWhite,
+        animationSpec = tween(180),
+        label = "OptionPillBg"
+    )
     Surface(
-        onClick = onClick,
         shape = RoundedCornerShape(16.dp),
-        color = if (active) activeBg else ICostCardWhite
+        color = bgColor,
+        modifier = Modifier.iCostPressScale(pressedScale = 0.92f, onClick = onClick)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
