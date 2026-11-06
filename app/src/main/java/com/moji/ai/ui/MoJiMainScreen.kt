@@ -321,7 +321,18 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onDepositSavingPlan = { planId, yuan -> viewModel.depositToSavingPlan(planId, yuan) },
                     onPayInstallmentPeriod = { inst -> viewModel.payNextInstallmentPeriod(inst) },
                     onOpenSettingsPage = { showSettingsPage = true },
-                    onSubpageActiveChange = { isAssetSubpageOpen = it }
+                    onSubpageActiveChange = { isAssetSubpageOpen = it },
+                    onAddSavingPlan = { title, targetYuan, savedYuan, deadline ->
+                        viewModel.addSavingPlan(title, targetYuan, savedYuan, deadline)
+                    },
+                    onDeleteSavingPlan = { viewModel.deleteSavingPlan(it) },
+                    onAddInstallmentPlan = { title, walletId, totalYuan, feeYuan, periods ->
+                        viewModel.addInstallmentPlan(title, walletId, totalYuan, feeYuan, periods)
+                    },
+                    onDeleteInstallmentPlan = { viewModel.deleteInstallmentPlan(it) },
+                    onAddRecurringRule = { title, amountYuan, currency, category, walletId, frequency ->
+                        viewModel.addRecurringRule(title, amountYuan, currency, category, walletId, frequency)
+                    }
                 )
 
                 else -> ICostStatisticsScreen(
@@ -329,7 +340,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     wallets = wallets,
                     initialYear = selectedYear,
                     initialMonth = selectedMonth,
-                    onOpenAiSandbox = { showAiSandboxSheet = true },
+                    currentLedger = currentLedger,
+                    hideAmounts = hideAssetAmounts,
                     onOpenSettingsPage = { showSettingsPage = true }
                 )
             }

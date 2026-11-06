@@ -347,10 +347,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 currency = "CNY",
                 exchangeRateToCny = 1.0,
                 amountCnyCents = totalPeriodCents,
-                feeCents = plan.feePerPeriodCents,
+                // 手续费已包含在 amountCents 中；再填 feeCents 会被账务引擎重复扣款
+                feeCents = 0L,
                 category = plan.category,
                 merchant = "${plan.title} (${nextPeriod}/${plan.totalPeriods}期)",
-                note = "分期第${nextPeriod}期入账",
+                note = if (plan.feePerPeriodCents > 0L) {
+                    "分期第${nextPeriod}期，含手续费 ¥${String.format("%.2f", plan.feePerPeriodCents / 100.0)}"
+                } else {
+                    "分期第${nextPeriod}期"
+                },
                 sourceWalletId = plan.walletId,
                 tags = "分期",
                 captureSource = "INSTALLMENT"
