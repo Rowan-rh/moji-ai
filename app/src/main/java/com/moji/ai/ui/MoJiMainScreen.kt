@@ -88,13 +88,17 @@ import androidx.compose.ui.unit.sp
 import com.moji.ai.ai.AiConfig
 import com.moji.ai.ai.AiProviderType
 import com.moji.ai.ai.MerchantMemoryEntry
+import com.moji.ai.ai.SmartConditionRule
 import com.moji.ai.data.backup.BackupAndCsvTransferEngine
 import com.moji.ai.data.backup.CsvParsePreviewResult
+import com.moji.ai.data.backup.WebDavConfig
 import com.moji.ai.data.local.TransactionEntity
+import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.service.CaptureEventOutcome
 import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.service.PaymentAccessibilityService
+import com.moji.ai.service.RomKeepAliveGuideHelper
 import com.moji.ai.ui.components.ICostCalculatorSheet
 import com.moji.ai.ui.components.MonthlyCalendarSheet
 import com.moji.ai.ui.components.TransactionDetailSheet
@@ -137,7 +141,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val savingPlans by viewModel.savingPlans.collectAsState()
     val installmentPlans by viewModel.installmentPlans.collectAsState()
     val merchantMemories by viewModel.merchantMemories.collectAsState()
+    val smartRules by viewModel.smartRules.collectAsState()
     val observabilityLogs by viewModel.observabilityLogs.collectAsState()
+    val webDavConfig by viewModel.webDavConfig.collectAsState()
 
     var selectedTab by remember { mutableIntStateOf(0) } // 0: 账本, 1: 资产, 2: 统计
 
@@ -170,7 +176,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var showAiSettingsSheet by remember { mutableStateOf(false) }
     var showBudgetDialog by remember { mutableStateOf(false) }
     var showBackupTransferSheet by remember { mutableStateOf(false) }
-    var backupInitialTab by remember { mutableIntStateOf(0) } // 0: 导入CSV, 1: 导出CSV, 2: 全量备份恢复
+    var backupInitialTab by remember { mutableIntStateOf(0) } // 0: 导入CSV, 1: 导出CSV, 2: 全量备份恢复, 3: WebDAV云同步
+    var showKeepAliveGuideSheet by remember { mutableStateOf(false) }
+    var showBatchReimburseSheet by remember { mutableStateOf(false) }
 
     // 缓存最后一次打开的全屏日历与账单详情数据，确保退出动画期间内容不闪空
     var cachedCalendarMonthTxs by remember { mutableStateOf<List<TransactionEntity>>(emptyList()) }
@@ -368,6 +376,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     },
                     onSaveAsTemplate = { tplTx ->
                         viewModel.saveTemplateFromTransaction(tplTx)
+                    },
+                    onSplitTransaction = { expId, catA, yuanA, catB, noteB ->
+                        viewModel.splitExpenseTransaction(expId, catA, yuanA, catB, noteB)
                     }
                 )
             }
@@ -404,6 +415,13 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onOpenBackupRestore = {
                     backupInitialTab = 2
                     showBackupTransferSheet = true
+                },
+                onOpenWebDavSync = {
+                    backupInitialTab = 3
+                    showBackupTransferSheet = true
+                },
+                onOpenBatchReimburse = {
+                    showBatchReimburseSheet = true
                 }
             )
         }
@@ -425,6 +443,11 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onUpdateAiConfig = { viewModel.updateAiConfig(it) },
                 onOpenAiModelConfig = { showAiSettingsSheet = true },
                 onOpenAiSandbox = { showAiSandboxSheet = true },
+                onOpenKeepAliveGuide = { showKeepAliveGuideSheet = true },
+                smartRules = smartRules,
+                onToggleSmartRule = { id, enabled -> viewModel.toggleSmartRule(id, enabled) },
+                onAddSmartRule = { rule -> viewModel.upsertSmartRule(rule) },
+                onDeleteSmartRule = { id -> viewModel.deleteSmartRule(id) },
                 merchantMemories = merchantMemories,
                 onRemoveMerchantMemory = { viewModel.deleteMerchantMemory(it) },
                 observabilityLogs = observabilityLogs,
@@ -520,6 +543,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             BackupAndCsvTransferSheet(
                 initialTab = backupInitialTab,
                 statusMessage = sandboxStatus,
+                webDavConfig = webDavConfig,
                 onPreviewCsv = { csv -> viewModel.previewCsvImport(csv) },
                 onCommitCsvImport = { csv, applyBalance, onDone ->
                     viewModel.commitCsvImport(csv, applyBalance, onDone)
@@ -528,6 +552,38 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onExportFullBackup = { viewModel.generateFullBackupJson() },
                 onRestoreFullBackup = { json, onDone ->
                     viewModel.restoreFromBackupJson(json, onDone)
+                },
+                onUploadWebDav = { cfg, onDone ->
+                    viewModel.uploadBackupToWebDav(cfg, onDone)
+                },
+                onRestoreWebDav = { cfg, onDone ->
+                    viewModel.restoreBackupFromWebDav(cfg, onDone)
+                }
+            )
+        }
+    }
+
+    // 国产 ROM 保活与 Android 13+ 受限设置一站式诊断向导面板
+    if (showKeepAliveGuideSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showKeepAliveGuideSheet = false },
+            containerColor = ICostCardWhite
+        ) {
+            RomKeepAliveGuideSheet()
+        }
+    }
+
+    // 批量报销核销中心面板
+    if (showBatchReimburseSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showBatchReimburseSheet = false },
+            containerColor = ICostCardWhite
+        ) {
+            BatchReimbursementSheet(
+                transactions = transactions,
+                wallets = wallets,
+                onBatchSettle = { ids, recvWalletId, onDone ->
+                    viewModel.batchSettleReimbursements(ids, recvWalletId, onDone)
                 }
             )
         }
@@ -687,7 +743,9 @@ private fun ICostSettingsFullScreen(
     onOpenAiSandbox: () -> Unit,
     onOpenCsvImport: () -> Unit = {},
     onOpenCsvExport: () -> Unit = {},
-    onOpenBackupRestore: () -> Unit = {}
+    onOpenBackupRestore: () -> Unit = {},
+    onOpenWebDavSync: () -> Unit = {},
+    onOpenBatchReimburse: () -> Unit = {}
 ) {
     BackHandler(onBack = onBack)
 
@@ -800,7 +858,7 @@ private fun ICostSettingsFullScreen(
                     rows = listOf(
                         SettingRowDef("setting_multi_book.webp", "多账本", currentLedger),
                         SettingRowDef("setting_auto.webp", "智能记账", "去开启", onClick = onOpenSmartBookkeeping),
-                        SettingRowDef("setting_backup.webp", "全量快照备份与恢复", ".mojibackup", onClick = onOpenBackupRestore)
+                        SettingRowDef("setting_backup.webp", "全量快照与 WebDAV 云同步", "备份/恢复", onClick = onOpenWebDavSync)
                     )
                 )
             }
@@ -820,7 +878,7 @@ private fun ICostSettingsFullScreen(
                         SettingRowDef("setting_period.webp", "周期记账"),
                         SettingRowDef("setting_installment.webp", "分期管理"),
                         SettingRowDef("setting_save_money.webp", "存钱计划"),
-                        SettingRowDef("setting_reimbursement.webp", "报销管理"),
+                        SettingRowDef("setting_reimbursement.webp", "报销管理 (批量核销)", "一键结算", onClick = onOpenBatchReimburse),
                         SettingRowDef("setting_refund.webp", "退款管理"),
                         SettingRowDef("setting_currency.webp", "货币和汇率", "人民币 (CNY)"),
                         SettingRowDef("setting_template.webp", "记账模板"),
@@ -910,6 +968,11 @@ private fun ICostSmartBookkeepingFullScreen(
     onUpdateAiConfig: (AiConfig) -> Unit,
     onOpenAiModelConfig: () -> Unit,
     onOpenAiSandbox: () -> Unit,
+    onOpenKeepAliveGuide: () -> Unit = {},
+    smartRules: List<SmartConditionRule> = emptyList(),
+    onToggleSmartRule: (Long, Boolean) -> Unit = { _, _ -> },
+    onAddSmartRule: (SmartConditionRule) -> Unit = {},
+    onDeleteSmartRule: (Long) -> Unit = {},
     merchantMemories: List<MerchantMemoryEntry> = emptyList(),
     onRemoveMerchantMemory: (String) -> Unit = {},
     observabilityLogs: List<CaptureObservabilityLogEntry> = emptyList(),
@@ -927,6 +990,7 @@ private fun ICostSmartBookkeepingFullScreen(
     var autoMatchCategory by remember { mutableStateOf(true) }
     var autoMatchWallet by remember { mutableStateOf(true) }
     var mergeRuleEnabled by remember { mutableStateOf(true) }
+    var showAddSmartRuleDialog by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -997,11 +1061,9 @@ private fun ICostSmartBookkeepingFullScreen(
                         )
                         HorizontalDivider(color = ICostDivider)
                         SmartArrowRow(
-                            title = "保活设置",
-                            trailing = "已优化",
-                            onClick = {
-                                context.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-                            }
+                            title = "国产 ROM 保活与 Android 13+ 受限设置诊断向导",
+                            trailing = "一键诊断",
+                            onClick = onOpenKeepAliveGuide
                         )
                     }
                 }
@@ -1061,6 +1123,87 @@ private fun ICostSmartBookkeepingFullScreen(
                             trailing = "立即模拟",
                             onClick = onOpenAiSandbox
                         )
+                    }
+                }
+            }
+
+            // 可视化条件规则引擎 When -> Then（对标 pennywiseai-tracker Smart Rules Engine）
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "可视化条件规则引擎 When ➔ Then (${smartRules.count { it.enabled }}/${smartRules.size} 启用)",
+                            fontSize = 13.sp,
+                            color = ICostTextSecondary
+                        )
+                        Text(
+                            text = "+ 新增规则",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ICostBlueAccent,
+                            modifier = Modifier.clickable { showAddSmartRuleDialog = true }
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = ICostCardWhite,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                            smartRules.forEachIndexed { idx, rule ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                        Text(
+                                            text = rule.name,
+                                            fontSize = 14.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ICostTextPrimary
+                                        )
+                                        Text(
+                                            text = "当：${rule.conditionSummary()}",
+                                            fontSize = 11.sp,
+                                            color = ICostTextSecondary
+                                        )
+                                        Text(
+                                            text = "则：${rule.actionSummary()}",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = if (rule.interceptIgnore) ICostCoralRed else ICostBlueAccent
+                                        )
+                                    }
+                                    Text(
+                                        text = "删除",
+                                        fontSize = 11.sp,
+                                        color = ICostCoralRed,
+                                        modifier = Modifier
+                                            .clickable { onDeleteSmartRule(rule.id) }
+                                            .padding(horizontal = 6.dp, vertical = 4.dp)
+                                    )
+                                    Switch(
+                                        checked = rule.enabled,
+                                        onCheckedChange = { onToggleSmartRule(rule.id, it) },
+                                        colors = SwitchDefaults.colors(
+                                            checkedThumbColor = Color.White,
+                                            checkedTrackColor = ICostBlueAccent
+                                        )
+                                    )
+                                }
+                                if (idx < smartRules.lastIndex) {
+                                    HorizontalDivider(color = ICostDivider)
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1261,6 +1404,100 @@ private fun ICostSmartBookkeepingFullScreen(
                 }
             }
         }
+    }
+
+    if (showAddSmartRuleDialog) {
+        var ruleName by remember { mutableStateOf("") }
+        var keywordStr by remember { mutableStateOf("") }
+        var minYuanStr by remember { mutableStateOf("") }
+        var maxYuanStr by remember { mutableStateOf("") }
+        var targetCat by remember { mutableStateOf("餐饮-三餐") }
+        var markReimburse by remember { mutableStateOf(false) }
+        var tagStr by remember { mutableStateOf("") }
+
+        AlertDialog(
+            onDismissRequest = { showAddSmartRuleDialog = false },
+            containerColor = ICostCardWhite,
+            title = { Text("新增条件规则 (When ➔ Then)", fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = ruleName,
+                        onValueChange = { ruleName = it },
+                        label = { Text("规则名称 (如：公司园区晚餐报销)") },
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = keywordStr,
+                        onValueChange = { keywordStr = it },
+                        label = { Text("当包含关键词 (逗号分隔，如：美团,饿了么)") },
+                        singleLine = true
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = minYuanStr,
+                            onValueChange = { minYuanStr = it },
+                            label = { Text("最低金额(选填)") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = maxYuanStr,
+                            onValueChange = { maxYuanStr = it },
+                            label = { Text("最高金额(选填)") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                    }
+                    OutlinedTextField(
+                        value = targetCat,
+                        onValueChange = { targetCat = it },
+                        label = { Text("则自动归入分类 (如：餐饮-三餐)") },
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = tagStr,
+                        onValueChange = { tagStr = it },
+                        label = { Text("自动附加标签 (选填)") },
+                        singleLine = true
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("自动标记为「待报销」", fontSize = 13.sp, color = ICostTextPrimary)
+                        Switch(checked = markReimburse, onCheckedChange = { markReimburse = it })
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = ruleName.isNotBlank() && (keywordStr.isNotBlank() || minYuanStr.isNotBlank() || maxYuanStr.isNotBlank()),
+                    onClick = {
+                        onAddSmartRule(
+                            SmartConditionRule(
+                                name = ruleName.trim(),
+                                enabled = true,
+                                keywordContains = keywordStr.trim(),
+                                minAmountYuan = minYuanStr.toDoubleOrNull(),
+                                maxAmountYuan = maxYuanStr.toDoubleOrNull(),
+                                targetCategory = targetCat.trim(),
+                                markReimbursable = markReimburse,
+                                appendTag = tagStr.trim()
+                            )
+                        )
+                        showAddSmartRuleDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent)
+                ) {
+                    Text("保存规则")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAddSmartRuleDialog = false }) { Text("取消") }
+            }
+        )
     }
 }
 
@@ -1667,11 +1904,14 @@ private fun isAccessibilityServiceEnabled(context: Context): Boolean {
 private fun BackupAndCsvTransferSheet(
     initialTab: Int,
     statusMessage: String?,
+    webDavConfig: WebDavConfig = WebDavConfig(),
     onPreviewCsv: (String) -> CsvParsePreviewResult,
     onCommitCsvImport: (String, Boolean, (String) -> Unit) -> Unit,
     onExportCsv: () -> String,
     onExportFullBackup: () -> String,
-    onRestoreFullBackup: (String, (String) -> Unit) -> Unit
+    onRestoreFullBackup: (String, (String) -> Unit) -> Unit,
+    onUploadWebDav: (WebDavConfig, (String) -> Unit) -> Unit = { _, _ -> },
+    onRestoreWebDav: (WebDavConfig, (String) -> Unit) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     var currentTab by remember(initialTab) { mutableIntStateOf(initialTab) }
@@ -1681,6 +1921,11 @@ private fun BackupAndCsvTransferSheet(
     var exportedCsvText by remember { mutableStateOf("") }
     var backupJsonText by remember { mutableStateOf("") }
     var localBanner by remember { mutableStateOf<String?>(null) }
+
+    var davUrl by remember(webDavConfig) { mutableStateOf(webDavConfig.serverUrl) }
+    var davUser by remember(webDavConfig) { mutableStateOf(webDavConfig.username) }
+    var davPassword by remember(webDavConfig) { mutableStateOf(webDavConfig.appPassword) }
+    var davFileName by remember(webDavConfig) { mutableStateOf(webDavConfig.remoteFileName) }
 
     val clipboard = remember {
         context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
@@ -1696,17 +1941,21 @@ private fun BackupAndCsvTransferSheet(
     ) {
         item {
             Text(
-                text = "账单迁移与全量快照备份",
+                text = "账单迁移、全量备份与 WebDAV 云同步",
                 fontSize = 20.sp,
                 fontWeight = FontWeight.ExtraBold,
                 color = ICostTextPrimary
             )
             Spacer(modifier = Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
                 val tabs = listOf(
-                    0 to "账单导入 (CSV)",
-                    1 to "账单导出 (CSV)",
-                    2 to "全量备份 (.mojibackup)"
+                    0 to "导入 CSV",
+                    1 to "导出 CSV",
+                    2 to "全量快照 (.mojibackup)",
+                    3 to "WebDAV 云同步"
                 )
                 tabs.forEach { (idx, title) ->
                     FilterChip(
@@ -1913,7 +2162,7 @@ private fun BackupAndCsvTransferSheet(
                     )
                 }
             }
-        } else {
+        } else if (currentTab == 2) {
             item {
                 Text(
                     text = "全量备份包含：资产/负债钱包、全部历史账单、周期记账规则、商户记忆自学习库、多账本与预算设置（内置 BackupSchemaGuard 版本防崩保护）：",
@@ -1986,6 +2235,86 @@ private fun BackupAndCsvTransferSheet(
                     Text("立即从 JSON 快照恢复全量数据", fontWeight = FontWeight.Bold)
                 }
             }
+        } else {
+            item {
+                Text(
+                    text = "支持坚果云 (https://dav.jianguoyun.com/dav/MoJi/)、Nextcloud、群晖 Synology、Alist 等任意标准 WebDAV 服务自托管云端备份：",
+                    fontSize = 12.sp,
+                    color = ICostTextSecondary
+                )
+            }
+            item {
+                OutlinedTextField(
+                    value = davUrl,
+                    onValueChange = { davUrl = it },
+                    label = { Text("WebDAV 目录地址 (URL)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = davUser,
+                    onValueChange = { davUser = it },
+                    label = { Text("WebDAV 账号 / 邮箱") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = davPassword,
+                    onValueChange = { davPassword = it },
+                    label = { Text("WebDAV 应用专用密码") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                OutlinedTextField(
+                    value = davFileName,
+                    onValueChange = { davFileName = it },
+                    label = { Text("远端备份文件名") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+            }
+            item {
+                val activeCfg = WebDavConfig(
+                    serverUrl = davUrl.trim(),
+                    username = davUser.trim(),
+                    appPassword = davPassword.trim(),
+                    remoteFileName = davFileName.trim().ifBlank { "moji_latest.mojibackup" },
+                    lastSyncTimeMillis = webDavConfig.lastSyncTimeMillis
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            localBanner = "正在上传全量备份至 WebDAV..."
+                            onUploadWebDav(activeCfg) { msg -> localBanner = msg }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                    ) {
+                        Text("上传备份至云端", fontWeight = FontWeight.Bold)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            localBanner = "正在从 WebDAV 拉取并恢复备份..."
+                            onRestoreWebDav(activeCfg) { msg -> localBanner = msg }
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                    ) {
+                        Text("从云端下载恢复", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
         }
 
         val bannerToShow = localBanner ?: statusMessage
@@ -2003,6 +2332,315 @@ private fun BackupAndCsvTransferSheet(
                         color = ICostTextPrimary
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * 国产 ROM 后台静默运行保活与 Android 13+ 受限设置一站式诊断向导面板
+ */
+@Composable
+private fun RomKeepAliveGuideSheet() {
+    val context = LocalContext.current
+    var refreshTick by remember { mutableIntStateOf(0) }
+    val diag = remember(refreshTick) { RomKeepAliveGuideHelper.inspectCurrentDevice(context) }
+    var actionFeedback by remember { mutableStateOf<String?>(null) }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 10.dp)
+            .navigationBarsPadding(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            Text(
+                text = "后台保活与受限设置诊断 (${diag.passedCount}/${diag.totalCoreChecks})",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = ICostTextPrimary
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "当前设备：${diag.romDisplayName} · 型号 ${diag.model} (Android SDK ${diag.sdkInt})",
+                fontSize = 12.sp,
+                color = ICostBlueAccent,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        item {
+            Surface(color = ICostBgGray, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // 1. 通知监听状态 + 主动重连
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (diag.isNotificationListenerEnabled) "✅ 通知监听服务已开启" else "⚠️ 通知监听服务未开启",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (diag.isNotificationListenerEnabled) ICostGreenIncome else ICostAmberGold
+                            )
+                            Text("若通知监听被系统断连，可点击右侧「重连服务」", fontSize = 11.sp, color = ICostTextSecondary)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(onClick = {
+                                val ok = RomKeepAliveGuideHelper.requestNotificationListenerRebind(context)
+                                actionFeedback = if (ok) "✅ 已向系统发起 NotificationListener 重新绑定请求" else "⚠️ 请先开启通知使用权"
+                                refreshTick++
+                            }) {
+                                Text("重连服务", fontSize = 11.sp)
+                            }
+                            if (!diag.isNotificationListenerEnabled) {
+                                Button(
+                                    onClick = { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent)
+                                ) {
+                                    Text("去开启", fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = ICostDivider)
+
+                    // 2. 无障碍服务状态 + Android 13+ 受限设置一键解除跳转
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (diag.isAccessibilityEnabled) "✅ 无障碍支付页监听已开启" else "⚠️ 无障碍支付页监听未开启",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (diag.isAccessibilityEnabled) ICostGreenIncome else ICostAmberGold
+                            )
+                            Text("Android 13+ 侧载安装需先在「应用详情 ➔ ⋮」允许受限设置", fontSize = 11.sp, color = ICostTextSecondary)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(onClick = {
+                                RomKeepAliveGuideHelper.openAppDetailsSettings(context)
+                            }) {
+                                Text("解除受限", fontSize = 11.sp)
+                            }
+                            Button(
+                                onClick = { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+                                colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent)
+                            ) {
+                                Text(if (diag.isAccessibilityEnabled) "已开启" else "去开启", fontSize = 11.sp)
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = ICostDivider)
+
+                    // 3. 电池优化忽略状态
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (diag.isIgnoringBatteryOptimizations) "✅ 已加入电池后台白名单" else "⚠️ 尚未忽略后台电池优化",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (diag.isIgnoringBatteryOptimizations) ICostGreenIncome else ICostAmberGold
+                            )
+                            Text("防止锁屏后微信/银行通知延迟入账", fontSize = 11.sp, color = ICostTextSecondary)
+                        }
+                        OutlinedButton(onClick = {
+                            RomKeepAliveGuideHelper.openBatteryOptimizationSettings(context)
+                            refreshTick++
+                        }) {
+                            Text(if (diag.isIgnoringBatteryOptimizations) "已白名单" else "去设置", fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+        }
+
+        item {
+            Surface(color = ICostBgGray, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        text = "${diag.romDisplayName} 专属防杀后台操作步骤：",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextPrimary
+                    )
+                    diag.romKeepAliveSteps.forEach { step ->
+                        Text(text = step, fontSize = 12.sp, color = ICostTextSecondary)
+                    }
+                }
+            }
+        }
+
+        if (!actionFeedback.isNullOrBlank()) {
+            item {
+                Text(text = actionFeedback!!, fontSize = 12.sp, color = ICostGreenIncome, fontWeight = FontWeight.Bold)
+            }
+        }
+    }
+}
+
+/**
+ * 批量报销核销中心面板（对标 Cashew 借贷/报销分批核销闭环）
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun BatchReimbursementSheet(
+    transactions: List<TransactionEntity>,
+    wallets: List<WalletEntity>,
+    onBatchSettle: (List<Long>, Long?, (String) -> Unit) -> Unit
+) {
+    val pendingList = remember(transactions) {
+        transactions.filter { it.reimbursable && !it.reimbursed }
+    }
+    var selectedIds by remember(pendingList) {
+        mutableStateOf(pendingList.map { it.id }.toSet())
+    }
+    val assetWallets = remember(wallets) {
+        wallets.filter { !it.type.isLiability }.ifEmpty { wallets }
+    }
+    var receiveWalletId by remember(assetWallets) {
+        mutableStateOf(assetWallets.firstOrNull()?.id)
+    }
+    var statusBanner by remember { mutableStateOf<String?>(null) }
+
+    val selectedTotalCents = remember(pendingList, selectedIds) {
+        pendingList
+            .filter { it.id in selectedIds }
+            .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+    }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 10.dp)
+            .navigationBarsPadding(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            Text(
+                text = "批量报销核销中心",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = ICostTextPrimary
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "当前共有 ${pendingList.size} 笔待报销账单，已勾选 ${selectedIds.size} 笔 · 合计待入账 ${formatMoneyCents(selectedTotalCents)}：",
+                fontSize = 13.sp,
+                color = ICostTextSecondary
+            )
+        }
+
+        if (assetWallets.isNotEmpty()) {
+            item {
+                Text("选择报销款入账账户：", fontSize = 12.sp, color = ICostTextSecondary)
+                Spacer(modifier = Modifier.height(6.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    assetWallets.forEach { w ->
+                        FilterChip(
+                            selected = receiveWalletId == w.id,
+                            onClick = { receiveWalletId = w.id },
+                            label = { Text(w.name, fontSize = 12.sp) }
+                        )
+                    }
+                }
+            }
+        }
+
+        if (pendingList.isEmpty()) {
+            item {
+                Surface(color = ICostBgGray, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "🎉 当前所有待报销账单均已结清！可在记账面板或通知栏快捷按钮中将差旅/垫付账单标为「待报销」。",
+                        fontSize = 13.sp,
+                        color = ICostTextSecondary,
+                        modifier = Modifier.padding(16.dp)
+                    )
+                }
+            }
+        } else {
+            item {
+                Surface(color = ICostBgGray, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        pendingList.forEach { tx ->
+                            val isChecked = tx.id in selectedIds
+                            val netCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        selectedIds = if (isChecked) selectedIds - tx.id else selectedIds + tx.id
+                                    }
+                                    .padding(vertical = 6.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "${if (isChecked) "☑️" else "⬜"} ${tx.category} · ${tx.merchant.ifBlank { "日常消费" }}",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary
+                                    )
+                                    if (tx.tags.isNotBlank()) {
+                                        Text("#${tx.tags}", fontSize = 11.sp, color = ICostBlueAccent)
+                                    }
+                                }
+                                Text(
+                                    text = formatMoneyCents(netCents, tx.currency),
+                                    fontFamily = ICDinFontFamily,
+                                    fontSize = 16.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostCoralRed
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            item {
+                Button(
+                    onClick = {
+                        onBatchSettle(selectedIds.toList(), receiveWalletId) { msg ->
+                            statusBanner = msg
+                        }
+                    },
+                    enabled = selectedIds.isNotEmpty(),
+                    colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                ) {
+                    Text(
+                        text = "一键批量报销入账 (${selectedIds.size} 笔 · ${formatMoneyCents(selectedTotalCents)})",
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        if (!statusBanner.isNullOrBlank()) {
+            item {
+                Text(text = statusBanner!!, fontSize = 13.sp, color = ICostGreenIncome, fontWeight = FontWeight.Bold)
             }
         }
     }

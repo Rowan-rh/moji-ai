@@ -11,10 +11,10 @@
 - **包名与应用**：`com.moji.ai`（默记 MoJi）
 - **核心架构**：Kotlin + Jetpack Compose（Material 3，对标 iCost 卡片与交互体系）+ Room 本地持久化
 - **核心模块**：
-  - `app/src/main/java/com/moji/ai/data/`：枚举定义、分类目录、Room 实体/DAO、`LedgerRepository` 账务引擎（含真实余额锚点平账）与 `BackupAndCsvTransferEngine` 全量备份恢复/CSV 导入导出引擎
-  - `app/src/main/java/com/moji/ai/ai/`：OpenAI 兼容接口 / Gemini 官方接口双协议识账引擎、`MerchantMemoryManager` 商户记忆自学习与 `WeightedCategoryClassifier` 带排除词权重离线分类器
-  - `app/src/main/java/com/moji/ai/service/`：通知监听、无障碍节点采集与 `CapturePipelineCoordinator`（1.1s 滑动窗口聚合 + 30s 跨通道事后证据融合 + 采集可观测日志）
-  - `app/src/main/java/com/moji/ai/notification/`：静默入账系统通知与一键原子撤销广播
+  - `app/src/main/java/com/moji/ai/data/`：枚举定义、分类目录、Room 实体/DAO、`LedgerRepository` 账务引擎（含真实余额锚点平账、单笔账单多分类拆分 `splitExpenseTransaction`、批量报销结算 `batchSettleReimbursements`）、`BackupAndCsvTransferEngine` 全量备份恢复/CSV 导入导出引擎与 `WebDavSyncClient` 自托管云同步客户端
+  - `app/src/main/java/com/moji/ai/ai/`：OpenAI 兼容接口 / Gemini 官方接口双协议识账引擎、`MerchantMemoryManager` 商户记忆自学习、`WeightedCategoryClassifier` 带排除词权重离线分类器与 `SmartRuleEngine` 可视化条件规则引擎（`When -> Then`）
+  - `app/src/main/java/com/moji/ai/service/`：通知监听、无障碍节点采集、`CapturePipelineCoordinator`（1.1s 滑动窗口聚合 + 30s 跨通道事后证据融合 + 采集可观测日志）与 `RomKeepAliveGuideHelper` 国产 ROM 保活及 Android 13+ 受限设置诊断向导
+  - `app/src/main/java/com/moji/ai/notification/`：静默入账系统通知与一键原子撤销/切换常用分类/标为待报销广播 (`TransactionActionReceiver`)
   - `app/src/main/java/com/moji/ai/ui/`：账本首页、记账计算器面板、资产管理、多维统计与设置页
 - **需求与设计文档**：功能或数据模型发生变更时，需在同一 PR 中同步更新 `README.md` 与 `docs/REQUIREMENTS.md`。
 

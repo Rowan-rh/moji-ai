@@ -28,8 +28,19 @@ class SilentBookkeepingNotifier(private val context: Context) {
     companion object {
         const val CHANNEL_ID = "moji_silent_bookkeeping"
         const val ACTION_UNDO_TRANSACTION = "com.moji.ai.ACTION_UNDO_TRANSACTION"
+        const val ACTION_CYCLE_CATEGORY = "com.moji.ai.ACTION_CYCLE_CATEGORY"
+        const val ACTION_MARK_REIMBURSABLE = "com.moji.ai.ACTION_MARK_REIMBURSABLE"
         const val EXTRA_TRANSACTION_ID = "extra_transaction_id"
         const val EXTRA_NOTIFICATION_ID = "extra_notification_id"
+
+        val QUICK_CYCLE_CATEGORIES = listOf(
+            "餐饮-三餐",
+            "餐饮-咖啡",
+            "购物",
+            "日用",
+            "交通-打车",
+            "娱乐"
+        )
     }
 
     init {
@@ -118,7 +129,33 @@ class SilentBookkeepingNotifier(private val context: Context) {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+        // 通知栏“切换分类”按钮（一键循环常用分类并自动写入商户记忆库）
+        val cycleCatIntent = Intent(context, TransactionActionReceiver::class.java).apply {
+            action = ACTION_CYCLE_CATEGORY
+            putExtra(EXTRA_TRANSACTION_ID, tx.id)
+            putExtra(EXTRA_NOTIFICATION_ID, notifId)
+        }
+        val cycleCatPending = PendingIntent.getBroadcast(
+            context,
+            notifId + 20000,
+            cycleCatIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        // 通知栏“标记报销”按钮
+        val reimburseIntent = Intent(context, TransactionActionReceiver::class.java).apply {
+            action = ACTION_MARK_REIMBURSABLE
+            putExtra(EXTRA_TRANSACTION_ID, tx.id)
+            putExtra(EXTRA_NOTIFICATION_ID, notifId)
+        }
+        val reimbursePending = PendingIntent.getBroadcast(
+            context,
+            notifId + 30000,
+            reimburseIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(title)
             .setContentText(bodyText)
@@ -127,30 +164,56 @@ class SilentBookkeepingNotifier(private val context: Context) {
             .setAutoCancel(true)
             .setContentIntent(openPending)
             .addAction(android.R.drawable.ic_menu_revert, "撤销入账", undoPending)
-            .build()
+            .addAction(android.R.drawable.ic_menu_edit, "切换分类", cycleCatPending)
 
-        NotificationManagerCompat.from(context).notify(notifId, notification)
+        if (tx.type == TransactionType.EXPENSE && !tx.reimbursable) {
+            builder.addAction(android.R.drawable.ic_menu_agenda, "标为待报销", reimbursePending)
+        }
+
+        NotificationManagerCompat.from(context).notify(notifId, builder.build())
     }
 }
 
 class TransactionActionReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == SilentBookkeepingNotifier.ACTION_UNDO_TRANSACTION) {
-            val txId = intent.getLongExtra(SilentBookkeepingNotifier.EXTRA_TRANSACTION_ID, -1L)
-            val notifId = intent.getIntExtra(SilentBookkeepingNotifier.EXTRA_NOTIFICATION_ID, -1)
-            if (txId <= 0L) return
+        val txId = intent.getLongExtra(SilentBookkeepingNotifier.EXTRA_TRANSACTION_ID, -1L)
+        val notifId = intent.getIntExtra(SilentBookkeepingNotifier.EXTRA_NOTIFICATION_ID, -1)
+        if (txId <= 0L) return
 
-            val pendingResult = goAsync()
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    val app = context.applicationContext as MoJiApp
-                    app.repository.undoAndDeleteTransaction(txId)
-                    if (notifId > 0) {
-                        NotificationManagerCompat.from(context).cancel(notifId)
+        val pendingResult = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val app = context.applicationContext as MoJiApp
+                when (intent.action) {
+                    SilentBookkeepingNotifier.ACTION_UNDO_TRANSACTION -> {
+                        app.repository.undoAndDeleteTransaction(txId)
+                        if (notifId > 0) {
+                            NotificationManagerCompat.from(context).cancel(notifId)
+                        }
                     }
-                } finally {
-                    pendingResult.finish()
+
+                    SilentBookkeepingNotifier.ACTION_CYCLE_CATEGORY -> {
+                        val existing = app.database.transactionDao().getTransactionById(txId) ?: return@launch
+                        val cycleList = SilentBookkeepingNotifier.QUICK_CYCLE_CATEGORIES
+                        val curIdx = cycleList.indexOf(existing.category)
+                        val nextCat = cycleList[(curIdx + 1) % cycleList.size]
+                        val updated = existing.copy(category = nextCat)
+                        app.repository.updateExistingTransaction(updated)
+                        app.merchantMemoryManager.learnFromTransaction(updated)
+                        val wallets = app.repository.getAllWallets()
+                        app.notifier.sendSilentRecordedNotification(updated, wallets)
+                    }
+
+                    SilentBookkeepingNotifier.ACTION_MARK_REIMBURSABLE -> {
+                        val existing = app.database.transactionDao().getTransactionById(txId) ?: return@launch
+                        val updated = existing.copy(reimbursable = true)
+                        app.repository.updateExistingTransaction(updated)
+                        val wallets = app.repository.getAllWallets()
+                        app.notifier.sendSilentRecordedNotification(updated, wallets)
+                    }
                 }
+            } finally {
+                pendingResult.finish()
             }
         }
     }

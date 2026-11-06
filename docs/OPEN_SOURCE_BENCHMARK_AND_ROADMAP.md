@@ -151,5 +151,5 @@
 | 阶段 | 核心目标 | 包含特性 |
 | :--- | :--- | :--- |
 | **Phase 1：夯实自动记账闭环与数据安全（近期优先 P0，✅ 已落地）** | 记账更准、漏记可查、换机无忧 | 1. ✅ **商户记忆自学习 (`MerchantMemoryManager`) + 带排除词权重的离线分类器 (`WeightedCategoryClassifier`)**<br>2. ✅ **采集证据流可观测面板 (`observabilityLogs`) + 30秒跨通道增量合并 (`AI_FUSED`)**<br>3. ✅ **账户「真实余额校准（自动补差平账 `reconcileWalletBalance`）」**<br>4. ✅ **全量备份恢复 (`.mojibackup` Schema Guard) + 微信/支付宝/钱迹 CSV 导入导出 (`BackupAndCsvTransferEngine`)** |
-| **Phase 2：进阶规则、复杂账务与保活体验（中期 P1）** | 适配重度记账玩家与国产系统 | 5. **国产 ROM 后台保活与 Android 13+ 受限设置一键诊断向导**<br>6. **可视化条件规则引擎 (`When -> Then`) + 通知栏快捷改分类**<br>7. **批量报销结算 + 单笔账单多分类拆分 (Split Transaction)**<br>8. **WebDAV 自动加密云同步** |
+| **Phase 2：进阶规则、复杂账务与保活体验（中期 P1，✅ 已落地）** | 适配重度记账玩家与国产系统 | 5. ✅ **国产 ROM 后台保活与 Android 13+ 受限设置一键诊断向导 (`RomKeepAliveGuideHelper`)**<br>6. ✅ **可视化条件规则引擎 (`SmartRuleEngine`, `When -> Then`) + 通知栏三键快捷操作（撤销 / 切换分类 / 标为待报销）**<br>7. ✅ **批量报销结算 (`batchSettleReimbursements`) + 单笔账单多分类拆分 (`splitExpenseTransaction`)**<br>8. ✅ **WebDAV 自托管云同步 (`WebDavSyncClient`)** |
 | **Phase 3：桌面触达与端侧 AI 进阶（远期 P2）** | 打造开源记账体验天花板 | 9. **iCost 风格桌面微件 (Glance Widget) + 控制中心快捷磁贴 + 指纹锁**<br>10. **分享截图 OCR 补录 + AI 月度财务洞察与订阅自动检测** |

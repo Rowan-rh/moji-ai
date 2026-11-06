@@ -7,8 +7,11 @@ import androidx.lifecycle.viewModelScope
 import com.moji.ai.MoJiApp
 import com.moji.ai.ai.AiConfig
 import com.moji.ai.ai.MerchantMemoryEntry
+import com.moji.ai.ai.SmartConditionRule
 import com.moji.ai.data.backup.BackupAndCsvTransferEngine
 import com.moji.ai.data.backup.CsvParsePreviewResult
+import com.moji.ai.data.backup.WebDavConfig
+import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
@@ -77,7 +80,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val merchantMemories: StateFlow<List<MerchantMemoryEntry>> = app.merchantMemoryManager.memoriesFlow
 
+    val smartRules: StateFlow<List<SmartConditionRule>> = app.smartRuleEngine.rules
+
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = app.captureCoordinator.observabilityLogs
+
+    private val _webDavConfig = MutableStateFlow(WebDavSyncClient.loadConfig(application))
+    val webDavConfig: StateFlow<WebDavConfig> = _webDavConfig.asStateFlow()
 
     private val _ledgers = MutableStateFlow(loadSavedLedgers())
     val ledgers: StateFlow<List<String>> = _ledgers.asStateFlow()
@@ -533,6 +541,93 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun settleReimbursement(expenseId: Long, receiveWalletId: Long?) {
         viewModelScope.launch {
             repository.settleReimbursement(expenseId, receiveWalletId)
+        }
+    }
+
+    fun batchSettleReimbursements(
+        expenseIds: List<Long>,
+        receiveWalletId: Long?,
+        onResult: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val settled = repository.batchSettleReimbursements(expenseIds, receiveWalletId)
+            onResult("✅ 已批量核销 $settled 笔待报销账单，并同步恢复收款账户余额")
+        }
+    }
+
+    fun splitExpenseTransaction(
+        expenseId: Long,
+        categoryA: String,
+        amountAYuan: Double,
+        categoryB: String,
+        noteB: String
+    ) {
+        viewModelScope.launch {
+            val partACents = (amountAYuan * 100.0).roundToLong()
+            if (partACents <= 0L) return@launch
+            repository.splitExpenseTransaction(
+                originalTxId = expenseId,
+                categoryA = categoryA,
+                amountACents = partACents,
+                categoryB = categoryB,
+                noteB = noteB
+            )
+        }
+    }
+
+    fun upsertSmartRule(rule: SmartConditionRule) {
+        app.smartRuleEngine.upsertRule(rule)
+    }
+
+    fun toggleSmartRule(ruleId: Long, enabled: Boolean) {
+        app.smartRuleEngine.toggleRuleEnabled(ruleId, enabled)
+    }
+
+    fun deleteSmartRule(ruleId: Long) {
+        app.smartRuleEngine.deleteRule(ruleId)
+    }
+
+    fun updateWebDavConfig(config: WebDavConfig) {
+        WebDavSyncClient.saveConfig(app, config)
+        _webDavConfig.value = config
+    }
+
+    fun uploadBackupToWebDav(
+        config: WebDavConfig,
+        onResult: (String) -> Unit
+    ) {
+        updateWebDavConfig(config)
+        viewModelScope.launch {
+            val backupJson = generateFullBackupJson()
+            val res = WebDavSyncClient.uploadSnapshot(config, backupJson)
+            res.fold(
+                onSuccess = { msg ->
+                    val updated = config.copy(lastSyncTimeMillis = System.currentTimeMillis())
+                    updateWebDavConfig(updated)
+                    onResult(msg)
+                },
+                onFailure = { err ->
+                    onResult("❌ WebDAV 上传失败：${err.message}")
+                }
+            )
+        }
+    }
+
+    fun restoreBackupFromWebDav(
+        config: WebDavConfig,
+        onResult: (String) -> Unit
+    ) {
+        updateWebDavConfig(config)
+        viewModelScope.launch {
+            val res = WebDavSyncClient.downloadSnapshot(config)
+            res.fold(
+                onSuccess = { json ->
+                    restoreFromBackupJson(json, onResult)
+                },
+                onFailure = { err ->
+                    onResult("❌ WebDAV 下载失败：${err.message}")
+                }
+            )
         }
     }
 
