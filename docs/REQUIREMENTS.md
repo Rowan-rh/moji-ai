@@ -69,4 +69,4 @@
   - `app/src/main/java/com/moji/ai/service/`：通知栏监听服务、无障碍页面抓取服务、滑动窗口防抖合并协调器 `CapturePipelineCoordinator`
   - `app/src/main/java/com/moji/ai/ai/`：AI 接口配置管理与多模型结构化解析引擎 `AiAccountingEngine`
   - `app/src/main/java/com/moji/ai/notification/`：静默记账通知推送与通知栏“撤销入账”广播接收器 `SilentBookkeepingNotifier`
-  - `app/src/main/java/com/moji/ai/ui/`：1:1 对齐 iCost 视觉与交互规范的 Compose 界面体系（`ICDIN` 凝缩数字字体、200 枚线性分类与银行/钱包品牌图标、`iCostPressScale` 全局弹簧按压回弹与触觉反馈、`AnimatedMoneyText` 数字滚动过渡、方向感知主 Tab 切换与半透明悬浮胶囊底栏升降动效、三页可滑动概览卡、`+ - × ÷` 记账计算器、全屏水平推入式账单详情/收支日历/账户详情/选择类型/设置与智能记账中心，以及渐进生长柱状图/净资产趋势铺展曲线/分类环形展开动效）
+  - `app/src/main/java/com/moji/ai/ui/`：1:1 对齐 iCost 视觉与交互规范的 Compose 界面体系（`ICDIN` 凝缩数字字体、200 枚线性分类与银行/钱包品牌图标、`iCostPressScale` 全局弹簧按压回弹与触觉反馈、`ICostSwipeActionRow` 模块双向侧滑扩展功能容器、`iCostHorizontalSwipeTrigger` 模块滑动手势切换、`AnimatedMoneyText` 数字滚动过渡、账本首页右滑快捷模板抽屉与账单行侧滑复制/报销/退款/删除、资产页双页滑动净资产/存钱计划/分期概览与账户行侧滑还款/转账/调平/删除、统计图表卡片手势滑动维度切换，以及全屏水平推入式二级页面）

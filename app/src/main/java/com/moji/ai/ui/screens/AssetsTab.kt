@@ -2,8 +2,10 @@ package com.moji.ai.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -13,6 +15,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -30,6 +33,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -49,6 +54,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -60,6 +66,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -77,6 +84,8 @@ import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.WalletType
+import com.moji.ai.ui.InstallmentPlanItem
+import com.moji.ai.ui.SavingPlanItem
 import com.moji.ai.ui.theme.AccountBrandOption
 import com.moji.ai.ui.theme.AnimatedMoneyText
 import com.moji.ai.ui.theme.ICDinFontFamily
@@ -88,24 +97,29 @@ import com.moji.ai.ui.theme.ICostBgGray
 import com.moji.ai.ui.theme.ICostBlueAccent
 import com.moji.ai.ui.theme.ICostCardWhite
 import com.moji.ai.ui.theme.ICostCategoryBadge
+import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostSwipeActionRow
 import com.moji.ai.ui.theme.ICostTextMuted
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
+import com.moji.ai.ui.theme.SwipeActionItem
 import com.moji.ai.ui.theme.WalletBrandAvatar
 import com.moji.ai.ui.theme.daysUntilRepaymentText
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
 import com.moji.ai.ui.theme.iCostPressScale
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToLong
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ICostAssetsScreen(
     wallets: List<WalletEntity>,
@@ -118,9 +132,16 @@ fun ICostAssetsScreen(
     onQuickActionWithWallet: (TransactionType, sourceId: Long?, targetId: Long?) -> Unit,
     onSelectTransaction: (TransactionEntity) -> Unit,
     onTriggerRuleNow: (RecurringRuleEntity) -> Unit,
+    onDeleteRecurringRule: (RecurringRuleEntity) -> Unit = {},
+    savingPlans: List<SavingPlanItem> = emptyList(),
+    installmentPlans: List<InstallmentPlanItem> = emptyList(),
+    onDepositSavingPlan: (Long, Double) -> Unit = { _, _ -> },
+    onPayInstallmentPeriod: (InstallmentPlanItem) -> Unit = {},
     onOpenSettingsPage: () -> Unit = {},
     onSubpageActiveChange: (Boolean) -> Unit = {}
 ) {
+    val assetPagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
+    val pagerScope = rememberCoroutineScope()
     val totalAssetsCnyCents = wallets.filter { !it.type.isLiability && it.includeInNetWorth }.sumOf { w ->
         (w.balanceCents * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
     }
@@ -236,66 +257,189 @@ fun ICostAssetsScreen(
                 )
             }
 
-            // 3. 净资产大卡片（ICDIN 36sp 金额 + 原生眼睛显隐图标 money_eye_open.webp）
+            // 3. 净资产双页可滑动大卡片（Page 0: 净资产/总资产/总负债；右滑/左滑切换 Page 1: 存钱计划进度 & 分期管理待还）
             item {
                 Card(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(22.dp))
+                        .iCostPressScale(pressedScale = 0.985f) {
+                            pagerScope.launch {
+                                assetPagerState.animateScrollToPage((assetPagerState.currentPage + 1) % 2)
+                            }
+                        },
                     shape = RoundedCornerShape(22.dp),
                     colors = CardDefaults.cardColors(containerColor = ICostCardWhite),
                     elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                 ) {
-                    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Text("净资产", fontSize = 14.sp, color = ICostTextSecondary)
-                            Box(
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .clip(CircleShape)
-                                    .iCostPressScale(pressedScale = 0.85f, onClick = onToggleHideAmounts),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                ICostAssetImage(
-                                    assetFile = if (hideAmounts) "money_eye_close.webp" else "money_eye_open.webp",
-                                    modifier = Modifier.size(20.dp)
-                                )
+                    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 16.dp)) {
+                        HorizontalPager(
+                            state = assetPagerState,
+                            modifier = Modifier.fillMaxWidth()
+                        ) { page ->
+                            if (page == 0) {
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("净资产 ⇄", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = ICostTextSecondary)
+                                        Box(
+                                            modifier = Modifier
+                                                .size(28.dp)
+                                                .clip(CircleShape)
+                                                .iCostPressScale(pressedScale = 0.85f, onClick = onToggleHideAmounts),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            ICostAssetImage(
+                                                assetFile = if (hideAmounts) "money_eye_close.webp" else "money_eye_open.webp",
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+
+                                    Spacer(modifier = Modifier.height(6.dp))
+
+                                    AnimatedMoneyText(
+                                        cents = netWorthCnyCents,
+                                        currency = "CNY",
+                                        hideAmounts = hideAmounts,
+                                        fontSize = 36.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary
+                                    )
+
+                                    Spacer(modifier = Modifier.height(10.dp))
+
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(20.dp)
+                                    ) {
+                                        Text(
+                                            text = "总资产 ${formatMoneyCents(totalAssetsCnyCents, "CNY", hideAmounts)}",
+                                            fontSize = 13.sp,
+                                            color = ICostTextSecondary,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                        Text(
+                                            text = "总负债 ${formatMoneyCents(-totalLiabilityCnyCents, "CNY", hideAmounts)}",
+                                            fontSize = 13.sp,
+                                            color = ICostTextSecondary,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
+                                }
+                            } else {
+                                // Page 1: 存钱计划与分期管理概览
+                                val totalSaved = savingPlans.sumOf { it.savedCents }
+                                val totalTarget = savingPlans.sumOf { it.targetCents }.coerceAtLeast(1L)
+                                val savePct = (totalSaved.toFloat() / totalTarget.toFloat()).coerceIn(0f, 1f)
+                                val remainInstallmentCents = installmentPlans.sumOf { plan ->
+                                    val remainPeriods = (plan.totalPeriods - plan.paidPeriods).coerceAtLeast(0)
+                                    val perPeriod = plan.totalCents / plan.totalPeriods.coerceAtLeast(1) + plan.feePerPeriodCents
+                                    perPeriod * remainPeriods
+                                }
+
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            ICostAssetImage(
+                                                assetFile = "tab_save_money.webp",
+                                                tint = ICostAmberGold,
+                                                modifier = Modifier.size(18.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = "存钱计划与分期概览",
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = ICostAmberGold
+                                            )
+                                        }
+                                        Text(
+                                            text = "进度 ${(savePct * 100).toInt()}%",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ICostGreenIncome
+                                        )
+                                    }
+
+                                    Spacer(modifier = Modifier.height(6.dp))
+
+                                    AnimatedMoneyText(
+                                        cents = totalSaved,
+                                        currency = "CNY",
+                                        hideAmounts = hideAmounts,
+                                        fontSize = 32.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary
+                                    )
+
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    LinearProgressIndicator(
+                                        progress = { savePct },
+                                        color = ICostAmberGold,
+                                        trackColor = ICostCellGray,
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(6.dp)
+                                            .clip(RoundedCornerShape(3.dp))
+                                    )
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Text(
+                                            text = "目标总额 ${formatMoneyCents(totalTarget, "CNY", hideAmounts)}",
+                                            fontSize = 12.sp,
+                                            color = ICostTextSecondary
+                                        )
+                                        Text(
+                                            text = "分期未还 ${formatMoneyCents(remainInstallmentCents, "CNY", hideAmounts)}",
+                                            fontSize = 12.sp,
+                                            color = ICostCoralRed
+                                        )
+                                    }
+                                }
                             }
                         }
 
-                        Spacer(modifier = Modifier.height(6.dp))
-
-                        AnimatedMoneyText(
-                            cents = netWorthCnyCents,
-                            currency = "CNY",
-                            hideAmounts = hideAmounts,
-                            fontSize = 36.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = ICostTextPrimary
-                        )
-
                         Spacer(modifier = Modifier.height(10.dp))
-
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(20.dp)
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "总资产 ${formatMoneyCents(totalAssetsCnyCents, "CNY", hideAmounts)}",
-                                fontSize = 13.sp,
-                                color = ICostTextSecondary,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                            Text(
-                                text = "总负债 ${formatMoneyCents(-totalLiabilityCnyCents, "CNY", hideAmounts)}",
-                                fontSize = 13.sp,
-                                color = ICostTextSecondary,
-                                maxLines = 1,
-                                softWrap = false
-                            )
+                            repeat(2) { idx ->
+                                val isSel = assetPagerState.currentPage == idx
+                                val dotW by animateDpAsState(
+                                    targetValue = if (isSel) 16.dp else 6.dp,
+                                    animationSpec = spring(dampingRatio = 0.65f, stiffness = Spring.StiffnessMedium),
+                                    label = "AssetPagerDotW"
+                                )
+                                val dotCol by animateColorAsState(
+                                    targetValue = if (isSel) ICostAmberGold else Color(0xFFE0E0E0),
+                                    animationSpec = tween(220),
+                                    label = "AssetPagerDotCol"
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .height(6.dp)
+                                        .width(dotW)
+                                        .clip(CircleShape)
+                                        .background(dotCol)
+                                )
+                                if (idx == 0) Spacer(modifier = Modifier.width(6.dp))
+                            }
                         }
                     }
                 }
@@ -400,11 +544,51 @@ fun ICostAssetsScreen(
                             ) {
                                 Column(modifier = Modifier.fillMaxWidth()) {
                                     creditWallets.forEachIndexed { idx, w ->
-                                        ICostAccountItemRow(
-                                            wallet = w,
-                                            hideAmounts = hideAmounts,
-                                            onClick = { inspectingWallet = w }
+                                        val creditSwipeActions = listOf(
+                                            SwipeActionItem(
+                                                label = "还款",
+                                                iconAsset = "transfer_swift.webp",
+                                                backgroundColor = ICostBlueAccent,
+                                                onClick = {
+                                                    onQuickActionWithWallet(
+                                                        TransactionType.REPAYMENT,
+                                                        assetWallets.firstOrNull()?.id,
+                                                        w.id
+                                                    )
+                                                }
+                                            ),
+                                            SwipeActionItem(
+                                                label = "记一笔",
+                                                iconAsset = "tab_add.webp",
+                                                backgroundColor = Color(0xFFF59E0B),
+                                                onClick = {
+                                                    onQuickActionWithWallet(TransactionType.EXPENSE, w.id, null)
+                                                }
+                                            ),
+                                            SwipeActionItem(
+                                                label = "调平",
+                                                iconAsset = "asset_pen.webp",
+                                                backgroundColor = ICostGreenIncome,
+                                                onClick = { editingWallet = w }
+                                            ),
+                                            SwipeActionItem(
+                                                label = "删除",
+                                                iconAsset = "detail_delete.webp",
+                                                backgroundColor = ICostCoralRed,
+                                                onClick = { onDeleteWallet(w) }
+                                            )
                                         )
+                                        ICostSwipeActionRow(
+                                            actions = creditSwipeActions,
+                                            actionWidth = 52.dp,
+                                            actionHeight = 46.dp
+                                        ) {
+                                            ICostAccountItemRow(
+                                                wallet = w,
+                                                hideAmounts = hideAmounts,
+                                                onClick = { inspectingWallet = w }
+                                            )
+                                        }
                                         if (idx < creditWallets.lastIndex) {
                                             HorizontalDivider(
                                                 modifier = Modifier.padding(start = 68.dp, end = 16.dp),
@@ -447,16 +631,183 @@ fun ICostAssetsScreen(
                             ) {
                                 Column(modifier = Modifier.fillMaxWidth()) {
                                     assetWallets.forEachIndexed { idx, w ->
-                                        ICostAccountItemRow(
-                                            wallet = w,
-                                            hideAmounts = hideAmounts,
-                                            onClick = { inspectingWallet = w }
+                                        val assetSwipeActions = listOf(
+                                            SwipeActionItem(
+                                                label = "转账",
+                                                iconAsset = "transfer_swift.webp",
+                                                backgroundColor = ICostBlueAccent,
+                                                onClick = {
+                                                    onQuickActionWithWallet(
+                                                        TransactionType.TRANSFER,
+                                                        w.id,
+                                                        assetWallets.firstOrNull { it.id != w.id }?.id
+                                                    )
+                                                }
+                                            ),
+                                            SwipeActionItem(
+                                                label = "记一笔",
+                                                iconAsset = "tab_add.webp",
+                                                backgroundColor = Color(0xFFF59E0B),
+                                                onClick = {
+                                                    onQuickActionWithWallet(TransactionType.EXPENSE, w.id, null)
+                                                }
+                                            ),
+                                            SwipeActionItem(
+                                                label = "调平",
+                                                iconAsset = "asset_pen.webp",
+                                                backgroundColor = ICostGreenIncome,
+                                                onClick = { editingWallet = w }
+                                            ),
+                                            SwipeActionItem(
+                                                label = "删除",
+                                                iconAsset = "detail_delete.webp",
+                                                backgroundColor = ICostCoralRed,
+                                                onClick = { onDeleteWallet(w) }
+                                            )
                                         )
+                                        ICostSwipeActionRow(
+                                            actions = assetSwipeActions,
+                                            actionWidth = 52.dp,
+                                            actionHeight = 46.dp
+                                        ) {
+                                            ICostAccountItemRow(
+                                                wallet = w,
+                                                hideAmounts = hideAmounts,
+                                                onClick = { inspectingWallet = w }
+                                            )
+                                        }
                                         if (idx < assetWallets.lastIndex) {
                                             HorizontalDivider(
                                                 modifier = Modifier.padding(start = 68.dp, end = 16.dp),
                                                 thickness = 0.5.dp,
                                                 color = ICostDivider
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 6.5 当净资产卡片右滑/左滑切换到第 2 页时，展开「存钱计划」与「分期管理」快捷操作卡片（每项也支持侧滑）
+            if (assetPagerState.currentPage == 1 && (savingPlans.isNotEmpty() || installmentPlans.isNotEmpty())) {
+                item {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(22.dp),
+                        colors = CardDefaults.cardColors(containerColor = ICostCardWhite),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 14.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(
+                                text = "存钱计划与信用卡分期明细（支持侧滑操作）",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostTextSecondary
+                            )
+                            savingPlans.forEach { plan ->
+                                val pct = (plan.savedCents.toFloat() / plan.targetCents.coerceAtLeast(1L)).coerceIn(0f, 1f)
+                                ICostSwipeActionRow(
+                                    actions = listOf(
+                                        SwipeActionItem(
+                                            label = "+¥500",
+                                            iconAsset = "tab_save_money.webp",
+                                            backgroundColor = ICostGreenIncome,
+                                            onClick = { onDepositSavingPlan(plan.id, 500.0) }
+                                        ),
+                                        SwipeActionItem(
+                                            label = "+¥1000",
+                                            iconAsset = "tab_save_money.webp",
+                                            backgroundColor = ICostBlueAccent,
+                                            onClick = { onDepositSavingPlan(plan.id, 1000.0) }
+                                        )
+                                    ),
+                                    actionWidth = 56.dp,
+                                    actionHeight = 44.dp
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 8.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(plan.title, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = ICostTextPrimary)
+                                            Text(
+                                                "已存 ${formatMoneyCents(plan.savedCents)} / 目标 ${formatMoneyCents(plan.targetCents)}",
+                                                fontSize = 12.sp,
+                                                color = ICostTextSecondary
+                                            )
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = Color(0xFFE6F7EF),
+                                            modifier = Modifier.iCostPressScale(pressedScale = 0.90f) {
+                                                onDepositSavingPlan(plan.id, 500.0)
+                                            }
+                                        ) {
+                                            Text(
+                                                text = "打卡 ${(pct * 100).toInt()}%",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = ICostGreenIncome,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            installmentPlans.forEach { inst ->
+                                val perPeriodCents = inst.totalCents / inst.totalPeriods.coerceAtLeast(1) + inst.feePerPeriodCents
+                                ICostSwipeActionRow(
+                                    actions = listOf(
+                                        SwipeActionItem(
+                                            label = "还一期",
+                                            iconAsset = "detail_installment.webp",
+                                            backgroundColor = ICostCoralRed,
+                                            onClick = { onPayInstallmentPeriod(inst) }
+                                        )
+                                    ),
+                                    actionWidth = 60.dp,
+                                    actionHeight = 44.dp
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 8.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(inst.title, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = ICostTextPrimary)
+                                            Text(
+                                                "已还 ${inst.paidPeriods}/${inst.totalPeriods} 期 · 每期 ${formatMoneyCents(perPeriodCents)}",
+                                                fontSize = 12.sp,
+                                                color = ICostTextSecondary
+                                            )
+                                        }
+                                        Surface(
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = Color(0xFFFDECE9),
+                                            modifier = Modifier.iCostPressScale(pressedScale = 0.90f) {
+                                                onPayInstallmentPeriod(inst)
+                                            }
+                                        ) {
+                                            Text(
+                                                text = if (inst.paidPeriods >= inst.totalPeriods) "已结清" else "入账下期",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = ICostCoralRed,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                                             )
                                         }
                                     }
@@ -485,29 +836,48 @@ fun ICostAssetsScreen(
                                 onToggle = { recurringExpanded = false }
                             )
                             recurringRules.forEach { rule ->
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                ICostSwipeActionRow(
+                                    actions = listOf(
+                                        SwipeActionItem(
+                                            label = "执行",
+                                            iconAsset = "setting_period.webp",
+                                            backgroundColor = ICostBlueAccent,
+                                            onClick = { onTriggerRuleNow(rule) }
+                                        ),
+                                        SwipeActionItem(
+                                            label = "删除",
+                                            iconAsset = "detail_delete.webp",
+                                            backgroundColor = ICostCoralRed,
+                                            onClick = { onDeleteRecurringRule(rule) }
+                                        )
+                                    ),
+                                    actionWidth = 54.dp,
+                                    actionHeight = 44.dp
                                 ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            "${rule.title} (${rule.frequency.displayName})",
-                                            fontWeight = FontWeight.Bold,
-                                            fontSize = 15.sp,
-                                            color = ICostTextPrimary
-                                        )
-                                        Text(
-                                            "${formatMoneyCents(rule.amountCents, rule.currency)} · ${rule.category}",
-                                            fontSize = 12.sp,
-                                            color = ICostTextSecondary
-                                        )
-                                    }
-                                    TextButton(onClick = { onTriggerRuleNow(rule) }) {
-                                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-                                        Text("执行一次")
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                "${rule.title} (${rule.frequency.displayName})",
+                                                fontWeight = FontWeight.Bold,
+                                                fontSize = 15.sp,
+                                                color = ICostTextPrimary
+                                            )
+                                            Text(
+                                                "${formatMoneyCents(rule.amountCents, rule.currency)} · ${rule.category}",
+                                                fontSize = 12.sp,
+                                                color = ICostTextSecondary
+                                            )
+                                        }
+                                        TextButton(onClick = { onTriggerRuleNow(rule) }) {
+                                            Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                                            Text("执行一次")
+                                        }
                                     }
                                 }
                             }

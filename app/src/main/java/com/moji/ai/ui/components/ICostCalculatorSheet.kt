@@ -91,6 +91,7 @@ import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.WalletBrandAvatar
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
+import com.moji.ai.ui.theme.iCostHorizontalSwipeTrigger
 import com.moji.ai.ui.theme.iCostPressScale
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -408,6 +409,20 @@ fun ICostCalculatorSheet(
                 label = "TransferSwapAngle"
             )
 
+            val modeOrder = listOf(TransactionType.EXPENSE, TransactionType.INCOME, TransactionType.TRANSFER)
+            fun switchCalcModeByDelta(delta: Int) {
+                val curIdx = modeOrder.indexOf(txType).coerceAtLeast(0)
+                val nextMode = modeOrder[(curIdx + delta + modeOrder.size) % modeOrder.size]
+                txType = nextMode
+                if (nextMode == TransactionType.INCOME) {
+                    selectedMainCategory = CategoryCatalog.incomeCategories.first().name
+                    selectedSubCategory = ""
+                } else if (nextMode == TransactionType.EXPENSE) {
+                    selectedMainCategory = CategoryCatalog.expenseCategories.first().name
+                    selectedSubCategory = ""
+                }
+            }
+
             AnimatedContent(
                 targetState = txType,
                 transitionSpec = {
@@ -420,7 +435,13 @@ fun ICostCalculatorSheet(
                             animationSpec = tween(180, easing = FastOutSlowInEasing)
                         ) + fadeOut(tween(140)))
                 },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .iCostHorizontalSwipeTrigger(
+                        thresholdDp = 52.dp,
+                        onSwipeRight = { switchCalcModeByDelta(-1) },
+                        onSwipeLeft = { switchCalcModeByDelta(1) }
+                    ),
                 label = "CalculatorModeBodyTransition"
             ) { currentMode ->
                 if (currentMode == TransactionType.EXPENSE || currentMode == TransactionType.INCOME) {
