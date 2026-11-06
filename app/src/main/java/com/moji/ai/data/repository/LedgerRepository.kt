@@ -251,6 +251,85 @@ class LedgerRepository(private val db: AppDatabase) {
         true
     }
 
+    /**
+     * 批量报销核销入账（对标 Cashew 借贷/报销分批核销闭环）：
+     * 一次性将多笔「待报销」消费标记为已报销，并原子化恢复指定收款账户余额。
+     */
+    suspend fun batchSettleReimbursements(
+        expenseIds: List<Long>,
+        receiveWalletId: Long?
+    ): Int = db.withTransaction {
+        if (expenseIds.isEmpty()) return@withTransaction 0
+        val txDao = db.transactionDao()
+        val walletDao = db.walletDao()
+        var settledCount = 0
+
+        for (id in expenseIds.distinct()) {
+            val expense = txDao.getTransactionById(id) ?: continue
+            if (!expense.reimbursable || expense.reimbursed) continue
+
+            val targetId = receiveWalletId ?: expense.sourceWalletId
+            targetId?.let { wid ->
+                walletDao.getWalletById(wid)?.let { w ->
+                    val netCents = (expense.amountCents - expense.refundedAmountCents).coerceAtLeast(0L)
+                    val delta = convertCentsBetweenCurrencies(netCents, expense.currency, w.currency, expense.exchangeRateToCny)
+                    val newBal = if (w.type.isLiability) (w.balanceCents - delta).coerceAtLeast(0L) else w.balanceCents + delta
+                    walletDao.updateWallet(w.copy(balanceCents = newBal))
+                }
+            }
+            txDao.updateTransaction(expense.copy(reimbursed = true))
+            settledCount++
+        }
+        settledCount
+    }
+
+    /**
+     * 单笔账单多分类拆分（Split Transaction，对标 MyExpenses 父子分拆账单）：
+     * 在保持原付款钱包总扣款金额完全不变的前提下，将一笔消费拆分为两笔独立分类的子消费记录。
+     */
+    suspend fun splitExpenseTransaction(
+        originalTxId: Long,
+        categoryA: String,
+        amountACents: Long,
+        categoryB: String,
+        noteB: String = ""
+    ): Boolean = db.withTransaction {
+        val txDao = db.transactionDao()
+        val orig = txDao.getTransactionById(originalTxId) ?: return@withTransaction false
+        if (orig.type != TransactionType.EXPENSE) return@withTransaction false
+
+        val partACents = amountACents.coerceIn(1L, (orig.amountCents - 1L).coerceAtLeast(1L))
+        val partBCents = orig.amountCents - partACents
+        if (partBCents <= 0L) return@withTransaction false
+
+        val partACnyCents = (partACents * orig.exchangeRateToCny).roundToLong()
+        val partBCnyCents = (orig.amountCnyCents - partACnyCents).coerceAtLeast(1L)
+
+        val updatedOrig = orig.copy(
+            category = categoryA.ifBlank { orig.category },
+            amountCents = partACents,
+            amountCnyCents = partACnyCents,
+            refundedAmountCents = orig.refundedAmountCents.coerceAtMost(partACnyCents),
+            note = if (orig.note.contains("[拆分")) orig.note else "${orig.note} [拆分1/2]".trim()
+        )
+        txDao.updateTransaction(updatedOrig)
+
+        val childB = orig.copy(
+            id = 0L,
+            category = categoryB.ifBlank { "日用" },
+            amountCents = partBCents,
+            amountCnyCents = partBCnyCents,
+            discountCents = 0L,
+            feeCents = 0L,
+            refundedAmountCents = 0L,
+            relatedTransactionId = orig.id,
+            timestamp = orig.timestamp - 1L,
+            note = noteB.ifBlank { "${orig.note} [拆分2/2]".trim() }
+        )
+        txDao.insertTransaction(childB)
+        true
+    }
+
     suspend fun undoAndDeleteTransaction(transactionId: Long): Boolean = db.withTransaction {
         val txDao = db.transactionDao()
         val tx = txDao.getTransactionById(transactionId) ?: return@withTransaction false

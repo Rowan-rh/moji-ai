@@ -87,7 +87,8 @@ fun TransactionDetailSheet(
     onRefund: (expenseId: Long, refundYuan: Double, receiveWalletId: Long?, note: String) -> Unit,
     onSettleReimburse: (expenseId: Long, receiveWalletId: Long?) -> Unit,
     onDelete: (Long) -> Unit,
-    onSaveAsTemplate: (TransactionEntity) -> Unit = {}
+    onSaveAsTemplate: (TransactionEntity) -> Unit = {},
+    onSplitTransaction: (expenseId: Long, categoryA: String, amountAYuan: Double, categoryB: String, noteB: String) -> Unit = { _, _, _, _, _ -> }
 ) {
     BackHandler(onBack = onDismiss)
 
@@ -102,6 +103,7 @@ fun TransactionDetailSheet(
 
     val remainingRefundableCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
     var showRefundDialog by remember { mutableStateOf(false) }
+    var showSplitDialog by remember { mutableStateOf(false) }
     var templateSavedBanner by remember { mutableStateOf(false) }
 
     Column(
@@ -383,6 +385,39 @@ fun TransactionDetailSheet(
             }
         }
 
+        if (tx.type == TransactionType.EXPENSE && tx.amountCents >= 200L) {
+            Spacer(modifier = Modifier.height(10.dp))
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = ICostCardWhite,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .iCostPressScale(pressedScale = 0.95f) {
+                        showSplitDialog = true
+                    }
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ICostAssetImage(
+                        assetFile = "setting_category.webp",
+                        tint = ICostBlueAccent,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "单笔分拆为多个分类 (Split Transaction)",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostBlueAccent
+                    )
+                }
+            }
+        }
+
         if (templateSavedBanner) {
             Spacer(modifier = Modifier.height(10.dp))
             Surface(
@@ -442,6 +477,73 @@ fun TransactionDetailSheet(
             },
             dismissButton = {
                 TextButton(onClick = { showRefundDialog = false }) { Text("取消") }
+            }
+        )
+    }
+
+    if (showSplitDialog) {
+        val totalYuan = tx.amountCents / 100.0
+        var categoryA by remember(tx) { mutableStateOf(tx.category) }
+        var amountAStr by remember(tx) {
+            mutableStateOf(String.format(Locale.US, "%.2f", (totalYuan / 2.0).coerceAtLeast(0.01)))
+        }
+        var categoryB by remember { mutableStateOf("日用") }
+        var noteB by remember { mutableStateOf("") }
+
+        val parsedAYuan = amountAStr.toDoubleOrNull() ?: 0.0
+        val remainBYuan = (totalYuan - parsedAYuan).coerceAtLeast(0.0)
+        val isSplitValid = parsedAYuan > 0.0 && remainBYuan > 0.0
+
+        AlertDialog(
+            onDismissRequest = { showSplitDialog = false },
+            containerColor = ICostCardWhite,
+            title = { Text("单笔分拆账单 (Split)", fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "原账单总额 ${formatMoneyCents(tx.amountCents, tx.currency)}，拆分后总扣款金额保持不变：",
+                        fontSize = 12.sp,
+                        color = ICostTextSecondary
+                    )
+                    OutlinedTextField(
+                        value = categoryA,
+                        onValueChange = { categoryA = it },
+                        label = { Text("子账单 1 分类") },
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = amountAStr,
+                        onValueChange = { amountAStr = it },
+                        label = { Text("子账单 1 金额") },
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = categoryB,
+                        onValueChange = { categoryB = it },
+                        label = { Text("子账单 2 分类 (自动分配剩余 ${String.format(Locale.US, "%.2f", remainBYuan)})") },
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = noteB,
+                        onValueChange = { noteB = it },
+                        label = { Text("子账单 2 备注 (选填)") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = isSplitValid,
+                    onClick = {
+                        onSplitTransaction(tx.id, categoryA.trim(), parsedAYuan, categoryB.trim(), noteB.trim())
+                        showSplitDialog = false
+                    }
+                ) {
+                    Text("确认拆分", color = ICostBlueAccent, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSplitDialog = false }) { Text("取消") }
             }
         )
     }

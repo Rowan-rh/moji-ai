@@ -1,6 +1,8 @@
 package com.moji.ai.service
 
 import com.moji.ai.ai.AiAccountingEngine
+import com.moji.ai.ai.SmartRuleEngine
+import com.moji.ai.ai.SmartRuleExecutionResult
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.SilentBookkeepingNotifier
@@ -49,7 +51,8 @@ data class CaptureObservabilityLogEntry(
 class CapturePipelineCoordinator(
     private val repository: LedgerRepository,
     private val aiEngine: AiAccountingEngine,
-    private val notifier: SilentBookkeepingNotifier
+    private val notifier: SilentBookkeepingNotifier,
+    private val smartRuleEngine: SmartRuleEngine? = null
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -159,7 +162,7 @@ class CapturePipelineCoordinator(
         val wallets = repository.getAllWallets()
         val recentExpenses = repository.getRecentRefundableExpenses(15)
 
-        val parsedTx = aiEngine.parseCapturedText(
+        val rawParsedTx = aiEngine.parseCapturedText(
             rawText = mergedText,
             sourceAppPackage = packageName,
             captureMode = captureSource,
@@ -167,7 +170,7 @@ class CapturePipelineCoordinator(
             recentExpenses = recentExpenses
         )
 
-        if (parsedTx == null) {
+        if (rawParsedTx == null) {
             appendLog(
                 packageName = packageName,
                 captureSource = captureSource,
@@ -176,6 +179,33 @@ class CapturePipelineCoordinator(
                 detailSummary = "AI/语义引擎判定不包含有效金额或非真实资金变动"
             )
             return null
+        }
+
+        // 执行 When -> Then 可视化条件规则管道
+        val ruleEval = smartRuleEngine?.evaluateAndApply(rawParsedTx, mergedText)
+        val parsedTx: TransactionEntity
+        val matchedRuleNames: String
+        when (ruleEval) {
+            is SmartRuleExecutionResult.Intercepted -> {
+                appendLog(
+                    packageName = packageName,
+                    captureSource = captureSource,
+                    rawText = mergedText.take(140),
+                    outcome = CaptureEventOutcome.NOISE_IGNORED,
+                    detailSummary = "触发条件规则【${ruleEval.matchedRule.name}】静默拦截不入账"
+                )
+                return null
+            }
+            is SmartRuleExecutionResult.Transformed -> {
+                parsedTx = ruleEval.transaction
+                matchedRuleNames = if (ruleEval.matchedRules.isNotEmpty()) {
+                    " [规则:${ruleEval.matchedRules.joinToString("+") { it.name }}]"
+                } else ""
+            }
+            null -> {
+                parsedTx = rawParsedTx
+                matchedRuleNames = ""
+            }
         }
 
         val amountTypeFingerprint = "AMT_${parsedTx.type}_${parsedTx.amountCents}_${parsedTx.currency}"
@@ -238,7 +268,7 @@ class CapturePipelineCoordinator(
             captureSource = captureSource,
             rawText = mergedText.take(140),
             outcome = CaptureEventOutcome.RECORDED,
-            detailSummary = "[${savedTx.type.displayName}] ${savedTx.category} · ${savedTx.merchant} (${savedTx.amountCents / 100.0} ${savedTx.currency}) -> $walletName",
+            detailSummary = "[${savedTx.type.displayName}] ${savedTx.category} · ${savedTx.merchant} (${savedTx.amountCents / 100.0} ${savedTx.currency}) -> $walletName$matchedRuleNames",
             transactionId = savedTx.id
         )
 

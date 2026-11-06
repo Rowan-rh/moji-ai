@@ -4,6 +4,7 @@ import android.app.Application
 import com.moji.ai.ai.AiAccountingEngine
 import com.moji.ai.ai.AiConfigManager
 import com.moji.ai.ai.MerchantMemoryManager
+import com.moji.ai.ai.SmartRuleEngine
 import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.SilentBookkeepingNotifier
@@ -29,6 +30,9 @@ class MoJiApp : Application() {
     lateinit var merchantMemoryManager: MerchantMemoryManager
         private set
 
+    lateinit var smartRuleEngine: SmartRuleEngine
+        private set
+
     lateinit var aiEngine: AiAccountingEngine
         private set
 
@@ -44,12 +48,14 @@ class MoJiApp : Application() {
         repository = LedgerRepository(database)
         aiConfigManager = AiConfigManager(this)
         merchantMemoryManager = MerchantMemoryManager(this)
+        smartRuleEngine = SmartRuleEngine(this)
         aiEngine = AiAccountingEngine(aiConfigManager, merchantMemoryManager)
         notifier = SilentBookkeepingNotifier(this)
         captureCoordinator = CapturePipelineCoordinator(
             repository = repository,
             aiEngine = aiEngine,
-            notifier = notifier
+            notifier = notifier,
+            smartRuleEngine = smartRuleEngine
         )
 
         // 启动时自动检查是否有到期的周期性固定收支（如房租、订阅）并静默入账
