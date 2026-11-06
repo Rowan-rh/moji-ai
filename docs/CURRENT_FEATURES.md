@@ -1,0 +1,99 @@
+# 默记 (MoJi) — 现有功能与技术架构全景梳理
+
+> 基于 `develop` 分支最新代码梳理，完整呈现默记当前已落地的功能闭环、代码模块映射与现有实现边界，作为后续迭代的基线文档。
+
+---
+
+## 一、 系统架构总览
+
+```text
+┌────────────────────────────────────────────────────────────────────────────┐
+│                           系统级无感采集层 (service/)                        │
+│  ┌──────────────────────────────────┐  ┌─────────────────────────────────┐ │
+│  │ PaymentNotificationListenerService│  │ PaymentAccessibilityService     │ │
+│  │ 微信/支付宝/云闪付/银行/短信通知   │  │ 支付成功/转账/还款/退款节点树抓取│ │
+│  └─────────────────┬────────────────┘  └────────────────┬────────────────┘ │
+│                    └─────────────────┬──────────────────┘                  │
+│                                      ▼                                     │
+│                    ┌───────────────────────────────────┐                   │
+│                    │ CapturePipelineCoordinator        │                   │
+│                    │ 1.1s 滑动窗口聚合 + 双层幂等防重   │                   │
+│                    └─────────────────┬─────────────────┘                   │
+└──────────────────────────────────────┼─────────────────────────────────────┘
+                                       ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                           AI 识账与语义解析层 (ai/)                          │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │ AiAccountingEngine                                                    │ │
+│  │ • 动态上下文注入：当前钱包列表（尾号/别名/币种）+ 最近15笔可冲抵消费   │ │
+│  │ • 云端协议：OpenAI 兼容接口 (DeepSeek/千问/硅基/Ollama) + Gemini 官方  │ │
+│  │ • 离线兜底：localSmartFallbackParse（消费/转账/还款/退款/AA/外币）     │ │
+│  └───────────────────────────────────┬───────────────────────────────────┘ │
+└──────────────────────────────────────┼─────────────────────────────────────┘
+                                       ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                        原子化账务引擎与持久化层 (data/)                      │
+│  ┌───────────────────────────────────────────────────────────────────────┐ │
+│  │ LedgerRepository + Room (AppDatabase v3)                              │ │
+│  │ • 7 大交易形态联动：支出/收入/转账/信用还款/退款冲销/借入/借出         │ │
+│  │ • 报销状态机 (reimbursable -> reimbursed) + 优惠/手续费核算            │ │
+│  │ • 通知栏广播一键原子撤销 (SilentBookkeepingNotifier + UndoReceiver)    │ │
+│  └───────────────────────────────────┬───────────────────────────────────┘ │
+└──────────────────────────────────────┼─────────────────────────────────────┘
+                                       ▼
+┌────────────────────────────────────────────────────────────────────────────┐
+│                     1:1 iCost 风格 Jetpack Compose UI 层 (ui/)              │
+│  ┌────────────────┐ ┌────────────────┐ ┌────────────────┐ ┌──────────────┐ │
+│  │ 账本首页        │ │ 资产管理        │ │ 多维统计        │ │ 记账计算器    │ │
+│  │ LedgerHomeTab  │ │ AssetsTab      │ │ StatisticsTab  │ │ Calculator   │ │
+│  └────────────────┘ └────────────────┘ └────────────────┘ └──────────────┘ │
+└────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 二、 核心已实现功能清单
+
+### 1. 免 Root 双通道无感采集与智能防重 (`service/`)
+
+| 子模块 | 源码位置 | 已实现能力 | 当前边界 / 待增强点 |
+| :--- | :--- | :--- | :--- |
+| **通知栏监听** | [PaymentNotificationListenerService.kt](../app/src/main/java/com/moji/ai/service/PaymentNotificationListenerService.kt) | 实时捕获状态栏通知的 `EXTRA_TITLE`、`EXTRA_TEXT` 与 `EXTRA_BIG_TEXT`，优先提取长文本，过滤系统与自身包名。 | 暂未记录“被过滤/未触发原因”的调试日志队列，用户在通知未入账时无法在 App 内直接排查原因。 |
+| **无障碍页面节点抓取** | [PaymentAccessibilityService.kt](../app/src/main/java/com/moji/ai/service/PaymentAccessibilityService.kt) | 针对微信、支付宝、云闪付、美团、拼多多、京东、招行/建行/工行及短信，在检测到“支付成功/付款成功/转账成功/还款成功/退款成功/账单详情”等触发词时，递归提取深度 `<=18`、最多 `45` 个可见文本节点（无需截屏 OCR）。 | 部分小程序或自绘 Canvas/WebView 页面无文本节点时无法提取；缺少摇一摇/截图补录通道。 |
+| **滑动时间窗合并与幂等防重** | [CapturePipelineCoordinator.kt](../app/src/main/java/com/moji/ai/service/CapturePipelineCoordinator.kt) | 1. **首层精确去重**：20 秒内相同 `packageName + textHash` 直接丢弃；<br>2. **1.1 秒滑动聚合窗口**：将同一笔交易先后到达的“页面商户文本”与“银行卡扣款通知”合并为 `AI_MERGED` 上下文一次性送入 AI；<br>3. **二次幂等校验**：12 秒内相同 `交易类型 + 金额 + 币种` 防重复入账；<br>4. **沙盒直通车**：提供 `processImmediateText()` 供 App 内沙盒测试台即时验证。 | 滑动窗口固定为 `1100ms`，若银行短信延迟 3~8 秒到达，可能跨越窗口；可借鉴多通道事后合并机制。 |
+
+---
+
+### 2. 多协议 AI 识账引擎与离线语义兜底 (`ai/`)
+
+| 子模块 | 源码位置 | 已实现能力 | 当前边界 / 待增强点 |
+| :--- | :--- | :--- | :--- |
+| **多模型配置管理** | [AiConfigManager.kt](../app/src/main/java/com/moji/ai/ai/AiConfigManager.kt) | 支持配置 `OPENAI_COMPATIBLE`（自定义 `baseUrl`、`apiKey`、`modelName`）与 `GEMINI_OFFICIAL` 双协议，支持开关通知采集、无障碍采集与本地启发式兜底。 | 暂不支持端侧离线 `.litertlm` / `.gguf` 小模型推理；API Key 存储在常规偏好设置中。 |
+| **上下文感知 Prompt** | [AiAccountingEngine.kt](../app/src/main/java/com/moji/ai/ai/AiAccountingEngine.kt) | 每次调用动态注入：<br>• 用户全部钱包（含 `id`、名称、类型、币种、银行卡后四位 `cardLast4`、内部匹配别名 `aliases`）；<br>• 最近 15 笔可冲销消费账单（含净支出金额與商户），由 AI 自动输出结构化 JSON。 | 未注入用户历史高频商户的自定义分类偏好（商户记忆自学习）。 |
+| **离线智能语义引擎** | [AiAccountingEngine.kt](../app/src/main/java/com/moji/ai/ai/AiAccountingEngine.kt) (`localSmartFallbackParse`) | 断网或未填 Key 时自动降级，支持：<br>• 6 种币种符号与金额正则提取；<br>• 银行卡尾号 (`cardLast4`)、钱包名称与别名精准匹配；<br>• 自动识别 **信用还款 (`REPAYMENT`)**、**内部提现/充值转账 (`TRANSFER`)**、**退款/AA 冲销 (`REFUND_OFFSET`)**、**日常收入 (`INCOME`)** 与 **消费分类映射**。 | 离线品牌词与分类词表目前硬编码在代码中，暂不支持用户可视化配置关键词权重或导入社区规则库。 |
+
+---
+
+### 3. 全能账务引擎与本地数据库 (`data/`)
+
+| 子模块 | 源码位置 | 已实现能力 | 当前边界 / 待增强点 |
+| :--- | :--- | :--- | :--- |
+| **4 大账户体系与净资产** | [Entities.kt](../app/src/main/java/com/moji/ai/data/local/Entities.kt), [LedgerEnums.kt](../app/src/main/java/com/moji/ai/data/model/LedgerEnums.kt) | • 支持 **储蓄卡 (`DEBIT_BANK`)**、**数字钱包 (`DIGITAL_WALLET`)**、**信用账户 (`CREDIT`)**、**现金/其他 (`CASH_OTHER`)**；<br>• 信用账户支持授信总额度 (`creditLimitCents`)、待还欠款 (`balanceCents`)、账单日 (`billingDay`) 与还款日 (`repaymentDay`)；<br>• 支持 `includeInNetWorth` 独立控制是否计入净资产。 | 修改账户余额目前直接覆盖，尚无“登记当前余额自动生成差额平账流水”机制。 |
+| **7 大交易形态与强一致事务** | [LedgerRepository.kt](../app/src/main/java/com/moji/ai/data/repository/LedgerRepository.kt) | 全程基于 Room `db.withTransaction` 原子化更新账单与钱包余额：<br>1. `EXPENSE`（支出，含优惠 `discountCents` 与手续费 `feeCents`）<br>2. `INCOME`（收入）<br>3. `TRANSFER`（内部转账，双向联动资产，不计入收支）<br>4. `REPAYMENT`（信用还款，扣减资产并恢复信用额度）<br>5. `REFUND_OFFSET`（全额/部分退款或 AA 冲销，恢复收款钱包余额并扣减原消费净支出 `refundedAmountCents`）<br>6. `LOAN_IN`（借入）<br>7. `LOAN_OUT`（借出） | 暂不支持单笔账单拆分为多个分类（Split Transaction 分拆账单）。 |
+| **报销闭环管理** | [LedgerRepository.kt](../app/src/main/java/com/moji/ai/data/repository/LedgerRepository.kt) (`settleReimbursement`) | 支持消费标记为 `reimbursable`（待报销），并在后续一键执行 `settleReimbursement` 完成报销入账、恢复指定收款钱包余额。 | 暂不支持批量勾选多笔待报销账单合并报销。 |
+| **周期性固定账单** | [Entities.kt](../app/src/main/java/com/moji/ai/data/local/Entities.kt) (`RecurringRuleEntity`) | 支持按天/周/月/年配置周期性收支或转账规则，到期自动生成 `RECURRING` 账单并推进下次触发时间。 | 缺少基于历史流水自动发现潜在订阅（如每月固定扣款）的智能提醒。 |
+| **通知栏一键原子撤销** | [SilentBookkeepingNotifier.kt](../app/src/main/java/com/moji/ai/notification/SilentBookkeepingNotifier.kt) | 后台静默入账后发送系统通知，展示交易类型、商户、分类、金额与扣款后最新余额；点击通知栏 **「撤销入账」** 按钮即可通过 `UndoTransactionReceiver` 原子化回滚账单、钱包余额与关联退款额度。 | 通知栏目前提供「撤销入账」，后续可扩展「改分类 / 改账户」快捷交互。 |
+
+---
+
+### 4. 1:1 对标 iCost 的 Jetpack Compose 视觉与交互体系 (`ui/`)
+
+| 页面 / 组件 | 源码位置 | 已实现能力 |
+| :--- | :--- | :--- |
+| **视觉主题与图标字体** | [ICostTheme.kt](../app/src/main/java/com/moji/ai/ui/theme/ICostTheme.kt), [CategoryCatalog.kt](../app/src/main/java/com/moji/ai/data/model/CategoryCatalog.kt) | 内置 `ICDIN` 凝缩数字字体 + 200 枚线性分类与银行/支付品牌图标（微信、支付宝、花呗、白条、招行、工行、建行、云闪付、Visa 等），1:1 还原 iCost 圆角卡片与配色体系。 |
+| **账本首页** | [LedgerHomeTab.kt](../app/src/main/java/com/moji/ai/ui/screens/LedgerHomeTab.kt) | 多账本切换、关键词实时搜索、三页可滑动月度概览卡片（收支结余 / 月度预算进度 / AI 自动识账统计）、收支日历入口、按日可折叠流水卡片组、退款划线冲销标签展示。 |
+| **记账计算器面板** | [ICostCalculatorSheet.kt](../app/src/main/java/com/moji/ai/ui/components/ICostCalculatorSheet.kt) | 支出/收入/转账/还款四模式切换、一级分类与二级子分类自动展开网格、账户/报销/优惠/手续费/标签快捷胶囊、支持 `+ - × ÷` 四则实时运算的 `4×4` 键盘。 |
+| **账单详情与收支日历** | [TransactionDetailAndCalendarSheets.kt](../app/src/main/java/com/moji/ai/ui/components/TransactionDetailAndCalendarSheets.kt) | 全屏账单详情页（支持直接发起全额/部分退款、完成报销入账、编辑、删除、查看 AI 捕获原文）、月度收支日历热力与按日明细下钻。 |
+| **全能资产管理页** | [AssetsTab.kt](../app/src/main/java/com/moji/ai/ui/screens/AssetsTab.kt) | 净资产一键隐私显隐 (`👁️`)、总资产/总负债/总借入/总借出联动卡片、可折叠信用账户（显示账单日/还款日倒计时与可用额度进度）与资金账户列表、单账户独立流水详情与一键还款/转账。 |
+| **多维统计页** | [StatisticsTab.kt](../app/src/main/java/com/moji/ai/ui/screens/StatisticsTab.kt) | 周/月/年/全部维度切换，收支柱状对比图、净资产趋势图、支出分类环形图与占比排行、报销统计（待报销/已报销）与流转统计（优惠/手续费/转账）宫格卡片。 |
+| **设置与智能记账中心** | [MoJiMainScreen.kt](../app/src/main/java/com/moji/ai/ui/MoJiMainScreen.kt) | 通知监听与无障碍权限状态实时检测与一键跳转授权、AI 接口参数配置、内置 **AI 识账沙盒测试台**（预设微信消费、银行信用卡通知、零钱提现、储蓄卡还花呗、AA 分摊、美元订阅等一键测试样本）、周期性固定账单管理。 |

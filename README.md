@@ -28,4 +28,9 @@
 adb install -r -g app/build/outputs/apk/debug/app-debug.apk
 ```
 
-详细产品需求与架构设计参见 [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md)。
+## 文档导航
+
+- **产品需求与技术规格**：[`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md)
+- **现有功能与架构全景梳理**：[`docs/CURRENT_FEATURES.md`](docs/CURRENT_FEATURES.md)
+- **42 个开源项目深度对标与可借鉴特性演进蓝图**：[`docs/OPEN_SOURCE_BENCHMARK_AND_ROADMAP.md`](docs/OPEN_SOURCE_BENCHMARK_AND_ROADMAP.md)
+
