@@ -226,9 +226,10 @@ fun ICostCalculatorSheet(
     }
     var tagText by remember { mutableStateOf(editingTransaction?.tags ?: "") }
 
+    // 非转账模式下 sourceWalletId 表示「这笔账的账户」；收入类账单把账户存在 targetWalletId
     var sourceWalletId by remember {
         mutableStateOf(
-            editingTransaction?.sourceWalletId ?: initialSourceWalletId
+            if (editingTransaction != null) editingAccountWalletId(editingTransaction) else initialSourceWalletId
         )
     }
     var targetWalletId by remember {
@@ -274,7 +275,11 @@ fun ICostCalculatorSheet(
                 String.format(Locale.US, "%.2f", editingTransaction!!.feeCents / 100.0)
             } else ""
             tagText = editingTransaction?.tags ?: ""
-            sourceWalletId = editingTransaction?.sourceWalletId ?: initialSourceWalletId
+            sourceWalletId = if (editingTransaction != null) {
+                editingAccountWalletId(editingTransaction)
+            } else {
+                initialSourceWalletId
+            }
             targetWalletId = editingTransaction?.targetWalletId ?: initialTargetWalletId
             entryTimestamp = editingTransaction?.timestamp ?: System.currentTimeMillis()
             timeManuallySet = false
@@ -424,7 +429,12 @@ fun ICostCalculatorSheet(
         val rate = CurrencyCode.fromCode(currency).defaultRateToCny
         val cnyCents = (cents * rate).roundToLong()
         val discountCents = if (txType == TransactionType.EXPENSE) parseYuanToCents(discountYuanStr) ?: 0L else 0L
-        val feeCents = if (txType == TransactionType.TRANSFER) parseYuanToCents(feeYuanStr) ?: 0L else 0L
+        // 非转账账单没有手续费输入框：编辑时保留原有手续费（如自动识别出的手续费），避免余额被悄悄改动
+        val feeCents = if (txType == TransactionType.TRANSFER) {
+            parseYuanToCents(feeYuanStr) ?: 0L
+        } else {
+            editingTransaction?.feeCents ?: 0L
+        }
 
         val resolvedSourceId: Long?
         val resolvedTargetId: Long?
@@ -442,7 +452,8 @@ fun ICostCalculatorSheet(
             resolvedTargetId = targetWalletId
         } else {
             val defaultWallet = wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull()
-            resolvedSourceId = sourceWalletId ?: defaultWallet?.id
+            // 编辑原本未关联账户的账单时保持不关联，不擅自记到默认账户
+            resolvedSourceId = sourceWalletId ?: if (editingTransaction != null) null else defaultWallet?.id
             resolvedTargetId = null
         }
         val resolvedSourceWallet = wallets.firstOrNull { it.id == resolvedSourceId }
@@ -480,9 +491,12 @@ fun ICostCalculatorSheet(
             editingTransaction.merchant to typedText
         }
 
-        val finalSourceId = if (actualType == TransactionType.INCOME) null else resolvedSourceId
+        val isIncomeLike = actualType == TransactionType.INCOME ||
+            actualType == TransactionType.LOAN_IN ||
+            actualType == TransactionType.REFUND_OFFSET
+        val finalSourceId = if (isIncomeLike) null else resolvedSourceId
         val finalTargetId = when (actualType) {
-            TransactionType.INCOME -> resolvedSourceId
+            TransactionType.INCOME, TransactionType.LOAN_IN, TransactionType.REFUND_OFFSET -> resolvedSourceId
             TransactionType.TRANSFER, TransactionType.REPAYMENT -> resolvedTargetId
             else -> null
         }
@@ -565,7 +579,11 @@ fun ICostCalculatorSheet(
             if (hasUnsavedInput) showDiscardConfirm = true else requestDismiss()
         }
         // 晚于抽屉自身注册，优先拦截系统返回键
-        BackHandler(enabled = visible && hasUnsavedInput) { showDiscardConfirm = true }
+        // 只在面板可见时注册：BackHandler 按注册先后决定优先级，常驻预热的面板若一直注册，
+        // 会被之后打开的全屏页（钱包详情、日历）抢先处理返回键
+        if (visible) {
+            BackHandler(enabled = hasUnsavedInput) { showDiscardConfirm = true }
+        }
 
         if (showDiscardConfirm) {
             AlertDialog(
@@ -1008,8 +1026,7 @@ fun ICostCalculatorSheet(
             // 3. 快捷属性胶囊栏（选择账户 | 报销 | 优惠 | 标签 + 右侧币种胶囊）
             // 未手动选择时展示保存时实际会使用的默认账户，避免「显示未选、实际记入某账户」
             val currentWallet = wallets.firstOrNull { it.id == sourceWalletId }
-                ?: wallets.firstOrNull { !it.type.isLiability }
-                ?: wallets.firstOrNull()
+                ?: if (isEditing) null else (wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull())
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1631,4 +1648,13 @@ private fun ICostOptionPill(
             )
         }
     }
+}
+
+/**
+ * 编辑账单时「账户」胶囊对应的钱包：收入、借入、退款入账把入账账户存在 targetWalletId，其余存在 sourceWalletId
+ */
+private fun editingAccountWalletId(tx: TransactionEntity): Long? = when (tx.type) {
+    TransactionType.INCOME, TransactionType.LOAN_IN, TransactionType.REFUND_OFFSET ->
+        tx.targetWalletId ?: tx.sourceWalletId
+    else -> tx.sourceWalletId
 }

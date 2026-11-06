@@ -278,8 +278,11 @@ fun ICostSmoothBottomSheet(
         return
     }
 
-    BackHandler(enabled = visible && !isDismissing) {
-        triggerAnimatedDismiss(0f)
+    // 仅在可见时注册（而不是常驻注册再切换 enabled），保证每次打开都排在最新、优先于其下方页面
+    if (visible) {
+        BackHandler(enabled = !isDismissing) {
+            triggerAnimatedDismiss(0f)
+        }
     }
 
     val verticalDragState = rememberDraggableState { delta ->

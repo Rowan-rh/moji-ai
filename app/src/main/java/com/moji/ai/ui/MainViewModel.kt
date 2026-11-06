@@ -67,11 +67,11 @@ data class InstallmentPlanItem(
 )
 
 /**
- * 一次性的界面提示（Snackbar）。undoTransactionId 不为空时提供「撤销」按钮，撤销即删除该笔新建账单并回滚余额。
+ * 一次性的界面提示（Snackbar）。onUndo 不为空时提供「撤销」按钮。
  */
 data class UiMessage(
     val text: String,
-    val undoTransactionId: Long? = null
+    val onUndo: (() -> Unit)? = null
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -128,15 +128,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _uiMessages = MutableSharedFlow<UiMessage>(extraBufferCapacity = 8)
     val uiMessages: SharedFlow<UiMessage> = _uiMessages.asSharedFlow()
 
-    private fun postMessage(text: String, undoTransactionId: Long? = null) {
-        _uiMessages.tryEmit(UiMessage(text, undoTransactionId))
-    }
-
-    /** Snackbar「撤销」：删除刚刚一键生成的账单并回滚余额 */
-    fun undoCreatedTransaction(txId: Long) {
-        viewModelScope.launch {
-            repository.undoAndDeleteTransaction(txId)
-        }
+    /**
+     * @param undoTransactionId 一键生成的账单 id：撤销时删除该账单并回滚余额
+     * @param extraUndo 撤销时额外需要回滚的状态（如分期已还期数、周期账单下次触发时间）
+     */
+    private fun postMessage(
+        text: String,
+        undoTransactionId: Long? = null,
+        extraUndo: (suspend () -> Unit)? = null
+    ) {
+        val onUndo: (() -> Unit)? = if (undoTransactionId != null || extraUndo != null) {
+            {
+                viewModelScope.launch {
+                    undoTransactionId?.let { repository.undoAndDeleteTransaction(it) }
+                    extraUndo?.invoke()
+                }
+            }
+        } else null
+        _uiMessages.tryEmit(UiMessage(text, onUndo))
     }
 
     private val _isParsing = MutableStateFlow(false)
@@ -330,7 +339,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun payNextInstallmentPeriod(plan: InstallmentPlanItem) {
         if (plan.paidPeriods >= plan.totalPeriods) return
         val nextPeriod = plan.paidPeriods + 1
-        val principalPerPeriod = plan.totalCents / plan.totalPeriods.coerceAtLeast(1)
+        val periods = plan.totalPeriods.coerceAtLeast(1)
+        // 整除余下的分摊到最后一期，保证各期合计等于分期总额
+        val principalPerPeriod = plan.totalCents / periods +
+            if (nextPeriod == periods) plan.totalCents % periods else 0L
         val totalPeriodCents = principalPerPeriod + plan.feePerPeriodCents
 
         val updated = _installmentPlans.value.map {
@@ -361,7 +373,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 captureSource = "INSTALLMENT"
             )
             val newId = repository.recordTransaction(tx)
-            postMessage("已记入第 ${nextPeriod}/${plan.totalPeriods} 期还款", undoTransactionId = newId)
+            postMessage(
+                "已记入第 ${nextPeriod}/${plan.totalPeriods} 期还款",
+                undoTransactionId = newId,
+                extraUndo = {
+                    val reverted = _installmentPlans.value.map {
+                        if (it.id == plan.id) it.copy(paidPeriods = (it.paidPeriods - 1).coerceAtLeast(0)) else it
+                    }
+                    _installmentPlans.value = reverted
+                    uiPrefs.edit().putString("saved_installments_json", jsonCodec.encodeToString(reverted)).apply()
+                }
+            )
         }
     }
 
@@ -746,7 +768,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             created.forEach { app.notifier.sendSilentRecordedNotification(it, allWallets) }
             val mine = created.firstOrNull { it.merchant == rule.title }
             if (mine != null) {
-                postMessage("已记一笔「${rule.title}」", undoTransactionId = mine.id)
+                postMessage(
+                    "已记一笔「${rule.title}」",
+                    undoTransactionId = mine.id,
+                    extraUndo = { repository.saveRecurringRule(rule) }
+                )
             }
         }
     }

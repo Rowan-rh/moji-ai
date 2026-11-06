@@ -149,6 +149,8 @@ import com.moji.ai.ui.theme.iCostHorizontalSwipeTrigger
 import com.moji.ai.ui.theme.iCostPressScale
 import com.moji.ai.ui.theme.preloadAllICostAssets
 import java.util.Calendar
+import java.util.Locale
+import kotlinx.coroutines.flow.collectLatest
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -186,15 +188,16 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     // 全局操作反馈：删除、一键记账、退款等完成后弹出 Snackbar，可撤销的操作附带「撤销」按钮
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(viewModel) {
-        viewModel.uiMessages.collect { msg ->
+        // collectLatest：新消息到来时取消正在显示的旧提示，立即展示新的（含其「撤销」按钮），不排队等待
+        viewModel.uiMessages.collectLatest { msg ->
             snackbarHostState.currentSnackbarData?.dismiss()
             val result = snackbarHostState.showSnackbar(
                 message = msg.text,
-                actionLabel = if (msg.undoTransactionId != null) "撤销" else null,
+                actionLabel = if (msg.onUndo != null) "撤销" else null,
                 duration = SnackbarDuration.Short
             )
             if (result == SnackbarResult.ActionPerformed) {
-                msg.undoTransactionId?.let { viewModel.undoCreatedTransaction(it) }
+                msg.onUndo?.invoke()
             }
         }
     }
@@ -651,7 +654,11 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
 
     if (showBudgetDialog) {
         var budgetInput by remember(monthlyBudgetCents) {
-            mutableStateOf(if (monthlyBudgetCents > 0) String.format("%.0f", monthlyBudgetCents / 100.0) else "")
+            mutableStateOf(
+                if (monthlyBudgetCents > 0) {
+                    String.format(Locale.US, "%.2f", monthlyBudgetCents / 100.0).trimEnd('0').trimEnd('.')
+                } else ""
+            )
         }
         val parsedBudget = budgetInput.toDoubleOrNull()
         val budgetError = budgetInput.isNotBlank() && (parsedBudget == null || parsedBudget < 0)

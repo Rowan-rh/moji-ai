@@ -1277,9 +1277,12 @@ private fun sanitizeAmountInput(raw: String, allowNegative: Boolean = false): St
 }
 
 private fun installmentRemainCents(plan: InstallmentPlanItem): Long {
-    val remainPeriods = (plan.totalPeriods - plan.paidPeriods).coerceAtLeast(0)
-    val perPeriod = plan.totalCents / plan.totalPeriods.coerceAtLeast(1) + plan.feePerPeriodCents
-    return perPeriod * remainPeriods
+    val periods = plan.totalPeriods.coerceAtLeast(1)
+    val remainPeriods = (periods - plan.paidPeriods).coerceIn(0, periods)
+    if (remainPeriods == 0) return 0L
+    // 本金整除余数计入最后一期（与 MainViewModel.payNextInstallmentPeriod 一致）
+    val principalPaid = plan.totalCents / periods * (periods - remainPeriods)
+    return (plan.totalCents - principalPaid) + plan.feePerPeriodCents * remainPeriods
 }
 
 /** 把本位币（CNY）分转换为指定币种的分，用于与账户币种保持一致展示。 */
