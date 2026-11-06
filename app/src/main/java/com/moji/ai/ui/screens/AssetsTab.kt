@@ -540,9 +540,11 @@ fun ICostAssetsScreen(
                             AnimatedVisibility(
                                 visible = creditExpanded,
                                 enter = expandVertically(
-                                    animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
-                                ) + fadeIn(tween(180)),
-                                exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                                    animationSpec = spring(dampingRatio = 0.94f, stiffness = 600f)
+                                ) + fadeIn(tween(140)),
+                                exit = shrinkVertically(
+                                    animationSpec = spring(dampingRatio = 0.96f, stiffness = 680f)
+                                ) + fadeOut(tween(110))
                             ) {
                                 Column(modifier = Modifier.fillMaxWidth()) {
                                     creditWallets.forEachIndexed { idx, w ->
@@ -619,9 +621,11 @@ fun ICostAssetsScreen(
                             AnimatedVisibility(
                                 visible = assetExpanded,
                                 enter = expandVertically(
-                                    animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
-                                ) + fadeIn(tween(180)),
-                                exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                                    animationSpec = spring(dampingRatio = 0.94f, stiffness = 600f)
+                                ) + fadeIn(tween(140)),
+                                exit = shrinkVertically(
+                                    animationSpec = spring(dampingRatio = 0.96f, stiffness = 680f)
+                                ) + fadeOut(tween(110))
                             ) {
                                 Column(modifier = Modifier.fillMaxWidth()) {
                                     assetWallets.forEachIndexed { idx, w ->
@@ -1058,7 +1062,11 @@ private fun ICostAccountItemRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .iCostPressScale(pressedScale = 0.98f, onClick = onClick)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

@@ -329,9 +329,11 @@ fun ICostLedgerHomeScreen(
             AnimatedVisibility(
                 visible = showQuickTemplatesBar && templates.isNotEmpty(),
                 enter = expandVertically(
-                    animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
-                ) + fadeIn(tween(180)),
-                exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                    animationSpec = spring(dampingRatio = 0.94f, stiffness = 600f)
+                ) + fadeIn(tween(140)),
+                exit = shrinkVertically(
+                    animationSpec = spring(dampingRatio = 0.96f, stiffness = 680f)
+                ) + fadeOut(tween(110))
             ) {
                 Surface(
                     shape = RoundedCornerShape(20.dp),
@@ -861,11 +863,11 @@ fun ICostLedgerHomeScreen(
                         AnimatedVisibility(
                             visible = !isCollapsed,
                             enter = expandVertically(
-                                animationSpec = spring(dampingRatio = 0.80f, stiffness = Spring.StiffnessMediumLow)
-                            ) + fadeIn(tween(180)),
+                                animationSpec = spring(dampingRatio = 0.94f, stiffness = 600f)
+                            ) + fadeIn(tween(140)),
                             exit = shrinkVertically(
-                                animationSpec = tween(200)
-                            ) + fadeOut(tween(150))
+                                animationSpec = spring(dampingRatio = 0.96f, stiffness = 680f)
+                            ) + fadeOut(tween(110))
                         ) {
                             Card(
                                 modifier = Modifier.fillMaxWidth(),
@@ -1104,7 +1106,11 @@ private fun ICostLedgerRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .iCostPressScale(pressedScale = 0.98f, onClick = onClick)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick
+            )
             .padding(horizontal = 16.dp, vertical = 13.dp),
         verticalAlignment = Alignment.Top
     ) {

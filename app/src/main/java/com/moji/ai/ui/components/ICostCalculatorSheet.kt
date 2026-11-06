@@ -35,9 +35,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.filled.AccessTime
@@ -55,6 +57,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -86,6 +89,7 @@ import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostGreenIncome
 import com.moji.ai.ui.theme.ICostSlateIcon
+import com.moji.ai.ui.theme.ICostSmoothBottomSheet
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.WalletBrandAvatar
@@ -105,6 +109,7 @@ fun ICostCalculatorSheet(
     currentLedger: String,
     ledgers: List<String> = listOf("默认账本"),
     onSelectLedger: (String) -> Unit = {},
+    visible: Boolean = true,
     editingTransaction: TransactionEntity? = null,
     initialType: TransactionType = TransactionType.EXPENSE,
     initialSourceWalletId: Long? = null,
@@ -113,8 +118,6 @@ fun ICostCalculatorSheet(
     onSaveTransaction: (TransactionEntity, keepOpen: Boolean) -> Unit,
     onOpenAiSandbox: () -> Unit = {}
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-
     // 1:1 iCost 顶部三态：支出 | 收入 | 转账（若外部传入 REPAYMENT 则归在转账 tab 并在保存时自动判断目标账户）
     var txType by remember {
         val raw = editingTransaction?.type ?: initialType
@@ -169,6 +172,37 @@ fun ICostCalculatorSheet(
         mutableStateOf(
             editingTransaction?.targetWalletId ?: initialTargetWalletId
         )
+    }
+
+    // 每次唤起面板时同步重置表单状态，配合 keepWarm 预热实现 0ms 首帧唤醒
+    LaunchedEffect(visible, editingTransaction, initialType, initialSourceWalletId, initialTargetWalletId) {
+        if (visible) {
+            val raw = editingTransaction?.type ?: initialType
+            txType = if (raw == TransactionType.REPAYMENT) TransactionType.TRANSFER else raw
+            val fullCat = editingTransaction?.category ?: if (raw == TransactionType.INCOME) {
+                CategoryCatalog.incomeCategories.first().name
+            } else {
+                "餐饮"
+            }
+            val parts = fullCat.split("-")
+            selectedMainCategory = parts.firstOrNull() ?: "餐饮"
+            selectedSubCategory = parts.getOrNull(1) ?: ""
+            expr = if (editingTransaction != null) {
+                String.format(Locale.US, "%.2f", editingTransaction.amountCents / 100.0).trimEnd('0').trimEnd('.')
+            } else ""
+            currency = editingTransaction?.currency ?: "CNY"
+            noteText = editingTransaction?.merchant?.ifBlank { editingTransaction.note } ?: ""
+            reimbursable = editingTransaction?.reimbursable ?: false
+            discountYuanStr = if ((editingTransaction?.discountCents ?: 0L) > 0L) {
+                String.format(Locale.US, "%.2f", editingTransaction!!.discountCents / 100.0)
+            } else ""
+            feeYuanStr = if ((editingTransaction?.feeCents ?: 0L) > 0L) {
+                String.format(Locale.US, "%.2f", editingTransaction!!.feeCents / 100.0)
+            } else ""
+            tagText = editingTransaction?.tags ?: ""
+            sourceWalletId = editingTransaction?.sourceWalletId ?: initialSourceWalletId
+            targetWalletId = editingTransaction?.targetWalletId ?: initialTargetWalletId
+        }
     }
 
     var showWalletPickerForTarget by remember { mutableStateOf<Boolean?>(null) } // false = source, true = target
@@ -246,7 +280,7 @@ fun ICostCalculatorSheet(
         }
     }
 
-    fun buildAndSubmit(keepOpen: Boolean) {
+    fun buildAndSubmit(keepOpen: Boolean, requestSheetDismiss: () -> Unit) {
         val evaluated = evaluateExpr(expr)
         if (evaluated <= 0.0) return
         val cents = (evaluated * 100.0).roundToLong()
@@ -306,22 +340,26 @@ fun ICostCalculatorSheet(
             timestamp = editingTransaction?.timestamp ?: System.currentTimeMillis(),
             captureSource = editingTransaction?.captureSource ?: "MANUAL"
         )
-        onSaveTransaction(entity, keepOpen)
         if (keepOpen) {
+            onSaveTransaction(entity, true)
             expr = ""
             noteText = ""
             discountYuanStr = ""
             feeYuanStr = ""
+        } else {
+            onSaveTransaction(entity, true)
+            requestSheetDismiss()
         }
     }
 
-    ModalBottomSheet(
+    ICostSmoothBottomSheet(
         onDismissRequest = onDismiss,
-        sheetState = sheetState,
-        dragHandle = null,
+        visible = visible,
+        keepWarm = true,
         containerColor = ICostBgGray,
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
-    ) {
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+        showDragHandle = false
+    ) { requestDismiss ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -336,7 +374,7 @@ fun ICostCalculatorSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                ICostCircleIconButton(onClick = onDismiss, size = 38.dp) {
+                ICostCircleIconButton(onClick = requestDismiss, size = 38.dp) {
                     Icon(
                         Icons.Default.Close,
                         contentDescription = "关闭",
@@ -452,31 +490,24 @@ fun ICostCalculatorSheet(
                     }
                     val activeColor = if (currentMode == TransactionType.EXPENSE) ICostCoralRed else ICostGreenIncome
                     val rows = remember(categories) { categories.chunked(5) }
+                    val categoryScrollState = rememberScrollState()
 
-                    LazyColumn(
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(categoryScrollState)
+                            .padding(horizontal = 14.dp, vertical = 6.dp),
                         verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         rows.forEach { rowItems ->
-                            item {
-                                Column {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween
-                                    ) {
+                            Column {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
                                         rowItems.forEach { cat ->
                                             val isSelected = selectedMainCategory == cat.name
-                                            val circleBg by animateColorAsState(
-                                                targetValue = if (isSelected) activeColor else Color(0xFFECECEE),
-                                                animationSpec = tween(180),
-                                                label = "CatCircleBg"
-                                            )
-                                            val circleScale by animateFloatAsState(
-                                                targetValue = if (isSelected) 1.07f else 1.0f,
-                                                animationSpec = spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMedium),
-                                                label = "CatCircleScale"
-                                            )
+                                            val circleBg = if (isSelected) activeColor else Color(0xFFECECEE)
                                             Column(
                                                 modifier = Modifier
                                                     .weight(1f)
@@ -487,12 +518,7 @@ fun ICostCalculatorSheet(
                                                 horizontalAlignment = Alignment.CenterHorizontally
                                             ) {
                                                 Box(
-                                                    modifier = Modifier
-                                                        .size(52.dp)
-                                                        .graphicsLayer {
-                                                            scaleX = circleScale
-                                                            scaleY = circleScale
-                                                        },
+                                                    modifier = Modifier.size(52.dp),
                                                     contentAlignment = Alignment.Center
                                                 ) {
                                                     Box(
@@ -542,16 +568,18 @@ fun ICostCalculatorSheet(
                                         }
                                     }
 
-                                    // 1:1 展开当前选中主分类的 5 列浅灰圆角二级分类盒（弹簧展开/收起过渡）
+                                    // 1:1 展开当前选中主分类的 5 列浅灰圆角二级分类盒（高响应临界阻尼弹簧过渡）
                                     val expandedCat = rowItems.firstOrNull {
                                         it.name == selectedMainCategory && it.subCategories.isNotEmpty()
                                     }
                                     AnimatedVisibility(
                                         visible = expandedCat != null,
                                         enter = expandVertically(
-                                            animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
-                                        ) + fadeIn(tween(180)),
-                                        exit = shrinkVertically(tween(160)) + fadeOut(tween(120))
+                                            animationSpec = spring(dampingRatio = 0.94f, stiffness = 620f)
+                                        ) + fadeIn(tween(140)),
+                                        exit = shrinkVertically(
+                                            animationSpec = spring(dampingRatio = 0.96f, stiffness = 680f)
+                                        ) + fadeOut(tween(110))
                                     ) {
                                         if (expandedCat != null) {
                                             Column {
@@ -606,7 +634,6 @@ fun ICostCalculatorSheet(
                                                                 }
                                                                 repeat(5 - subRow.size) {
                                                                     Spacer(modifier = Modifier.weight(1f))
-                                                                }
                                                             }
                                                         }
                                                     }
@@ -933,7 +960,7 @@ fun ICostCalculatorSheet(
                     ) {
                         row.forEach { key ->
                             val isDoneKey = key == "DONE"
-                            val targetBgColor = if (isDoneKey) {
+                            val bgColor = if (isDoneKey) {
                                 when (txType) {
                                     TransactionType.EXPENSE -> ICostCoralRed
                                     TransactionType.INCOME -> ICostGreenIncome
@@ -942,11 +969,6 @@ fun ICostCalculatorSheet(
                             } else {
                                 ICostCardWhite
                             }
-                            val bgColor by animateColorAsState(
-                                targetValue = targetBgColor,
-                                animationSpec = tween(200),
-                                label = "CalcKeyBg"
-                            )
 
                             Surface(
                                 shape = RoundedCornerShape(16.dp),
@@ -965,13 +987,13 @@ fun ICostCalculatorSheet(
                                                     expr = if (lastPart.isEmpty()) "${expr}0." else "$expr."
                                                 }
                                             }
-                                            "AGAIN" -> buildAndSubmit(keepOpen = true)
+                                            "AGAIN" -> buildAndSubmit(keepOpen = true, requestSheetDismiss = requestDismiss)
                                             "DONE" -> {
                                                 if (hasPendingOperator) {
                                                     val res = evaluateExpr(expr)
                                                     expr = String.format(Locale.US, "%.2f", res).trimEnd('0').trimEnd('.')
                                                 } else {
-                                                    buildAndSubmit(keepOpen = false)
+                                                    buildAndSubmit(keepOpen = false, requestSheetDismiss = requestDismiss)
                                                 }
                                             }
                                             else -> {
