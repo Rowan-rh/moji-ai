@@ -1,5 +1,7 @@
 package com.moji.ai.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -85,8 +87,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.ai.AiConfig
 import com.moji.ai.ai.AiProviderType
+import com.moji.ai.ai.MerchantMemoryEntry
+import com.moji.ai.data.backup.BackupAndCsvTransferEngine
+import com.moji.ai.data.backup.CsvParsePreviewResult
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.service.CaptureEventOutcome
+import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.service.PaymentAccessibilityService
 import com.moji.ai.ui.components.ICostCalculatorSheet
 import com.moji.ai.ui.components.MonthlyCalendarSheet
@@ -129,6 +136,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val templates by viewModel.templates.collectAsState()
     val savingPlans by viewModel.savingPlans.collectAsState()
     val installmentPlans by viewModel.installmentPlans.collectAsState()
+    val merchantMemories by viewModel.merchantMemories.collectAsState()
+    val observabilityLogs by viewModel.observabilityLogs.collectAsState()
 
     var selectedTab by remember { mutableIntStateOf(0) } // 0: 账本, 1: 资产, 2: 统计
 
@@ -160,6 +169,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var showAiSandboxSheet by remember { mutableStateOf(false) }
     var showAiSettingsSheet by remember { mutableStateOf(false) }
     var showBudgetDialog by remember { mutableStateOf(false) }
+    var showBackupTransferSheet by remember { mutableStateOf(false) }
+    var backupInitialTab by remember { mutableIntStateOf(0) } // 0: 导入CSV, 1: 导出CSV, 2: 全量备份恢复
 
     // 缓存最后一次打开的全屏日历与账单详情数据，确保退出动画期间内容不闪空
     var cachedCalendarMonthTxs by remember { mutableStateOf<List<TransactionEntity>>(emptyList()) }
@@ -240,6 +251,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onToggleHideAmounts = { viewModel.toggleHideAssetAmounts() },
                     onSaveWallet = { viewModel.saveOrUpdateWallet(it) },
                     onDeleteWallet = { viewModel.deleteWallet(it) },
+                    onReconcileWallet = { walletId, actualYuan, recordTx, note ->
+                        viewModel.reconcileWalletBalance(walletId, actualYuan, recordTx, note)
+                    },
                     onQuickActionWithWallet = { type, srcId, dstId ->
                         editingTx = null
                         calcInitialType = type
@@ -378,7 +392,19 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onOpenSmartBookkeeping = { showSmartBookkeepingPage = true },
                 onOpenBudgetDialog = { showBudgetDialog = true },
                 onOpenAiModelConfig = { showAiSettingsSheet = true },
-                onOpenAiSandbox = { showAiSandboxSheet = true }
+                onOpenAiSandbox = { showAiSandboxSheet = true },
+                onOpenCsvImport = {
+                    backupInitialTab = 0
+                    showBackupTransferSheet = true
+                },
+                onOpenCsvExport = {
+                    backupInitialTab = 1
+                    showBackupTransferSheet = true
+                },
+                onOpenBackupRestore = {
+                    backupInitialTab = 2
+                    showBackupTransferSheet = true
+                }
             )
         }
 
@@ -399,6 +425,11 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onUpdateAiConfig = { viewModel.updateAiConfig(it) },
                 onOpenAiModelConfig = { showAiSettingsSheet = true },
                 onOpenAiSandbox = { showAiSandboxSheet = true },
+                merchantMemories = merchantMemories,
+                onRemoveMerchantMemory = { viewModel.deleteMerchantMemory(it) },
+                observabilityLogs = observabilityLogs,
+                onReplayLog = { entry -> viewModel.simulateCapturedEvent(entry.rawText, entry.packageName) },
+                onClearLogs = { viewModel.clearObservabilityLogs() },
                 onBack = { showSmartBookkeepingPage = false }
             )
         }
@@ -472,7 +503,32 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             AiSandboxSheetContent(
                 isParsing = isParsing,
                 statusMessage = sandboxStatus,
-                onRunSimulation = { text, pkg -> viewModel.simulateCapturedEvent(text, pkg) }
+                observabilityLogs = observabilityLogs,
+                merchantMemories = merchantMemories,
+                onRunSimulation = { text, pkg -> viewModel.simulateCapturedEvent(text, pkg) },
+                onClearLogs = { viewModel.clearObservabilityLogs() }
+            )
+        }
+    }
+
+    // 账单 CSV 导入导出与全量快照备份恢复面板
+    if (showBackupTransferSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showBackupTransferSheet = false },
+            containerColor = ICostCardWhite
+        ) {
+            BackupAndCsvTransferSheet(
+                initialTab = backupInitialTab,
+                statusMessage = sandboxStatus,
+                onPreviewCsv = { csv -> viewModel.previewCsvImport(csv) },
+                onCommitCsvImport = { csv, applyBalance, onDone ->
+                    viewModel.commitCsvImport(csv, applyBalance, onDone)
+                },
+                onExportCsv = { viewModel.generateCsvExportString() },
+                onExportFullBackup = { viewModel.generateFullBackupJson() },
+                onRestoreFullBackup = { json, onDone ->
+                    viewModel.restoreFromBackupJson(json, onDone)
+                }
             )
         }
     }
@@ -628,7 +684,10 @@ private fun ICostSettingsFullScreen(
     onOpenSmartBookkeeping: () -> Unit,
     onOpenBudgetDialog: () -> Unit,
     onOpenAiModelConfig: () -> Unit,
-    onOpenAiSandbox: () -> Unit
+    onOpenAiSandbox: () -> Unit,
+    onOpenCsvImport: () -> Unit = {},
+    onOpenCsvExport: () -> Unit = {},
+    onOpenBackupRestore: () -> Unit = {}
 ) {
     BackHandler(onBack = onBack)
 
@@ -741,7 +800,7 @@ private fun ICostSettingsFullScreen(
                     rows = listOf(
                         SettingRowDef("setting_multi_book.webp", "多账本", currentLedger),
                         SettingRowDef("setting_auto.webp", "智能记账", "去开启", onClick = onOpenSmartBookkeeping),
-                        SettingRowDef("setting_backup.webp", "AI 模型与权限中心", "配置", onClick = onOpenAiModelConfig)
+                        SettingRowDef("setting_backup.webp", "全量快照备份与恢复", ".mojibackup", onClick = onOpenBackupRestore)
                     )
                 )
             }
@@ -765,7 +824,7 @@ private fun ICostSettingsFullScreen(
                         SettingRowDef("setting_refund.webp", "退款管理"),
                         SettingRowDef("setting_currency.webp", "货币和汇率", "人民币 (CNY)"),
                         SettingRowDef("setting_template.webp", "记账模板"),
-                        SettingRowDef("setting_asset.webp", "资产设置"),
+                        SettingRowDef("setting_asset.webp", "AI 模型与权限中心", "配置", onClick = onOpenAiModelConfig),
                         SettingRowDef("setting_statistics.webp", "统计设置"),
                         SettingRowDef("setting_bill_image.webp", "AI 静默识账测试沙盒", "立即测试", onClick = onOpenAiSandbox)
                     )
@@ -776,8 +835,8 @@ private fun ICostSettingsFullScreen(
             item {
                 SettingsGroupCard(
                     rows = listOf(
-                        SettingRowDef("setting_import.webp", "账单导入"),
-                        SettingRowDef("setting_export.webp", "账单导出"),
+                        SettingRowDef("setting_import.webp", "账单导入", "微信/支付宝/钱迹 CSV", onClick = onOpenCsvImport),
+                        SettingRowDef("setting_export.webp", "账单导出", "标准 CSV 报表", onClick = onOpenCsvExport),
                         SettingRowDef("setting_password.webp", "密码保护"),
                         SettingRowDef("setting_time.webp", "定时提醒"),
                         SettingRowDef("setting_appearance.webp", "外观显示"),
@@ -851,6 +910,11 @@ private fun ICostSmartBookkeepingFullScreen(
     onUpdateAiConfig: (AiConfig) -> Unit,
     onOpenAiModelConfig: () -> Unit,
     onOpenAiSandbox: () -> Unit,
+    merchantMemories: List<MerchantMemoryEntry> = emptyList(),
+    onRemoveMerchantMemory: (String) -> Unit = {},
+    observabilityLogs: List<CaptureObservabilityLogEntry> = emptyList(),
+    onReplayLog: (CaptureObservabilityLogEntry) -> Unit = {},
+    onClearLogs: () -> Unit = {},
     onBack: () -> Unit
 ) {
     BackHandler(onBack = onBack)
@@ -1001,6 +1065,161 @@ private fun ICostSmartBookkeepingFullScreen(
                 }
             }
 
+            // 商户记忆自学习引擎（对标 Cashew 关联修正 + AutoAccounting AI 学习注入）
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "商户记忆自学习规则库（已记住 ${merchantMemories.size} 个商户，保存/编辑账单时自动更新）",
+                        fontSize = 13.sp,
+                        color = ICostTextSecondary,
+                        modifier = Modifier.padding(horizontal = 6.dp)
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = ICostCardWhite,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                            if (merchantMemories.isEmpty()) {
+                                Text(
+                                    text = "暂无记忆规则，手动新增或修正任意账单分类后将自动记住该商户",
+                                    fontSize = 13.sp,
+                                    color = ICostTextSecondary,
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+                            } else {
+                                merchantMemories.take(10).forEachIndexed { idx, entry ->
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "${entry.merchantKeyword}  ➔  ${entry.category}",
+                                                fontSize = 14.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = ICostTextPrimary
+                                            )
+                                            Text(
+                                                text = "累计命中/修正 ${entry.hitCount} 次 · 优先于离线通用词库与大模型",
+                                                fontSize = 11.sp,
+                                                color = ICostTextSecondary
+                                            )
+                                        }
+                                        Text(
+                                            text = "移除",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ICostCoralRed,
+                                            modifier = Modifier
+                                                .clickable { onRemoveMerchantMemory(entry.merchantKeyword) }
+                                                .padding(horizontal = 6.dp, vertical = 4.dp)
+                                        )
+                                    }
+                                    if (idx < merchantMemories.take(10).lastIndex) {
+                                        HorizontalDivider(color = ICostDivider)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 30 秒跨通道事后证据融合 + 采集可观测性日志面板
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 6.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "采集可观测日志 & 30s 跨通道证据融合 (${observabilityLogs.size})",
+                            fontSize = 13.sp,
+                            color = ICostTextSecondary
+                        )
+                        if (observabilityLogs.isNotEmpty()) {
+                            Text(
+                                text = "清空日志",
+                                fontSize = 12.sp,
+                                color = ICostBlueAccent,
+                                modifier = Modifier.clickable { onClearLogs() }
+                            )
+                        }
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = ICostCardWhite,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                            if (observabilityLogs.isEmpty()) {
+                                Text(
+                                    text = "暂无实时采集事件。可在「AI 静默识账测试沙盒」中模拟通知或跨通道补全事件。",
+                                    fontSize = 13.sp,
+                                    color = ICostTextSecondary,
+                                    modifier = Modifier.padding(vertical = 8.dp)
+                                )
+                            } else {
+                                observabilityLogs.take(8).forEachIndexed { idx, log ->
+                                    val badgeColor = when (log.outcome) {
+                                        CaptureEventOutcome.RECORDED -> ICostGreenIncome
+                                        CaptureEventOutcome.FUSED_PATCH -> ICostBlueAccent
+                                        CaptureEventOutcome.DEDUP_BLOCKED -> ICostAmberGold
+                                        CaptureEventOutcome.NOISE_IGNORED -> ICostTextSecondary
+                                    }
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 8.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                text = "[${log.outcome.badgeLabel}] ${log.captureSource}",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = badgeColor
+                                            )
+                                            Text(
+                                                text = "一键重放",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = ICostBlueAccent,
+                                                modifier = Modifier.clickable { onReplayLog(log) }
+                                            )
+                                        }
+                                        Text(
+                                            text = log.detailSummary,
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = ICostTextPrimary
+                                        )
+                                        Text(
+                                            text = log.rawText.replace("\n", " ").take(80),
+                                            fontSize = 11.sp,
+                                            color = ICostTextSecondary
+                                        )
+                                    }
+                                    if (idx < observabilityLogs.take(8).lastIndex) {
+                                        HorizontalDivider(color = ICostDivider)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // 已支持的场景列表（对齐 09_smart_bookkeeping.png）
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1117,7 +1336,10 @@ private fun SmartArrowRow(
 private fun AiSandboxSheetContent(
     isParsing: Boolean,
     statusMessage: String?,
-    onRunSimulation: (String, String) -> Unit
+    observabilityLogs: List<CaptureObservabilityLogEntry> = emptyList(),
+    merchantMemories: List<MerchantMemoryEntry> = emptyList(),
+    onRunSimulation: (String, String) -> Unit,
+    onClearLogs: () -> Unit = {}
 ) {
     var customInput by remember {
         mutableStateOf("【支付宝】付款成功：向商户【盒马】付款 32.80元，付款方式：账户余额")
@@ -1125,84 +1347,138 @@ private fun AiSandboxSheetContent(
 
     val presetScenarios = listOf(
         "盒马买菜 ¥32.80" to "【支付宝】付款成功：向商户【盒马】付款 32.80元，付款方式：账户余额",
+        "排除词分类: 美团外卖 ¥26.5" to "【微信支付】美团外卖 支付成功 26.50元，商品：隆江猪脚饭外卖，零钱支付",
+        "融合步骤1: 仅招行卡扣款 ¥88" to "【招商银行】您尾号3354的信用卡消费人民币88.00元",
+        "融合步骤2: 30s内补全山姆商户" to "【微信支付】向商户【山姆会员商店】付款88.00元",
         "京东购物(招行信用卡)" to "【招商银行】您尾号3354的招商银行信用卡消费人民币69.00元，商户：京东商城",
         "唐久零食退款 ¥5.00" to "【微信支付】退款入账通知：商户【唐久(环普产业园店)】已退回 5.00元 至您的账户余额",
-        "招行储蓄卡还信用卡" to "【招商银行】还款成功：您已使用招商银行储蓄卡(8848)成功偿还招商银行信用卡(3354)账单 500.00元",
-        "招行卡充值到微信零钱" to "【招商银行】您尾号8848的储蓄卡充值到微信零钱人民币1000.00元"
+        "招行储蓄卡还信用卡" to "【招商银行】还款成功：您已使用招商银行储蓄卡(8848)成功偿还招商银行信用卡(3354)账单 500.00元"
     )
 
-    Column(
+    LazyColumn(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 20.dp, vertical = 10.dp)
             .navigationBarsPadding(),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 16.dp)
     ) {
-        Text("AI 静默识账测试沙盒", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = ICostTextPrimary)
-        Text(
-            "点击任意标签测试：AI 解析通知/页面文本 ➔ 自动匹配信用卡/零钱/转账/全额退款 ➔ 静默推送通知栏：",
-            fontSize = 13.sp,
-            color = ICostTextSecondary
-        )
+        item {
+            Text("AI 静默识账测试沙盒", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = ICostTextPrimary)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "支持测试：排除词加权分类（如美团外卖自动排除旅游/购物归入餐饮-三餐）、商户记忆优先匹配（已记住 ${merchantMemories.size} 个商户）、30 秒跨通道事后证据融合补全：",
+                fontSize = 12.sp,
+                color = ICostTextSecondary
+            )
+        }
 
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            presetScenarios.forEach { (label, sampleText) ->
-                AssistChip(
-                    onClick = {
-                        customInput = sampleText
-                        onRunSimulation(sampleText, "com.tencent.mm")
-                    },
-                    label = { Text(label, fontSize = 12.sp) }
-                )
+        item {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                presetScenarios.forEach { (label, sampleText) ->
+                    AssistChip(
+                        onClick = {
+                            customInput = sampleText
+                            onRunSimulation(sampleText, "com.tencent.mm")
+                        },
+                        label = { Text(label, fontSize = 12.sp) }
+                    )
+                }
             }
         }
 
-        OutlinedTextField(
-            value = customInput,
-            onValueChange = { customInput = it },
-            label = { Text("模拟通知栏 / 无障碍屏幕抓取文本") },
-            modifier = Modifier.fillMaxWidth(),
-            minLines = 3
-        )
+        item {
+            OutlinedTextField(
+                value = customInput,
+                onValueChange = { customInput = it },
+                label = { Text("模拟通知栏 / 无障碍屏幕抓取文本") },
+                modifier = Modifier.fillMaxWidth(),
+                minLines = 3
+            )
+        }
 
-        Button(
-            onClick = { onRunSimulation(customInput, "com.tencent.mm") },
-            enabled = !isParsing && customInput.isNotBlank(),
-            colors = ButtonDefaults.buttonColors(containerColor = ICostCoralRed),
-            shape = RoundedCornerShape(16.dp),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(48.dp)
-        ) {
-            if (isParsing) {
-                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("AI 正在静默入账...")
-            } else {
-                Icon(Icons.Default.AutoAwesome, contentDescription = null)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("立即静默入账并推送通知提醒", fontWeight = FontWeight.Bold)
+        item {
+            Button(
+                onClick = { onRunSimulation(customInput, "com.tencent.mm") },
+                enabled = !isParsing && customInput.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(containerColor = ICostCoralRed),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+            ) {
+                if (isParsing) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("AI 正在静默入账...")
+                } else {
+                    Icon(Icons.Default.AutoAwesome, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("立即静默入账并推送通知提醒", fontWeight = FontWeight.Bold)
+                }
             }
         }
 
         if (!statusMessage.isNullOrBlank()) {
-            Surface(
-                color = ICostBgGray,
-                shape = RoundedCornerShape(14.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = statusMessage,
-                    modifier = Modifier.padding(14.dp),
-                    fontSize = 13.sp,
-                    color = ICostTextPrimary
-                )
+            item {
+                Surface(
+                    color = ICostBgGray,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = statusMessage,
+                        modifier = Modifier.padding(14.dp),
+                        fontSize = 13.sp,
+                        color = ICostTextPrimary
+                    )
+                }
             }
         }
-        Spacer(modifier = Modifier.height(10.dp))
+
+        if (observabilityLogs.isNotEmpty()) {
+            item {
+                Surface(
+                    color = ICostBgGray,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "最近采集/融合可观测日志 (${observabilityLogs.size})",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostTextPrimary
+                            )
+                            Text(
+                                text = "清空",
+                                fontSize = 11.sp,
+                                color = ICostBlueAccent,
+                                modifier = Modifier.clickable { onClearLogs() }
+                            )
+                        }
+                        observabilityLogs.take(4).forEach { log ->
+                            Text(
+                                text = "• [${log.outcome.badgeLabel}] ${log.detailSummary}",
+                                fontSize = 11.sp,
+                                color = ICostTextSecondary
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1381,4 +1657,353 @@ private fun isAccessibilityServiceEnabled(context: Context): Boolean {
         Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
     ) ?: return false
     return flat.contains(expected, ignoreCase = true)
+}
+
+/**
+ * 账单 CSV 多源导入导出 + 全量快照备份恢复面板（对标 ezBookkeeping & AutoAccounting Schema Guard）
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun BackupAndCsvTransferSheet(
+    initialTab: Int,
+    statusMessage: String?,
+    onPreviewCsv: (String) -> CsvParsePreviewResult,
+    onCommitCsvImport: (String, Boolean, (String) -> Unit) -> Unit,
+    onExportCsv: () -> String,
+    onExportFullBackup: () -> String,
+    onRestoreFullBackup: (String, (String) -> Unit) -> Unit
+) {
+    val context = LocalContext.current
+    var currentTab by remember(initialTab) { mutableIntStateOf(initialTab) }
+    var csvText by remember { mutableStateOf(BackupAndCsvTransferEngine.SAMPLE_WECHAT_CSV) }
+    var previewResult by remember { mutableStateOf<CsvParsePreviewResult?>(null) }
+    var applyImportToWalletBalance by remember { mutableStateOf(true) }
+    var exportedCsvText by remember { mutableStateOf("") }
+    var backupJsonText by remember { mutableStateOf("") }
+    var localBanner by remember { mutableStateOf<String?>(null) }
+
+    val clipboard = remember {
+        context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 8.dp)
+            .navigationBarsPadding(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(bottom = 24.dp)
+    ) {
+        item {
+            Text(
+                text = "账单迁移与全量快照备份",
+                fontSize = 20.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = ICostTextPrimary
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val tabs = listOf(
+                    0 to "账单导入 (CSV)",
+                    1 to "账单导出 (CSV)",
+                    2 to "全量备份 (.mojibackup)"
+                )
+                tabs.forEach { (idx, title) ->
+                    FilterChip(
+                        selected = currentTab == idx,
+                        onClick = {
+                            currentTab = idx
+                            localBanner = null
+                        },
+                        label = { Text(title, fontSize = 12.sp) }
+                    )
+                }
+            }
+        }
+
+        if (currentTab == 0) {
+            item {
+                Text(
+                    text = "自动识别「微信支付官方账单 CSV」「支付宝官方账单 CSV」「钱迹 / iCost 导出 CSV」，支持导入前预览、商户记忆匹配与重复流水自动跳过：",
+                    fontSize = 12.sp,
+                    color = ICostTextSecondary
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    AssistChip(
+                        onClick = {
+                            csvText = BackupAndCsvTransferEngine.SAMPLE_WECHAT_CSV
+                            previewResult = onPreviewCsv(csvText)
+                        },
+                        label = { Text("载入微信账单样例", fontSize = 12.sp) }
+                    )
+                    AssistChip(
+                        onClick = {
+                            csvText = BackupAndCsvTransferEngine.SAMPLE_ALIPAY_CSV
+                            previewResult = onPreviewCsv(csvText)
+                        },
+                        label = { Text("载入支付宝账单样例", fontSize = 12.sp) }
+                    )
+                    AssistChip(
+                        onClick = {
+                            csvText = BackupAndCsvTransferEngine.SAMPLE_QIANJI_CSV
+                            previewResult = onPreviewCsv(csvText)
+                        },
+                        label = { Text("载入钱迹/iCost样例", fontSize = 12.sp) }
+                    )
+                    AssistChip(
+                        onClick = {
+                            val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
+                            if (!clipText.isNullOrBlank()) {
+                                csvText = clipText
+                                previewResult = onPreviewCsv(csvText)
+                                localBanner = "已从剪贴板粘贴并解析 CSV"
+                            } else {
+                                localBanner = "剪贴板为空"
+                            }
+                        },
+                        label = { Text("从剪贴板粘贴 CSV", fontSize = 12.sp) }
+                    )
+                }
+            }
+
+            item {
+                OutlinedTextField(
+                    value = csvText,
+                    onValueChange = {
+                        csvText = it
+                        previewResult = null
+                    },
+                    label = { Text("微信 / 支付宝 / 钱迹 / iCost CSV 文本内容") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 4,
+                    maxLines = 7
+                )
+            }
+
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("导入流水时同步增减对应账户余额", fontSize = 13.sp, color = ICostTextPrimary)
+                    Switch(
+                        checked = applyImportToWalletBalance,
+                        onCheckedChange = { applyImportToWalletBalance = it }
+                    )
+                }
+            }
+
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { previewResult = onPreviewCsv(csvText) },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                    ) {
+                        Text("1. 解析预览", fontWeight = FontWeight.Bold)
+                    }
+                    Button(
+                        onClick = {
+                            onCommitCsvImport(csvText, applyImportToWalletBalance) { msg ->
+                                localBanner = msg
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                    ) {
+                        Text("2. 确认导入并防重入账", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            previewResult?.let { preview ->
+                item {
+                    Surface(
+                        color = ICostBgGray,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = "解析结果：识别为【${preview.detectedSourceFormat}】，共 ${preview.parsedTransactions.size} 条有效账单（忽略噪声行 ${preview.skippedNonFinancialRows} 条）",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostBlueAccent
+                            )
+                            preview.parsedTransactions.take(5).forEach { tx ->
+                                Text(
+                                    text = "• [${tx.type.displayName}] ${tx.category} · ${tx.merchant} · ${formatMoneyCents(tx.amountCnyCents, tx.currency)}",
+                                    fontSize = 12.sp,
+                                    color = ICostTextPrimary
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (currentTab == 1) {
+            item {
+                Text(
+                    text = "将当前所有账单导出为兼容 iCost / 钱迹 / Excel 的标准 UTF-8 CSV 表格文本：",
+                    fontSize = 12.sp,
+                    color = ICostTextSecondary
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            val csv = onExportCsv()
+                            exportedCsvText = csv
+                            localBanner = "已生成 ${(csv.lines().size - 1).coerceAtLeast(0)} 条账单 CSV 报表"
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                    ) {
+                        Text("生成 CSV 导出报表", fontWeight = FontWeight.Bold)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            if (exportedCsvText.isNotBlank()) {
+                                clipboard?.setPrimaryClip(ClipData.newPlainText("MoJi_CSV", exportedCsvText))
+                                localBanner = "✅ 已复制 CSV 到系统剪贴板"
+                            }
+                        },
+                        enabled = exportedCsvText.isNotBlank(),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                    ) {
+                        Text("复制 CSV 到剪贴板", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            if (exportedCsvText.isNotBlank()) {
+                item {
+                    OutlinedTextField(
+                        value = exportedCsvText,
+                        onValueChange = { exportedCsvText = it },
+                        label = { Text("导出的标准 CSV 内容预览") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 5,
+                        maxLines = 9
+                    )
+                }
+            }
+        } else {
+            item {
+                Text(
+                    text = "全量备份包含：资产/负债钱包、全部历史账单、周期记账规则、商户记忆自学习库、多账本与预算设置（内置 BackupSchemaGuard 版本防崩保护）：",
+                    fontSize = 12.sp,
+                    color = ICostTextSecondary
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            val json = onExportFullBackup()
+                            backupJsonText = json
+                            clipboard?.setPrimaryClip(ClipData.newPlainText("MoJi_Backup", json))
+                            localBanner = "✅ 已生成全量备份快照并复制到剪贴板"
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                    ) {
+                        Text("生成全量备份 JSON", fontWeight = FontWeight.Bold)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
+                            if (!clipText.isNullOrBlank()) {
+                                backupJsonText = clipText
+                                localBanner = "已从剪贴板载入备份 JSON"
+                            }
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                    ) {
+                        Text("从剪贴板粘贴备份", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+
+            item {
+                OutlinedTextField(
+                    value = backupJsonText,
+                    onValueChange = { backupJsonText = it },
+                    label = { Text(".mojibackup 全量 JSON 快照内容") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 5,
+                    maxLines = 8
+                )
+            }
+
+            item {
+                Button(
+                    onClick = {
+                        onRestoreFullBackup(backupJsonText) { msg ->
+                            localBanner = msg
+                        }
+                    },
+                    enabled = backupJsonText.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(containerColor = ICostCoralRed),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(46.dp)
+                ) {
+                    Text("立即从 JSON 快照恢复全量数据", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        val bannerToShow = localBanner ?: statusMessage
+        if (!bannerToShow.isNullOrBlank()) {
+            item {
+                Surface(
+                    color = ICostBgGray,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = bannerToShow,
+                        modifier = Modifier.padding(14.dp),
+                        fontSize = 13.sp,
+                        color = ICostTextPrimary
+                    )
+                }
+            }
+        }
+    }
 }

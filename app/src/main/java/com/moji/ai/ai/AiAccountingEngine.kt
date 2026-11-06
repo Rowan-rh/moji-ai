@@ -44,7 +44,8 @@ data class AiParsedTransactionResult(
  * 3. 内置智能本地语义引擎作为兜底（无网络或未填 API Key 时也能秒级解析消费、转账、信用卡还款、AA收款与外币）。
  */
 class AiAccountingEngine(
-    private val configManager: AiConfigManager
+    private val configManager: AiConfigManager,
+    private val merchantMemoryManager: MerchantMemoryManager? = null
 ) {
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(8, TimeUnit.SECONDS)
@@ -126,12 +127,18 @@ class AiAccountingEngine(
                 "- 账单ID=${tx.id}, 商户=\"${tx.merchant}\", 分类=\"${tx.category}\", 金额=${netYuan}元, 备注=\"${tx.note}\""
             }
         }
+        val memoryDesc = merchantMemoryManager?.memoriesFlow?.value?.take(25)?.joinToString("\n") { m ->
+            "- 商户包含\"${m.merchantKeyword}\" -> 优先分类=\"${m.category}\", 常用钱包ID=${m.preferredWalletId ?: "自动"}"
+        }.orEmpty().ifBlank { "暂无历史商户偏好" }
 
         return """
 你是一个专业的安卓全自动记账 AI 引擎。请分析用户手机通知栏或无障碍屏幕抓取到的原始文本，判断是否为真实的资金变动事件，并严格输出 JSON 对象（不要包含 Markdown 代码块包裹）。
 
 【当前用户的钱包列表】：
 $walletDesc
+
+【用户历史商户记忆偏好（若商户命中，100%优先使用该分类）】：
+$memoryDesc
 
 【近期可冲抵的消费账单列表（用于匹配退款、报销或朋友AA收款）】：
 $recentDesc
@@ -411,47 +418,67 @@ $recentDesc
             )
         }
 
-        // 7. 默认判定为【日常消费支出 (EXPENSE)】
-        val sourceWallet = if (currency == "USD") {
+        // 7. 默认判定为【日常消费支出 (EXPENSE)】：结合商户记忆自学习 + 带排除词权重分类器
+        val extractedMerchant = extractMerchantName(rawText, "日常商户")
+        val memoryHit = merchantMemoryManager?.matchMemory(rawText, extractedMerchant)
+        val explicitWallet = if (currency == "USD") {
             wallets.firstOrNull { it.currency == "USD" } ?: matchWalletByHint(rawText)
         } else {
-            matchWalletByHint(rawText)
+            // 若文本中显式含卡号尾号或钱包名称，优先使用显式匹配的钱包；否则回退到商户记忆常用钱包
+            val hasExplicitHint = wallets.any { w ->
+                (!w.cardLast4.isNullOrBlank() && rawText.contains(w.cardLast4)) ||
+                    rawText.contains(w.name, ignoreCase = true)
+            }
+            if (hasExplicitHint) {
+                matchWalletByHint(rawText)
+            } else {
+                memoryHit?.preferredWalletId?.let { pid -> wallets.firstOrNull { it.id == pid } }
+                    ?: matchWalletByHint(rawText)
+            }
         }
 
-        val category = when {
-            rawText.contains("瑞幸") || rawText.contains("星巴克") || rawText.contains("喜茶") || rawText.contains("奶茶") || rawText.contains("咖啡") -> "餐饮-咖啡茶饮"
-            rawText.contains("美团") || rawText.contains("饿了么") || rawText.contains("餐饮") || rawText.contains("麦当劳") || rawText.contains("肯德基") || rawText.contains("饭") || rawText.contains("面") -> "餐饮-正餐"
-            rawText.contains("滴滴") || rawText.contains("打车") || rawText.contains("地铁") || rawText.contains("公交") || rawText.contains("12306") || rawText.contains("出行") -> "交通-打车公交"
-            rawText.contains("京东") || rawText.contains("淘宝") || rawText.contains("拼多多") || rawText.contains("超市") || rawText.contains("山姆") || rawText.contains("盒马") -> "购物-日用百货"
-            rawText.contains("GitHub") || rawText.contains("OpenAI") || rawText.contains("Apple") || rawText.contains("会员") || rawText.contains("订阅") -> "娱乐-数码订阅"
-            else -> "日常-消费"
-        }
+        val (weightedCat, weightedConf) = WeightedCategoryClassifier.classifyExpense(rawText, extractedMerchant)
+        val finalCategory = memoryHit?.category ?: weightedCat
+        val finalConfidence = if (memoryHit != null) 0.98f else weightedConf
 
         return AiParsedTransactionResult(
             isValidTransaction = true,
             type = TransactionType.EXPENSE.name,
             amount = amount,
             currency = currency,
-            category = category,
-            merchant = extractMerchantName(rawText, "日常商户"),
+            category = finalCategory,
+            merchant = extractedMerchant,
             note = rawText.replace("\n", " ").take(42),
-            sourceWalletId = sourceWallet?.id,
-            confidence = 0.89f
+            sourceWalletId = explicitWallet?.id,
+            confidence = finalConfidence
         )
     }
 
     private fun extractMerchantName(text: String, fallback: String): String {
         val patterns = listOf(
-            Regex("""(?:商户名称|收款方|向|在|商户)[:：\s]*([^\s,，。；;\n]{2,16})"""),
-            Regex("""【([^】]{2,12})】""")
+            Regex("""(?:商户名称|商户全称|收款方|收单机构|向商户|向|在|商户)[:：\s]*【?([^\s,，。；;】\n]{2,18})】?"""),
+            Regex("""【([^】]{2,14})】""")
         )
         for (p in patterns) {
-            val m = p.find(text)
-            if (m != null && m.groupValues[1].isNotBlank()) {
-                return m.groupValues[1].trim()
+            val matches = p.findAll(text).toList()
+            for (m in matches) {
+                val candidate = m.groupValues[1].trim()
+                if (candidate.isNotBlank() && candidate !in listOf("微信支付", "支付宝", "招商银行", "工商银行", "建设银行", "中国银行", "云闪付")) {
+                    return candidate
+                }
             }
         }
-        val knownMerchants = listOf("瑞幸咖啡", "星巴克", "美团", "饿了么", "滴滴出行", "京东", "拼多多", "淘宝", "山姆会员商店", "盒马鲜生", "GitHub", "OpenAI")
+        merchantMemoryManager?.memoriesFlow?.value?.firstOrNull {
+            text.contains(it.merchantKeyword, ignoreCase = true)
+        }?.let { return it.merchantKeyword }
+
+        val knownMerchants = listOf(
+            "瑞幸咖啡", "星巴克", "Manner", "霸王茶姬", "喜茶", "奈雪", "蜜雪冰城",
+            "盒马", "山姆会员商店", "叮咚买菜", "朴朴超市", "唐久", "全家", "罗森", "7-Eleven",
+            "美团外卖", "美团", "饿了么", "麦当劳", "肯德基", "海底捞",
+            "滴滴出行", "高德打车", "12306", "中国石化", "中国石油",
+            "京东", "拼多多", "淘宝", "天猫", "优衣库", "GitHub", "OpenAI"
+        )
         knownMerchants.firstOrNull { text.contains(it, ignoreCase = true) }?.let { return it }
         return fallback
     }

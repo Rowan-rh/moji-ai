@@ -60,25 +60,26 @@
 | :--- | :--- | :--- | :--- |
 | **通知栏监听** | [PaymentNotificationListenerService.kt](../app/src/main/java/com/moji/ai/service/PaymentNotificationListenerService.kt) | 实时捕获状态栏通知的 `EXTRA_TITLE`、`EXTRA_TEXT` 与 `EXTRA_BIG_TEXT`，优先提取长文本，过滤系统与自身包名。 | 暂未记录“被过滤/未触发原因”的调试日志队列，用户在通知未入账时无法在 App 内直接排查原因。 |
 | **无障碍页面节点抓取** | [PaymentAccessibilityService.kt](../app/src/main/java/com/moji/ai/service/PaymentAccessibilityService.kt) | 针对微信、支付宝、云闪付、美团、拼多多、京东、招行/建行/工行及短信，在检测到“支付成功/付款成功/转账成功/还款成功/退款成功/账单详情”等触发词时，递归提取深度 `<=18`、最多 `45` 个可见文本节点（无需截屏 OCR）。 | 部分小程序或自绘 Canvas/WebView 页面无文本节点时无法提取；缺少摇一摇/截图补录通道。 |
-| **滑动时间窗合并与幂等防重** | [CapturePipelineCoordinator.kt](../app/src/main/java/com/moji/ai/service/CapturePipelineCoordinator.kt) | 1. **首层精确去重**：20 秒内相同 `packageName + textHash` 直接丢弃；<br>2. **1.1 秒滑动聚合窗口**：将同一笔交易先后到达的“页面商户文本”与“银行卡扣款通知”合并为 `AI_MERGED` 上下文一次性送入 AI；<br>3. **二次幂等校验**：12 秒内相同 `交易类型 + 金额 + 币种` 防重复入账；<br>4. **沙盒直通车**：提供 `processImmediateText()` 供 App 内沙盒测试台即时验证。 | 滑动窗口固定为 `1100ms`，若银行短信延迟 3~8 秒到达，可能跨越窗口；可借鉴多通道事后合并机制。 |
+| **滑动时间窗合并、30s 跨通道证据融合与可观测日志** | [CapturePipelineCoordinator.kt](../app/src/main/java/com/moji/ai/service/CapturePipelineCoordinator.kt) | 1. **首层精确去重**：20 秒内相同 `packageName + textHash` 直接丢弃并记录日志；<br>2. **1.1 秒滑动聚合窗口**：将同一笔交易先后到达的“页面商户文本”与“银行卡扣款通知”合并为 `AI_MERGED` 上下文一次性送入 AI；<br>3. **30 秒跨通道事后证据融合 (`AI_FUSED`)**：若银行通知延迟 3~30 秒到达，自动以卡号尾号或更具体的商户名增量补全已入账流水并原子化调整新旧钱包余额；<br>4. **采集可观测队列 (`observabilityLogs`)**：保留最近 50 条采集事件的命中状态（`RECORDED` / `FUSED_PATCH` / `DEDUP_BLOCKED` / `NOISE_IGNORED`）与一键重放。 | 后续可扩展相册/系统分享截图 OCR 补录通道。 |
 
 ---
 
-### 2. 多协议 AI 识账引擎与离线语义兜底 (`ai/`)
+### 2. 多协议 AI 识账引擎、商户记忆自学习与带排除词离线分类 (`ai/`)
 
 | 子模块 | 源码位置 | 已实现能力 | 当前边界 / 待增强点 |
 | :--- | :--- | :--- | :--- |
-| **多模型配置管理** | [AiConfigManager.kt](../app/src/main/java/com/moji/ai/ai/AiConfigManager.kt) | 支持配置 `OPENAI_COMPATIBLE`（自定义 `baseUrl`、`apiKey`、`modelName`）与 `GEMINI_OFFICIAL` 双协议，支持开关通知采集、无障碍采集与本地启发式兜底。 | 暂不支持端侧离线 `.litertlm` / `.gguf` 小模型推理；API Key 存储在常规偏好设置中。 |
-| **上下文感知 Prompt** | [AiAccountingEngine.kt](../app/src/main/java/com/moji/ai/ai/AiAccountingEngine.kt) | 每次调用动态注入：<br>• 用户全部钱包（含 `id`、名称、类型、币种、银行卡后四位 `cardLast4`、内部匹配别名 `aliases`）；<br>• 最近 15 笔可冲销消费账单（含净支出金额與商户），由 AI 自动输出结构化 JSON。 | 未注入用户历史高频商户的自定义分类偏好（商户记忆自学习）。 |
-| **离线智能语义引擎** | [AiAccountingEngine.kt](../app/src/main/java/com/moji/ai/ai/AiAccountingEngine.kt) (`localSmartFallbackParse`) | 断网或未填 Key 时自动降级，支持：<br>• 6 种币种符号与金额正则提取；<br>• 银行卡尾号 (`cardLast4`)、钱包名称与别名精准匹配；<br>• 自动识别 **信用还款 (`REPAYMENT`)**、**内部提现/充值转账 (`TRANSFER`)**、**退款/AA 冲销 (`REFUND_OFFSET`)**、**日常收入 (`INCOME`)** 与 **消费分类映射**。 | 离线品牌词与分类词表目前硬编码在代码中，暂不支持用户可视化配置关键词权重或导入社区规则库。 |
+| **多模型配置管理** | [AiConfigManager.kt](../app/src/main/java/com/moji/ai/ai/AiConfigManager.kt) | 支持配置 `OPENAI_COMPATIBLE`（自定义 `baseUrl`、`apiKey`、`modelName`）与 `GEMINI_OFFICIAL` 双协议，支持开关通知采集、无障碍采集与本地启发式兜底。 | 暂不支持端侧离线 `.litertlm` / `.gguf` 小模型推理。 |
+| **上下文感知 Prompt 与商户记忆自学习** | [AiAccountingEngine.kt](../app/src/main/java/com/moji/ai/ai/AiAccountingEngine.kt), [MerchantMemoryAndWeightedClassifier.kt](../app/src/main/java/com/moji/ai/ai/MerchantMemoryAndWeightedClassifier.kt) | • **商户记忆自学习 (`MerchantMemoryManager`)**：用户每次保存或修改账单分类时，自动记住商户关键词、分类与偏好账户；<br>• **动态上下文注入**：每次调用动态注入用户全部钱包、最近 15 笔可冲销消费账单及高频商户分类记忆。 | 后续可扩展可视化 `When -> Then` 复合条件规则面板。 |
+| **带排除词权重的离线语义引擎** | [MerchantMemoryAndWeightedClassifier.kt](../app/src/main/java/com/moji/ai/ai/MerchantMemoryAndWeightedClassifier.kt) (`WeightedCategoryClassifier`) | 断网或未填 Key 时自动降级，支持：<br>• 优先命中用户自学习商户记忆（置信度 `0.97`）；<br>• `强信号词(+10) + 品牌词(+8) + 品类词(+6) + 排除词(-999 一票否决)` 加权分类（如“美团外卖”自动排除购物/旅游归入“餐饮-三餐”）；<br>• 自动识别 **信用还款 (`REPAYMENT`)**、**内部提现/充值转账 (`TRANSFER`)**、**退款/AA 冲销 (`REFUND_OFFSET`)**、**日常收入 (`INCOME`)**。 | 后续可支持导入导出自定义关键词权重表。 |
 
 ---
 
-### 3. 全能账务引擎与本地数据库 (`data/`)
+### 3. 全能账务引擎、余额锚点平账与备份迁移 (`data/`)
 
 | 子模块 | 源码位置 | 已实现能力 | 当前边界 / 待增强点 |
 | :--- | :--- | :--- | :--- |
-| **4 大账户体系与净资产** | [Entities.kt](../app/src/main/java/com/moji/ai/data/local/Entities.kt), [LedgerEnums.kt](../app/src/main/java/com/moji/ai/data/model/LedgerEnums.kt) | • 支持 **储蓄卡 (`DEBIT_BANK`)**、**数字钱包 (`DIGITAL_WALLET`)**、**信用账户 (`CREDIT`)**、**现金/其他 (`CASH_OTHER`)**；<br>• 信用账户支持授信总额度 (`creditLimitCents`)、待还欠款 (`balanceCents`)、账单日 (`billingDay`) 与还款日 (`repaymentDay`)；<br>• 支持 `includeInNetWorth` 独立控制是否计入净资产。 | 修改账户余额目前直接覆盖，尚无“登记当前余额自动生成差额平账流水”机制。 |
+| **4 大账户体系与真实余额锚点平账** | [Entities.kt](../app/src/main/java/com/moji/ai/data/local/Entities.kt), [LedgerRepository.kt](../app/src/main/java/com/moji/ai/data/repository/LedgerRepository.kt) (`reconcileWalletBalance`) | • 支持 **储蓄卡 (`DEBIT_BANK`)**、**数字钱包 (`DIGITAL_WALLET`)**、**信用账户 (`CREDIT`)**、**现金/其他 (`CASH_OTHER`)**；<br>• 支持 **「校准真实余额（平账锚点）」**：输入账户当前真实余额或待还欠款后，自动计算差额并生成 `BALANCE_ANCHOR` 平账补差流水（或仅调整期初余额）。 | 暂不支持跨日外币实时浮动汇率自动拉取。 |
+| **全量快照备份与微信/支付宝/钱迹 CSV 导入导出** | [BackupAndCsvTransferEngine.kt](../app/src/main/java/com/moji/ai/data/backup/BackupAndCsvTransferEngine.kt) | • **全量快照 (`.mojibackup`)**：带 `BackupSchemaGuard` 全字段默认值保护，一键备份与恢复钱包、账单、周期规则、商户记忆库、多账本与预算；<br>• **多格式 CSV 自动识别导入**：自动识别 **微信支付官方账单 CSV、支付宝官方账单 CSV、钱迹/iCost CSV**，支持导入前预览与重复流水指纹防重跳过；<br>• **标准 CSV 导出**：一键生成兼容 iCost/钱迹/Excel 的 UTF-8 CSV。 | 暂未接入 WebDAV 远端定时自动上传。 |
 | **7 大交易形态与强一致事务** | [LedgerRepository.kt](../app/src/main/java/com/moji/ai/data/repository/LedgerRepository.kt) | 全程基于 Room `db.withTransaction` 原子化更新账单与钱包余额：<br>1. `EXPENSE`（支出，含优惠 `discountCents` 与手续费 `feeCents`）<br>2. `INCOME`（收入）<br>3. `TRANSFER`（内部转账，双向联动资产，不计入收支）<br>4. `REPAYMENT`（信用还款，扣减资产并恢复信用额度）<br>5. `REFUND_OFFSET`（全额/部分退款或 AA 冲销，恢复收款钱包余额并扣减原消费净支出 `refundedAmountCents`）<br>6. `LOAN_IN`（借入）<br>7. `LOAN_OUT`（借出） | 暂不支持单笔账单拆分为多个分类（Split Transaction 分拆账单）。 |
 | **报销闭环管理** | [LedgerRepository.kt](../app/src/main/java/com/moji/ai/data/repository/LedgerRepository.kt) (`settleReimbursement`) | 支持消费标记为 `reimbursable`（待报销），并在后续一键执行 `settleReimbursement` 完成报销入账、恢复指定收款钱包余额。 | 暂不支持批量勾选多笔待报销账单合并报销。 |
 | **周期性固定账单** | [Entities.kt](../app/src/main/java/com/moji/ai/data/local/Entities.kt) (`RecurringRuleEntity`) | 支持按天/周/月/年配置周期性收支或转账规则，到期自动生成 `RECURRING` 账单并推进下次触发时间。 | 缺少基于历史流水自动发现潜在订阅（如每月固定扣款）的智能提醒。 |
