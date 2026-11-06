@@ -14,8 +14,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,15 +23,15 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -50,6 +48,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -95,6 +94,7 @@ import java.util.Calendar
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.max
 import kotlin.math.roundToLong
 import kotlin.math.sin
 
@@ -102,8 +102,200 @@ enum class StatsRangeMode(val label: String) {
     WEEK("周"),
     MONTH("月"),
     YEAR("年"),
-    ALL("全部"),
-    CUSTOM("范围")
+    ALL("全部")
+}
+
+/** 统计图表的一个时间分桶：[startMillis, endMillis)。 */
+private data class StatsBucket(
+    val startMillis: Long,
+    val endMillis: Long,
+    val axisLabel: String,
+    val fullLabel: String
+)
+
+private const val DAY_MILLIS = 86_400_000L
+
+private fun startOfDay(millis: Long): Calendar = Calendar.getInstance().apply {
+    timeInMillis = millis
+    set(Calendar.HOUR_OF_DAY, 0)
+    set(Calendar.MINUTE, 0)
+    set(Calendar.SECOND, 0)
+    set(Calendar.MILLISECOND, 0)
+}
+
+/** 以周一为一周第一天，返回「本周 + offset」的周一 0 点。 */
+private fun weekStartMillis(weekOffset: Int): Long {
+    val c = startOfDay(System.currentTimeMillis())
+    val dow = c.get(Calendar.DAY_OF_WEEK) // 周日 = 1，周一 = 2
+    val daysSinceMonday = (dow + 5) % 7
+    c.add(Calendar.DAY_OF_MONTH, -daysSinceMonday)
+    c.add(Calendar.DAY_OF_MONTH, weekOffset * 7)
+    return c.timeInMillis
+}
+
+/** 计算选中周期的时间范围 [start, end)。ALL 模式以最早一笔账单所在日为起点。 */
+private fun periodRange(
+    mode: StatsRangeMode,
+    year: Int,
+    month: Int,
+    weekOffset: Int,
+    earliestMillis: Long?,
+    latestMillis: Long?
+): Pair<Long, Long>? {
+    return when (mode) {
+        StatsRangeMode.WEEK -> {
+            val start = weekStartMillis(weekOffset)
+            val end = Calendar.getInstance().apply { timeInMillis = start; add(Calendar.DAY_OF_MONTH, 7) }.timeInMillis
+            start to end
+        }
+        StatsRangeMode.MONTH -> {
+            val c = startOfDay(System.currentTimeMillis()).apply {
+                set(Calendar.YEAR, year)
+                set(Calendar.MONTH, month - 1)
+                set(Calendar.DAY_OF_MONTH, 1)
+            }
+            val start = c.timeInMillis
+            c.add(Calendar.MONTH, 1)
+            start to c.timeInMillis
+        }
+        StatsRangeMode.YEAR -> {
+            val c = startOfDay(System.currentTimeMillis()).apply {
+                set(Calendar.YEAR, year)
+                set(Calendar.MONTH, Calendar.JANUARY)
+                set(Calendar.DAY_OF_MONTH, 1)
+            }
+            val start = c.timeInMillis
+            c.add(Calendar.YEAR, 1)
+            start to c.timeInMillis
+        }
+        StatsRangeMode.ALL -> {
+            val earliest = earliestMillis ?: return null
+            val start = startOfDay(earliest).timeInMillis
+            // 截止到今天（若有预记的未来账单则延伸到最后一笔）
+            val lastDay = max(System.currentTimeMillis(), latestMillis ?: 0L)
+            val end = startOfDay(lastDay).apply { add(Calendar.DAY_OF_MONTH, 1) }.timeInMillis
+            start to max(end, start + DAY_MILLIS)
+        }
+    }
+}
+
+/** 按维度生成图表分桶：周 7 天、月按天、年 12 个月、全部按月（跨度超过 3 年按年）。 */
+private fun buildBuckets(mode: StatsRangeMode, range: Pair<Long, Long>): List<StatsBucket> {
+    val (start, end) = range
+    val buckets = mutableListOf<StatsBucket>()
+    val c = Calendar.getInstance().apply { timeInMillis = start }
+    val weekNames = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+    when (mode) {
+        StatsRangeMode.WEEK, StatsRangeMode.MONTH -> {
+            var idx = 0
+            while (c.timeInMillis < end && idx < 400) {
+                val s = c.timeInMillis
+                val m = c.get(Calendar.MONTH) + 1
+                val d = c.get(Calendar.DAY_OF_MONTH)
+                c.add(Calendar.DAY_OF_MONTH, 1)
+                val axis = if (mode == StatsRangeMode.WEEK) weekNames[idx % 7] else "$m/$d"
+                buckets += StatsBucket(s, c.timeInMillis, axis, "${m}月${d}日")
+                idx++
+            }
+        }
+        StatsRangeMode.YEAR -> {
+            c.set(Calendar.DAY_OF_MONTH, 1)
+            while (c.timeInMillis < end) {
+                val s = c.timeInMillis
+                val m = c.get(Calendar.MONTH) + 1
+                c.add(Calendar.MONTH, 1)
+                buckets += StatsBucket(s, c.timeInMillis, "${m}月", "${m}月")
+            }
+        }
+        StatsRangeMode.ALL -> {
+            val endCal = Calendar.getInstance().apply { timeInMillis = end - 1 }
+            val monthSpan = (endCal.get(Calendar.YEAR) - c.get(Calendar.YEAR)) * 12 +
+                (endCal.get(Calendar.MONTH) - c.get(Calendar.MONTH)) + 1
+            c.set(Calendar.DAY_OF_MONTH, 1)
+            if (monthSpan > 36) {
+                c.set(Calendar.MONTH, Calendar.JANUARY)
+                while (c.timeInMillis < end) {
+                    val s = c.timeInMillis
+                    val y = c.get(Calendar.YEAR)
+                    c.add(Calendar.YEAR, 1)
+                    buckets += StatsBucket(s, c.timeInMillis, "$y", "${y}年")
+                }
+            } else {
+                while (c.timeInMillis < end) {
+                    val s = c.timeInMillis
+                    val y = c.get(Calendar.YEAR)
+                    val m = c.get(Calendar.MONTH) + 1
+                    c.add(Calendar.MONTH, 1)
+                    buckets += StatsBucket(s, c.timeInMillis, "${y % 100}/$m", "${y}年${m}月")
+                }
+            }
+        }
+    }
+    return buckets
+}
+
+/** 选择坐标轴上要显示的刻度下标，避免标签拥挤。 */
+private fun axisLabelIndices(mode: StatsRangeMode, count: Int): Set<Int> {
+    if (count <= 0) return emptySet()
+    if (mode == StatsRangeMode.WEEK || count <= 7) return (0 until count).toSet()
+    if (mode == StatsRangeMode.MONTH) return setOf(0, 9, 19, count - 1).filter { it in 0 until count }.toSet()
+    if (mode == StatsRangeMode.YEAR) return setOf(0, 3, 6, 9, count - 1).filter { it in 0 until count }.toSet()
+    return setOf(0, (count - 1) / 3, (count - 1) * 2 / 3, count - 1)
+}
+
+private fun bucketIndexOf(buckets: List<StatsBucket>, ts: Long): Int {
+    var lo = 0
+    var hi = buckets.lastIndex
+    while (lo <= hi) {
+        val mid = (lo + hi) ushr 1
+        val b = buckets[mid]
+        when {
+            ts < b.startMillis -> hi = mid - 1
+            ts >= b.endMillis -> lo = mid + 1
+            else -> return mid
+        }
+    }
+    return -1
+}
+
+private fun netExpenseOf(tx: TransactionEntity): Long = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
+
+/**
+ * 单笔账单对「计入净资产」账户的资产 / 负债影响（本位币分），与账务引擎记账时的余额变动方向一致。
+ * 返回 (资产变化, 负债变化)。账户已删除或不计入净资产时无影响。
+ */
+private fun netWorthImpact(tx: TransactionEntity, walletMap: Map<Long, WalletEntity>): Pair<Long, Long> {
+    val rate = if (tx.exchangeRateToCny > 0.0) tx.exchangeRateToCny else 1.0
+    val amount = tx.amountCnyCents
+    val fee = (tx.feeCents * rate).roundToLong()
+    var dA = 0L
+    var dL = 0L
+    fun included(id: Long?): WalletEntity? = id?.let { walletMap[it] }?.takeIf { it.includeInNetWorth }
+    // 资金流出：资产减少；信用账户欠款增加
+    fun outflow(w: WalletEntity?, cents: Long) {
+        if (w == null) return
+        if (w.type.isLiability) dL += cents else dA -= cents
+    }
+    // 资金流入：资产增加；信用账户欠款减少
+    fun inflow(w: WalletEntity?, cents: Long) {
+        if (w == null) return
+        if (w.type.isLiability) dL -= cents else dA += cents
+    }
+    when (tx.type) {
+        TransactionType.EXPENSE, TransactionType.LOAN_OUT -> outflow(included(tx.sourceWalletId), amount + fee)
+        TransactionType.INCOME, TransactionType.LOAN_IN -> inflow(included(tx.targetWalletId ?: tx.sourceWalletId), amount - fee)
+        TransactionType.TRANSFER -> {
+            outflow(included(tx.sourceWalletId), amount + fee)
+            inflow(included(tx.targetWalletId), amount)
+        }
+        TransactionType.REPAYMENT -> {
+            // 账务引擎对付款账户一律扣减余额，对被还款账户一律减少余额（欠款）
+            included(tx.sourceWalletId)?.let { w -> if (w.type.isLiability) dL -= amount + fee else dA -= amount + fee }
+            included(tx.targetWalletId)?.let { w -> if (w.type.isLiability) dL -= amount else dA -= amount }
+        }
+        TransactionType.REFUND_OFFSET -> inflow(included(tx.targetWalletId ?: tx.sourceWalletId), amount)
+    }
+    return dA to dL
 }
 
 @Composable
@@ -112,88 +304,96 @@ fun ICostStatisticsScreen(
     wallets: List<WalletEntity> = emptyList(),
     initialYear: Int,
     initialMonth: Int,
-    onOpenAiSandbox: () -> Unit,
-    onOpenSettingsPage: () -> Unit
+    @Suppress("UNUSED_PARAMETER") onOpenAiSandbox: () -> Unit = {},
+    onOpenSettingsPage: () -> Unit,
+    currentLedger: String? = null,
+    hideAmounts: Boolean = false
 ) {
-    var rangeMode by remember { mutableStateOf(StatsRangeMode.MONTH) }
-    var year by remember { mutableIntStateOf(initialYear) }
-    var month by remember { mutableIntStateOf(initialMonth) }
-    var weekOffset by remember { mutableIntStateOf(0) }
-    var filterWalletId by remember { mutableStateOf<Long?>(null) }
+    var rangeMode by rememberSaveable { mutableStateOf(StatsRangeMode.MONTH) }
+    var year by rememberSaveable { mutableIntStateOf(initialYear) }
+    var month by rememberSaveable { mutableIntStateOf(initialMonth) }
+    var weekOffset by rememberSaveable { mutableIntStateOf(0) }
+    var filterWalletId by rememberSaveable { mutableStateOf<Long?>(null) }
     var showFilterMenu by remember { mutableStateOf(false) }
 
-    var overviewExpanded by remember { mutableStateOf(true) }
-    var reimburseExpanded by remember { mutableStateOf(true) }
-    var transferExpanded by remember { mutableStateOf(true) }
-    var barChartExpanded by remember { mutableStateOf(true) }
-    var trendChartExpanded by remember { mutableStateOf(true) }
-    var donutChartExpanded by remember { mutableStateOf(true) }
+    var overviewExpanded by rememberSaveable { mutableStateOf(true) }
+    var reimburseExpanded by rememberSaveable { mutableStateOf(true) }
+    var transferExpanded by rememberSaveable { mutableStateOf(true) }
+    var barChartExpanded by rememberSaveable { mutableStateOf(true) }
+    var trendChartExpanded by rememberSaveable { mutableStateOf(true) }
+    var donutChartExpanded by rememberSaveable { mutableStateOf(true) }
 
-    var barChartMetric by remember { mutableIntStateOf(0) } // 0: 支出, 1: 收入, 2: 结余
-    var trendMetric by remember { mutableIntStateOf(0) }    // 0: 净资产, 1: 总资产, 2: 总负债
-    var donutMetric by remember { mutableIntStateOf(0) }    // 0: 支出, 1: 收入
+    var barChartMetric by rememberSaveable { mutableIntStateOf(0) } // 0: 支出, 1: 收入, 2: 结余
+    var trendMetric by rememberSaveable { mutableIntStateOf(0) }    // 0: 净资产, 1: 总资产, 2: 总负债
+    var donutMetric by rememberSaveable { mutableIntStateOf(0) }    // 0: 支出, 1: 收入
+
+    // 筛选的账户被删除后自动回到「全部账户」
+    LaunchedEffect(wallets, filterWalletId) {
+        if (filterWalletId != null && wallets.isNotEmpty() && wallets.none { it.id == filterWalletId }) filterWalletId = null
+    }
 
     // 三大图表入场/切换动效进度（柱状拔高 / 趋势曲线铺展 / 环形展开）
     val barProgress = remember { Animatable(0f) }
-    LaunchedEffect(rangeMode, year, month, weekOffset, filterWalletId, barChartMetric) {
+    LaunchedEffect(rangeMode, year, month, weekOffset, filterWalletId, barChartMetric, currentLedger) {
         barProgress.snapTo(0f)
         barProgress.animateTo(1f, tween(durationMillis = 520, easing = FastOutSlowInEasing))
     }
 
     val trendProgress = remember { Animatable(0f) }
-    LaunchedEffect(rangeMode, year, month, weekOffset, filterWalletId, trendMetric) {
+    LaunchedEffect(rangeMode, year, month, weekOffset, trendMetric) {
         trendProgress.snapTo(0f)
         trendProgress.animateTo(1f, tween(durationMillis = 600, easing = FastOutSlowInEasing))
     }
 
     val donutProgress = remember { Animatable(0f) }
-    LaunchedEffect(rangeMode, year, month, weekOffset, filterWalletId, donutMetric) {
+    LaunchedEffect(rangeMode, year, month, weekOffset, filterWalletId, donutMetric, currentLedger) {
         donutProgress.snapTo(0f)
         donutProgress.animateTo(1f, tween(durationMillis = 560, easing = FastOutSlowInEasing))
     }
 
-    // 根据维度与筛选账户过滤账单
-    val filteredTxs = remember(transactions, rangeMode, year, month, weekOffset, filterWalletId) {
-        val cal = Calendar.getInstance()
-        val timeFiltered = when (rangeMode) {
-            StatsRangeMode.ALL, StatsRangeMode.CUSTOM -> transactions
-            StatsRangeMode.YEAR -> transactions.filter {
-                cal.timeInMillis = it.timestamp
-                cal.get(Calendar.YEAR) == year
-            }
-            StatsRangeMode.MONTH -> transactions.filter {
-                cal.timeInMillis = it.timestamp
-                cal.get(Calendar.YEAR) == year && (cal.get(Calendar.MONTH) + 1) == month
-            }
-            StatsRangeMode.WEEK -> {
-                val targetCal = Calendar.getInstance().apply { add(Calendar.WEEK_OF_YEAR, weekOffset) }
-                val targetWeek = targetCal.get(Calendar.WEEK_OF_YEAR)
-                val targetYear = targetCal.get(Calendar.YEAR)
-                transactions.filter {
-                    cal.timeInMillis = it.timestamp
-                    cal.get(Calendar.YEAR) == targetYear && cal.get(Calendar.WEEK_OF_YEAR) == targetWeek
-                }
-            }
+    // 当前账本 + 筛选账户（不含时间）
+    val scopedTxs = remember(transactions, currentLedger, filterWalletId) {
+        transactions.filter { tx ->
+            (currentLedger == null || tx.ledgerName == currentLedger) &&
+                (filterWalletId == null || tx.sourceWalletId == filterWalletId || tx.targetWalletId == filterWalletId)
         }
-        if (filterWalletId == null) {
-            timeFiltered
-        } else {
-            timeFiltered.filter { it.sourceWalletId == filterWalletId || it.targetWalletId == filterWalletId }
-        }
+    }
+    val earliestMillis = remember(scopedTxs) { scopedTxs.minOfOrNull { it.timestamp } }
+    val latestMillis = remember(scopedTxs) { scopedTxs.maxOfOrNull { it.timestamp } }
+
+    val range = remember(rangeMode, year, month, weekOffset, earliestMillis, latestMillis) {
+        periodRange(rangeMode, year, month, weekOffset, earliestMillis, latestMillis)
+    }
+
+    // 根据维度过滤账单（按起止时间判断，周以周一为第一天，跨年周也准确）
+    val filteredTxs = remember(scopedTxs, range) {
+        if (range == null) emptyList()
+        else scopedTxs.filter { it.timestamp >= range.first && it.timestamp < range.second }
     }
 
     val periodLabel = when (rangeMode) {
         StatsRangeMode.MONTH -> "${year}年${month}月"
         StatsRangeMode.YEAR -> "${year}年"
-        StatsRangeMode.WEEK -> if (weekOffset == 0) "本周" else "${weekOffset}周"
+        StatsRangeMode.WEEK -> when (weekOffset) {
+            0 -> "本周"
+            -1 -> "上周"
+            1 -> "下周"
+            else -> {
+                val start = Calendar.getInstance().apply { timeInMillis = weekStartMillis(weekOffset) }
+                val end = Calendar.getInstance().apply { timeInMillis = start.timeInMillis; add(Calendar.DAY_OF_MONTH, 6) }
+                val thisYear = Calendar.getInstance().get(Calendar.YEAR)
+                val prefix = if (start.get(Calendar.YEAR) != thisYear) "${start.get(Calendar.YEAR)}年" else ""
+                "$prefix${start.get(Calendar.MONTH) + 1}月${start.get(Calendar.DAY_OF_MONTH)}日 - " +
+                    "${end.get(Calendar.MONTH) + 1}月${end.get(Calendar.DAY_OF_MONTH)}日"
+            }
+        }
         StatsRangeMode.ALL -> "全部账单"
-        StatsRangeMode.CUSTOM -> "${year}年1月 - ${year}年${month}月"
     }
 
     // 核心统计指标计算
     val netExpenseCents = filteredTxs
         .filter { it.type == TransactionType.EXPENSE }
-        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+        .sumOf { netExpenseOf(it) }
 
     val totalIncomeCents = filteredTxs
         .filter { it.type == TransactionType.INCOME }
@@ -201,17 +401,13 @@ fun ICostStatisticsScreen(
 
     val balanceCents = totalIncomeCents - netExpenseCents
 
-    val daysDivisor = remember(rangeMode, year, month) {
-        val now = Calendar.getInstance()
-        when (rangeMode) {
-            StatsRangeMode.WEEK -> 7
-            StatsRangeMode.MONTH -> {
-                if (now.get(Calendar.YEAR) == year && (now.get(Calendar.MONTH) + 1) == month) {
-                    now.get(Calendar.DAY_OF_MONTH).coerceAtLeast(1)
-                } else 30
-            }
-            StatsRangeMode.YEAR -> 365
-            StatsRangeMode.ALL, StatsRangeMode.CUSTOM -> 30
+    // 日均支出除数：当前周期按已过天数，过去周期按整段天数，全部按首笔账单至今天数
+    val daysDivisor = remember(range) {
+        if (range == null) 1L
+        else {
+            val todayEnd = startOfDay(System.currentTimeMillis()).apply { add(Calendar.DAY_OF_MONTH, 1) }.timeInMillis
+            val effectiveEnd = if (todayEnd in (range.first + 1)..range.second) todayEnd else range.second
+            ((effectiveEnd - range.first + DAY_MILLIS / 2) / DAY_MILLIS).coerceAtLeast(1L)
         }
     }
     val dailyAvgExpenseCents = netExpenseCents / daysDivisor
@@ -221,59 +417,88 @@ fun ICostStatisticsScreen(
         .sumOf { it.amountCnyCents }
 
     val totalDiscountCents = filteredTxs.sumOf { it.discountCents }
-    val totalFeeCents = filteredTxs.sumOf { it.feeCents }
+    val totalFeeCents = filteredTxs.sumOf { (it.feeCents * (if (it.exchangeRateToCny > 0.0) it.exchangeRateToCny else 1.0)).roundToLong() }
 
     val pendingReimburseCents = filteredTxs
         .filter { it.reimbursable && !it.reimbursed }
-        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+        .sumOf { netExpenseOf(it) }
     val settledReimburseCents = filteredTxs
         .filter { it.reimbursable && it.reimbursed }
-        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+        .sumOf { netExpenseOf(it) }
 
     val repaymentCents = filteredTxs.filter { it.type == TransactionType.REPAYMENT }.sumOf { it.amountCnyCents }
     val transferCents = filteredTxs.filter { it.type == TransactionType.TRANSFER }.sumOf { it.amountCnyCents }
     val loanInCents = filteredTxs.filter { it.type == TransactionType.LOAN_IN }.sumOf { it.amountCnyCents }
     val loanOutCents = filteredTxs.filter { it.type == TransactionType.LOAN_OUT }.sumOf { it.amountCnyCents }
+    val installmentPayCents = filteredTxs.filter { tx ->
+        tx.type == TransactionType.EXPENSE &&
+            (tx.captureSource == "INSTALLMENT" || tx.tags.split(",", "，").any { it.trim() == "分期" })
+    }.sumOf { netExpenseOf(it) }
 
-    // 每日柱状图数据（30 天或 12 个月）
-    val daysInPeriod = remember(year, month) {
-        Calendar.getInstance().apply {
-            set(Calendar.YEAR, year)
-            set(Calendar.MONTH, month - 1)
-            set(Calendar.DAY_OF_MONTH, 1)
-        }.getActualMaximum(Calendar.DAY_OF_MONTH)
+    // 图表分桶（柱状图与趋势图共用，刻度与峰值标签来自同一组分桶）
+    val buckets = remember(rangeMode, range) {
+        if (range == null) emptyList() else buildBuckets(rangeMode, range)
     }
+    val axisIndices = remember(rangeMode, buckets.size) { axisLabelIndices(rangeMode, buckets.size) }
 
-    val dailyBars = remember(filteredTxs, barChartMetric, daysInPeriod) {
-        val c = Calendar.getInstance()
-        (1..daysInPeriod).map { d ->
-            val dayTxs = filteredTxs.filter {
-                c.timeInMillis = it.timestamp
-                c.get(Calendar.DAY_OF_MONTH) == d
+    val bars = remember(filteredTxs, barChartMetric, buckets) {
+        val exp = LongArray(buckets.size)
+        val inc = LongArray(buckets.size)
+        filteredTxs.forEach { tx ->
+            val i = bucketIndexOf(buckets, tx.timestamp)
+            if (i >= 0) {
+                when (tx.type) {
+                    TransactionType.EXPENSE -> exp[i] += netExpenseOf(tx)
+                    TransactionType.INCOME -> inc[i] += tx.amountCnyCents
+                    else -> {}
+                }
             }
-            val exp = dayTxs.filter { it.type == TransactionType.EXPENSE }
-                .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
-            val inc = dayTxs.filter { it.type == TransactionType.INCOME }
-                .sumOf { it.amountCnyCents }
+        }
+        List(buckets.size) { i ->
             when (barChartMetric) {
-                0 -> exp
-                1 -> inc
-                else -> (inc - exp).coerceAtLeast(0L)
+                0 -> exp[i]
+                1 -> inc[i]
+                else -> inc[i] - exp[i]
             }
         }
     }
 
-    // 净资产趋势曲线点（7个采样节点）
+    // 净资产趋势：从当前余额出发，逐笔倒推每个分桶结束时的资产与负债（仅计入净资产的账户，折算人民币）
+    val walletMap = remember(wallets) { wallets.associateBy { it.id } }
     val currentAssetsCents = wallets.filter { !it.type.isLiability && it.includeInNetWorth }.sumOf {
         (it.balanceCents * CurrencyCode.fromCode(it.currency).defaultRateToCny).roundToLong()
     }
     val currentLiabCents = wallets.filter { it.type.isLiability && it.includeInNetWorth }.sumOf {
         (it.balanceCents * CurrencyCode.fromCode(it.currency).defaultRateToCny).roundToLong()
     }
-    val baseTrendTarget = when (trendMetric) {
+    val currentTrendValue = when (trendMetric) {
         0 -> currentAssetsCents - currentLiabCents
         1 -> currentAssetsCents
         else -> currentLiabCents
+    }
+    val trendPoints: List<Long> = remember(transactions, walletMap, buckets, trendMetric, currentAssetsCents, currentLiabCents) {
+        if (walletMap.isEmpty() || buckets.isEmpty()) return@remember emptyList()
+        val now = System.currentTimeMillis()
+        val visible = buckets.filter { it.startMillis <= now }
+        if (visible.isEmpty()) return@remember emptyList()
+        val impacts = transactions.map { it.timestamp to netWorthImpact(it, walletMap) }
+        visible.map { b ->
+            var a = currentAssetsCents
+            var l = currentLiabCents
+            if (b.endMillis <= now) {
+                impacts.forEach { (ts, impact) ->
+                    if (ts >= b.endMillis) {
+                        a -= impact.first
+                        l -= impact.second
+                    }
+                }
+            }
+            when (trendMetric) {
+                0 -> a - l
+                1 -> a
+                else -> l
+            }
+        }
     }
 
     val categoryBreakdown = remember(filteredTxs, donutMetric) {
@@ -283,7 +508,7 @@ fun ICostStatisticsScreen(
             .groupBy { it.category.substringBefore("-") }
             .mapValues { (_, list) ->
                 val sum = if (targetType == TransactionType.EXPENSE) {
-                    list.sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+                    list.sumOf { netExpenseOf(it) }
                 } else {
                     list.sumOf { it.amountCnyCents }
                 }
@@ -309,17 +534,21 @@ fun ICostStatisticsScreen(
                 Box {
                     Surface(
                         onClick = { showFilterMenu = true },
-                        shape = RoundedCornerShape(18.dp),
-                        color = ICostCardWhite
+                        shape = RoundedCornerShape(20.dp),
+                        color = ICostCardWhite,
+                        modifier = Modifier.heightIn(min = 40.dp)
                     ) {
                         val activeWalletName = wallets.firstOrNull { it.id == filterWalletId }?.name
-                        Text(
-                            text = activeWalletName ?: "筛选",
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.Medium,
-                            color = if (filterWalletId != null) Color(0xFF1677FF) else ICostTextPrimary,
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
-                        )
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 14.dp)) {
+                            Text(
+                                text = activeWalletName ?: "筛选",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (filterWalletId != null) Color(0xFF1677FF) else ICostTextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                     DropdownMenu(
                         expanded = showFilterMenu,
@@ -327,29 +556,34 @@ fun ICostStatisticsScreen(
                         containerColor = ICostCardWhite
                     ) {
                         DropdownMenuItem(
-                            text = { Text("全部账户", fontSize = 14.sp) },
+                            text = {
+                                Text(
+                                    "全部账户",
+                                    fontSize = 14.sp,
+                                    fontWeight = if (filterWalletId == null) FontWeight.Bold else FontWeight.Normal
+                                )
+                            },
                             onClick = {
                                 filterWalletId = null
                                 showFilterMenu = false
                             }
                         )
+                        if (wallets.isNotEmpty()) HorizontalDivider(color = ICostDivider)
                         wallets.forEach { w ->
                             DropdownMenuItem(
-                                text = { Text(w.name, fontSize = 14.sp) },
+                                text = {
+                                    Text(
+                                        w.name,
+                                        fontSize = 14.sp,
+                                        fontWeight = if (filterWalletId == w.id) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
                                 onClick = {
                                     filterWalletId = w.id
                                     showFilterMenu = false
                                 }
                             )
                         }
-                        HorizontalDivider(color = ICostDivider)
-                        DropdownMenuItem(
-                            text = { Text("AI 识账沙盒测试", fontSize = 14.sp, color = ICostCoralRed) },
-                            onClick = {
-                                showFilterMenu = false
-                                onOpenAiSandbox()
-                            }
-                        )
                     }
                 }
                 Spacer(modifier = Modifier.width(10.dp))
@@ -370,14 +604,14 @@ fun ICostStatisticsScreen(
             )
         }
 
-        // 3. 1:1 复刻 iCost 五段白色胶囊切换器 (周 | 月 | 年 | 全部 | 范围)
+        // 3. 四段白色胶囊切换器 (周 | 月 | 年 | 全部)
         item {
             Surface(
                 shape = RoundedCornerShape(22.dp),
                 color = ICostCardWhite,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(42.dp)
+                    .height(44.dp)
             ) {
                 Row(
                     modifier = Modifier
@@ -395,7 +629,7 @@ fun ICostStatisticsScreen(
                         Box(
                             modifier = Modifier
                                 .weight(1f)
-                                .height(36.dp)
+                                .height(38.dp)
                                 .clip(RoundedCornerShape(19.dp))
                                 .background(segBg)
                                 .iCostPressScale(pressedScale = 0.92f) { rangeMode = mode },
@@ -413,13 +647,12 @@ fun ICostStatisticsScreen(
             }
         }
 
-        // 4. 1:1 复刻蓝色左右圆按钮时间选择器（支持右滑切上一周期 / 左滑切下一周期）
+        // 4. 蓝色左右圆按钮时间选择器（支持右滑切上一周期 / 左滑切下一周期）
         if (rangeMode != StatsRangeMode.ALL) {
             item {
                 val goPrevPeriod = {
                     when (rangeMode) {
-                        StatsRangeMode.MONTH, StatsRangeMode.CUSTOM ->
-                            if (month == 1) { month = 12; year -= 1 } else month -= 1
+                        StatsRangeMode.MONTH -> if (month == 1) { month = 12; year -= 1 } else month -= 1
                         StatsRangeMode.YEAR -> year -= 1
                         StatsRangeMode.WEEK -> weekOffset -= 1
                         StatsRangeMode.ALL -> {}
@@ -427,8 +660,7 @@ fun ICostStatisticsScreen(
                 }
                 val goNextPeriod = {
                     when (rangeMode) {
-                        StatsRangeMode.MONTH, StatsRangeMode.CUSTOM ->
-                            if (month == 12) { month = 1; year += 1 } else month += 1
+                        StatsRangeMode.MONTH -> if (month == 12) { month = 1; year += 1 } else month += 1
                         StatsRangeMode.YEAR -> year += 1
                         StatsRangeMode.WEEK -> weekOffset += 1
                         StatsRangeMode.ALL -> {}
@@ -437,7 +669,7 @@ fun ICostStatisticsScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                        .padding(vertical = 2.dp)
                         .iCostHorizontalSwipeTrigger(
                             onSwipeRight = goPrevPeriod,
                             onSwipeLeft = goNextPeriod
@@ -447,13 +679,14 @@ fun ICostStatisticsScreen(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(30.dp)
+                            .size(44.dp)
                             .clip(CircleShape)
                             .iCostPressScale(pressedScale = 0.85f, onClick = goPrevPeriod),
                         contentAlignment = Alignment.Center
                     ) {
                         ICostAssetImage(
                             assetFile = "chart_date_left.webp",
+                            contentDescription = "上一期",
                             modifier = Modifier.size(28.dp)
                         )
                     }
@@ -467,13 +700,14 @@ fun ICostStatisticsScreen(
 
                     Box(
                         modifier = Modifier
-                            .size(30.dp)
+                            .size(44.dp)
                             .clip(CircleShape)
                             .iCostPressScale(pressedScale = 0.85f, onClick = goNextPeriod),
                         contentAlignment = Alignment.Center
                     ) {
                         ICostAssetImage(
                             assetFile = "chart_date_right.webp",
+                            contentDescription = "下一期",
                             modifier = Modifier.size(28.dp)
                         )
                     }
@@ -501,7 +735,7 @@ fun ICostStatisticsScreen(
             )
         }
 
-        // 6. 卡片二：报销统计 (chart_budget_red.webp + 2x2 Bento Grid)
+        // 6. 卡片二：报销统计
         item {
             ICostBentoStatsCard(
                 title = "报销统计",
@@ -510,14 +744,12 @@ fun ICostStatisticsScreen(
                 onToggle = { reimburseExpanded = !reimburseExpanded },
                 cells = listOf(
                     "待报销" to formatMoneyCents(pendingReimburseCents),
-                    "已报销" to formatMoneyCents(settledReimburseCents),
-                    "报销入账" to formatMoneyCents(settledReimburseCents),
-                    "报销差额" to formatMoneyCents(0L)
+                    "已报销" to formatMoneyCents(settledReimburseCents)
                 )
             )
         }
 
-        // 7. 卡片三：流转统计 (chart_transfer.webp + 2x3 Bento Grid，对齐 08_stats_mid.png)
+        // 7. 卡片三：流转统计
         item {
             ICostBentoStatsCard(
                 title = "流转统计",
@@ -529,13 +761,12 @@ fun ICostStatisticsScreen(
                     "转账" to formatMoneyCents(transferCents),
                     "借入" to formatMoneyCents(loanInCents),
                     "借出" to formatMoneyCents(loanOutCents),
-                    "收款" to formatMoneyCents(0L),
-                    "分期还款" to formatMoneyCents(0L)
+                    "分期还款" to formatMoneyCents(installmentPayCents)
                 )
             )
         }
 
-        // 8. 卡片四：支出统计图（支持模块右滑/左滑切换 支出 ⇄ 收入 ⇄ 结余）
+        // 8. 卡片四：收支柱状图（左右滑动切换 支出 / 收入 / 结余）
         item {
             Card(
                 modifier = Modifier
@@ -552,9 +783,9 @@ fun ICostStatisticsScreen(
                     StatsCardHeader(
                         badgeAsset = "chart_money_red.webp",
                         title = when (barChartMetric) {
-                            0 -> "支出统计图 ⇄"
-                            1 -> "收入统计图 ⇄"
-                            else -> "结余统计图 ⇄"
+                            0 -> "支出统计图"
+                            1 -> "收入统计图"
+                            else -> "结余统计图"
                         },
                         expanded = barChartExpanded,
                         onToggle = { barChartExpanded = !barChartExpanded }
@@ -568,34 +799,42 @@ fun ICostStatisticsScreen(
                         exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
                     ) {
                         Column(modifier = Modifier.padding(top = 14.dp)) {
-                            val maxVal = (dailyBars.maxOrNull() ?: 0L).coerceAtLeast(1000L)
-                            val maxIdx = dailyBars.indexOfFirst { it == dailyBars.maxOrNull() }.coerceAtLeast(0)
+                            val hasData = bars.any { it != 0L }
                             val barColor = when (barChartMetric) {
                                 0 -> ICostCoralRed
                                 1 -> ICostGreenIncome
                                 else -> Color(0xFF3B82F6)
                             }
-                            val animFrac = barProgress.value
 
-                            // 峰值提示胶囊
-                            val peakCents = dailyBars.getOrElse(maxIdx) { 0L }
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text(
-                                    text = formatMoneyCents(maxVal),
-                                    fontSize = 10.sp,
-                                    color = ICostTextMuted
-                                )
-                                if (peakCents > 0L) {
+                            if (!hasData) {
+                                StatsEmptyChart(height = 165.dp)
+                            } else {
+                                val maxPos = bars.maxOf { it }.coerceAtLeast(0L)
+                                val maxNeg = (-bars.minOf { it }).coerceAtLeast(0L)
+                                val peakIdx = if (barChartMetric == 2) {
+                                    bars.indices.maxByOrNull { abs(bars[it]) } ?: 0
+                                } else {
+                                    bars.indices.maxByOrNull { bars[it] } ?: 0
+                                }
+                                val peakCents = bars.getOrElse(peakIdx) { 0L }
+                                val animFrac = barProgress.value
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = formatMoneyCents(max(maxPos, maxNeg)),
+                                        fontSize = 10.sp,
+                                        color = ICostTextMuted
+                                    )
                                     Surface(
                                         shape = RoundedCornerShape(10.dp),
                                         color = barColor.copy(alpha = 0.12f)
                                     ) {
                                         Text(
-                                            text = "${month}/${maxIdx + 1} Peak: ${formatMoneyCents(peakCents)}",
+                                            text = "峰值 ${buckets.getOrNull(peakIdx)?.fullLabel.orEmpty()} ${formatMoneyCents(peakCents)}",
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = barColor,
@@ -603,61 +842,71 @@ fun ICostStatisticsScreen(
                                         )
                                     }
                                 }
-                            }
 
-                            Spacer(modifier = Modifier.height(6.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
 
-                            Canvas(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(145.dp)
-                            ) {
-                                val w = size.width
-                                val h = size.height
-                                val dashEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f), 0f)
+                                Canvas(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(145.dp)
+                                ) {
+                                    val w = size.width
+                                    val h = size.height
+                                    val dashEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f), 0f)
+                                    val topY = h * 0.06f
+                                    val bottomY = h * 0.96f
+                                    val usableH = bottomY - topY
+                                    val total = (maxPos + maxNeg).coerceAtLeast(1L).toFloat()
+                                    // 有负值（结余为负）时基线上移，负值柱向下绘制
+                                    val baseY = topY + usableH * (maxPos.toFloat() / total)
 
-                                // 3 条水平参考虚线
-                                listOf(0.15f, 0.55f, 0.95f).forEach { ratioY ->
-                                    drawLine(
-                                        color = Color(0xFFEEEEEE),
-                                        start = Offset(0f, h * ratioY),
-                                        end = Offset(w, h * ratioY),
-                                        strokeWidth = 1.dp.toPx(),
-                                        pathEffect = dashEffect
-                                    )
-                                }
-
-                                val count = dailyBars.size.coerceAtLeast(1)
-                                val slotW = w / count
-                                val barW = (slotW * 0.56f).coerceAtLeast(3.dp.toPx())
-                                val usableH = h * 0.85f
-                                val baseY = h * 0.95f
-
-                                dailyBars.forEachIndexed { i, v ->
-                                    val bh = if (v <= 0L) {
-                                        3.dp.toPx()
-                                    } else {
-                                        ((v.toFloat() / maxVal.toFloat() * usableH) * animFrac).coerceAtLeast(4.dp.toPx())
+                                    listOf(topY, (topY + bottomY) / 2f, bottomY).forEach { y ->
+                                        drawLine(
+                                            color = Color(0xFFEEEEEE),
+                                            start = Offset(0f, y),
+                                            end = Offset(w, y),
+                                            strokeWidth = 1.dp.toPx(),
+                                            pathEffect = dashEffect
+                                        )
                                     }
-                                    val x = i * slotW + (slotW - barW) / 2f
-                                    drawRoundRect(
-                                        color = if (v > 0L) barColor else Color(0xFFF0F0F2),
-                                        topLeft = Offset(x, baseY - bh),
-                                        size = Size(barW, bh),
-                                        cornerRadius = CornerRadius(barW / 2f, barW / 2f)
-                                    )
-                                }
-                            }
+                                    if (maxNeg > 0L) {
+                                        drawLine(
+                                            color = Color(0xFFDDDDDD),
+                                            start = Offset(0f, baseY),
+                                            end = Offset(w, baseY),
+                                            strokeWidth = 1.dp.toPx()
+                                        )
+                                    }
 
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("${month}/01", fontSize = 10.sp, color = ICostTextMuted)
-                                Text("${month}/10", fontSize = 10.sp, color = ICostTextMuted)
-                                Text("${month}/20", fontSize = 10.sp, color = ICostTextMuted)
-                                Text("${month}/$daysInPeriod", fontSize = 10.sp, color = ICostTextMuted)
+                                    val count = bars.size.coerceAtLeast(1)
+                                    val slotW = w / count
+                                    val barW = (slotW * 0.56f).coerceIn(3.dp.toPx(), 22.dp.toPx())
+
+                                    bars.forEachIndexed { i, v ->
+                                        val x = i * slotW + (slotW - barW) / 2f
+                                        if (v == 0L) {
+                                            drawRoundRect(
+                                                color = Color(0xFFF0F0F2),
+                                                topLeft = Offset(x, baseY - 3.dp.toPx()),
+                                                size = Size(barW, 3.dp.toPx()),
+                                                cornerRadius = CornerRadius(barW / 2f, barW / 2f)
+                                            )
+                                        } else {
+                                            val bh = ((abs(v).toFloat() / total * usableH) * animFrac)
+                                                .coerceAtLeast(4.dp.toPx())
+                                            val top = if (v > 0L) baseY - bh else baseY
+                                            drawRoundRect(
+                                                color = if (v > 0L) barColor else ICostCoralRed,
+                                                topLeft = Offset(x, top),
+                                                size = Size(barW, bh),
+                                                cornerRadius = CornerRadius(barW / 2f, barW / 2f)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(4.dp))
+                                BucketAxisLabels(buckets = buckets, visibleIndices = axisIndices)
                             }
 
                             Spacer(modifier = Modifier.height(12.dp))
@@ -672,7 +921,7 @@ fun ICostStatisticsScreen(
             }
         }
 
-        // 9. 卡片五：净资产趋势图（支持模块右滑/左滑切换 净资产 ⇄ 总资产 ⇄ 总负债）
+        // 9. 卡片五：资产趋势图（按账户余额与账单倒推，左右滑动切换 净资产 / 总资产 / 总负债）
         item {
             Card(
                 modifier = Modifier
@@ -689,9 +938,9 @@ fun ICostStatisticsScreen(
                     StatsCardHeader(
                         badgeAsset = "chart_trend.webp",
                         title = when (trendMetric) {
-                            0 -> "净资产趋势图 ⇄"
-                            1 -> "总资产趋势图 ⇄"
-                            else -> "总负债趋势图 ⇄"
+                            0 -> "净资产趋势图"
+                            1 -> "总资产趋势图"
+                            else -> "总负债趋势图"
                         },
                         expanded = trendChartExpanded,
                         onToggle = { trendChartExpanded = !trendChartExpanded }
@@ -711,14 +960,16 @@ fun ICostStatisticsScreen(
                                 else -> ICostCoralRed
                             }
                             val trendFrac = trendProgress.value
+                            val hasTrend = trendPoints.isNotEmpty() && trendPoints.any { it != 0L }
 
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Text("当前", fontSize = 11.sp, color = ICostTextSecondary)
                                 Text(
-                                    text = formatMoneyCents(baseTrendTarget),
+                                    text = formatMoneyCents(currentTrendValue, "CNY", hideAmounts),
                                     fontFamily = ICDinFontFamily,
                                     fontSize = 15.sp,
                                     fontWeight = FontWeight.Bold,
@@ -728,100 +979,87 @@ fun ICostStatisticsScreen(
 
                             Spacer(modifier = Modifier.height(8.dp))
 
-                            val points = remember(baseTrendTarget, netExpenseCents, totalIncomeCents) {
-                                val end = baseTrendTarget.toFloat()
-                                val delta = (totalIncomeCents - netExpenseCents).toFloat()
-                                val start = end - delta
-                                listOf(
-                                    start,
-                                    start + delta * 0.18f,
-                                    start + delta * 0.32f,
-                                    start + delta * 0.55f,
-                                    start + delta * 0.72f,
-                                    start + delta * 0.88f,
-                                    end
-                                )
-                            }
+                            if (!hasTrend) {
+                                StatsEmptyChart(height = 135.dp)
+                            } else {
+                                val points = if (trendPoints.size == 1) listOf(trendPoints[0], trendPoints[0]) else trendPoints
 
-                            Canvas(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(135.dp)
-                            ) {
-                                val w = size.width
-                                val h = size.height
-                                val dash = PathEffect.dashPathEffect(floatArrayOf(8f, 8f), 0f)
-                                listOf(0.15f, 0.52f, 0.88f).forEach { ry ->
-                                    drawLine(
-                                        color = Color(0xFFEEEEEE),
-                                        start = Offset(0f, h * ry),
-                                        end = Offset(w, h * ry),
-                                        strokeWidth = 1.dp.toPx(),
-                                        pathEffect = dash
-                                    )
-                                }
+                                Canvas(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(135.dp)
+                                ) {
+                                    val w = size.width
+                                    val h = size.height
+                                    val dash = PathEffect.dashPathEffect(floatArrayOf(8f, 8f), 0f)
+                                    listOf(0.15f, 0.52f, 0.88f).forEach { ry ->
+                                        drawLine(
+                                            color = Color(0xFFEEEEEE),
+                                            start = Offset(0f, h * ry),
+                                            end = Offset(w, h * ry),
+                                            strokeWidth = 1.dp.toPx(),
+                                            pathEffect = dash
+                                        )
+                                    }
 
-                                val minP = points.minOrNull() ?: 0f
-                                val maxP = points.maxOrNull() ?: 1f
-                                val span = (maxP - minP).takeIf { abs(it) > 1f } ?: 100f
+                                    val minP = points.min().toFloat()
+                                    val maxP = points.max().toFloat()
+                                    val span = (maxP - minP).takeIf { abs(it) > 1f }
+                                    // 已绘制分桶数占全部分桶的比例，当前周期未到的部分留白
+                                    val drawnWidth = if (buckets.size > 1 && trendPoints.size > 1) {
+                                        w * ((trendPoints.size - 1).toFloat() / (buckets.size - 1).toFloat())
+                                    } else w
 
-                                val coords = points.mapIndexed { idx, v ->
-                                    val x = w * (idx.toFloat() / (points.size - 1))
-                                    val norm = (v - minP) / span
-                                    val y = h * 0.82f - norm * (h * 0.60f)
-                                    Offset(x, y)
-                                }
+                                    val coords = points.mapIndexed { idx, v ->
+                                        val x = drawnWidth * (idx.toFloat() / (points.size - 1))
+                                        val norm = if (span == null) 0.5f else (v.toFloat() - minP) / span
+                                        val y = h * 0.82f - norm * (h * 0.60f)
+                                        Offset(x, y)
+                                    }
 
-                                val linePath = Path().apply {
-                                    coords.forEachIndexed { idx, pt ->
-                                        if (idx == 0) moveTo(pt.x, pt.y)
-                                        else {
-                                            val prev = coords[idx - 1]
-                                            val cx = (prev.x + pt.x) / 2f
-                                            cubicTo(cx, prev.y, cx, pt.y, pt.x, pt.y)
+                                    val linePath = Path().apply {
+                                        coords.forEachIndexed { idx, pt ->
+                                            if (idx == 0) moveTo(pt.x, pt.y)
+                                            else {
+                                                val prev = coords[idx - 1]
+                                                val cx = (prev.x + pt.x) / 2f
+                                                cubicTo(cx, prev.y, cx, pt.y, pt.x, pt.y)
+                                            }
+                                        }
+                                    }
+
+                                    val fillPath = Path().apply {
+                                        addPath(linePath)
+                                        lineTo(coords.last().x, h * 0.92f)
+                                        lineTo(0f, h * 0.92f)
+                                        close()
+                                    }
+
+                                    clipRect(right = w * trendFrac) {
+                                        drawPath(
+                                            path = fillPath,
+                                            brush = Brush.verticalGradient(
+                                                colors = listOf(lineColor.copy(alpha = 0.24f), lineColor.copy(alpha = 0.0f)),
+                                                startY = 0f,
+                                                endY = h
+                                            )
+                                        )
+                                        drawPath(
+                                            path = linePath,
+                                            color = lineColor,
+                                            style = Stroke(width = 2.6.dp.toPx(), cap = StrokeCap.Round)
+                                        )
+                                    }
+                                    if (trendFrac > 0.92f) {
+                                        coords.lastOrNull()?.let { lastPt ->
+                                            drawCircle(color = Color.White, radius = 5.dp.toPx(), center = lastPt)
+                                            drawCircle(color = lineColor, radius = 3.5.dp.toPx(), center = lastPt)
                                         }
                                     }
                                 }
 
-                                val fillPath = Path().apply {
-                                    addPath(linePath)
-                                    lineTo(w, h * 0.92f)
-                                    lineTo(0f, h * 0.92f)
-                                    close()
-                                }
-
-                                clipRect(right = w * trendFrac) {
-                                    drawPath(
-                                        path = fillPath,
-                                        brush = Brush.verticalGradient(
-                                            colors = listOf(lineColor.copy(alpha = 0.24f), lineColor.copy(alpha = 0.0f)),
-                                            startY = 0f,
-                                            endY = h
-                                        )
-                                    )
-                                    drawPath(
-                                        path = linePath,
-                                        color = lineColor,
-                                        style = Stroke(width = 2.6.dp.toPx(), cap = StrokeCap.Round)
-                                    )
-                                }
-                                if (trendFrac > 0.92f) {
-                                    coords.lastOrNull()?.let { lastPt ->
-                                        drawCircle(color = Color.White, radius = 5.dp.toPx(), center = lastPt)
-                                        drawCircle(color = lineColor, radius = 3.5.dp.toPx(), center = lastPt)
-                                    }
-                                }
-                            }
-
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text("${month}/01", fontSize = 10.sp, color = ICostTextMuted)
-                                Text("${month}/10", fontSize = 10.sp, color = ICostTextMuted)
-                                Text("${month}/20", fontSize = 10.sp, color = ICostTextMuted)
-                                Text("${month}/$daysInPeriod", fontSize = 10.sp, color = ICostTextMuted)
+                                Spacer(modifier = Modifier.height(4.dp))
+                                BucketAxisLabels(buckets = buckets, visibleIndices = axisIndices)
                             }
 
                             Spacer(modifier = Modifier.height(12.dp))
@@ -836,7 +1074,7 @@ fun ICostStatisticsScreen(
             }
         }
 
-        // 10. 卡片六：支出分类详情（支持模块右滑/左滑切换 支出分类 ⇄ 收入分类）
+        // 10. 卡片六：分类详情（左右滑动切换 支出分类 / 收入分类）
         item {
             Card(
                 modifier = Modifier
@@ -852,7 +1090,7 @@ fun ICostStatisticsScreen(
                 Column(modifier = Modifier.padding(16.dp)) {
                     StatsCardHeader(
                         badgeAsset = "chart_classification.webp",
-                        title = if (donutMetric == 0) "支出分类详情 ⇄" else "收入分类详情 ⇄",
+                        title = if (donutMetric == 0) "支出分类详情" else "收入分类详情",
                         expanded = donutChartExpanded,
                         onToggle = { donutChartExpanded = !donutChartExpanded }
                     )
@@ -870,7 +1108,7 @@ fun ICostStatisticsScreen(
 
                             if (categoryBreakdown.isEmpty() || totalTargetCents <= 0L) {
                                 Text(
-                                    text = "当前时间段暂无分类记录",
+                                    text = "暂无数据",
                                     fontSize = 13.sp,
                                     color = ICostTextSecondary,
                                     modifier = Modifier.padding(vertical = 20.dp)
@@ -1030,12 +1268,6 @@ fun ICostStatisticsScreen(
                                                         fontSize = 11.sp,
                                                         color = ICostTextSecondary
                                                     )
-                                                    Icon(
-                                                        imageVector = Icons.Default.ChevronRight,
-                                                        contentDescription = null,
-                                                        tint = ICostTextMuted,
-                                                        modifier = Modifier.size(16.dp)
-                                                    )
                                                 }
                                             }
                                             Spacer(modifier = Modifier.height(6.dp))
@@ -1107,7 +1339,7 @@ private fun ChartMiniSegmentToggle(
 ) {
     Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Surface(
-            shape = RoundedCornerShape(16.dp),
+            shape = RoundedCornerShape(18.dp),
             color = Color(0xFFF2F2F4)
         ) {
             Row(modifier = Modifier.padding(3.dp)) {
@@ -1120,10 +1352,11 @@ private fun ChartMiniSegmentToggle(
                     )
                     Box(
                         modifier = Modifier
-                            .clip(RoundedCornerShape(13.dp))
+                            .heightIn(min = 34.dp)
+                            .clip(RoundedCornerShape(15.dp))
                             .background(pillBg)
                             .iCostPressScale(pressedScale = 0.92f) { onSelect(idx) }
-                            .padding(horizontal = 16.dp, vertical = 5.dp),
+                            .padding(horizontal = 18.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         Text(
@@ -1187,15 +1420,7 @@ private fun ICostBentoStatsCard(
                                     Column(
                                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
                                     ) {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            Text(label, fontSize = 12.sp, color = ICostTextSecondary)
-                                            Icon(
-                                                Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                                contentDescription = null,
-                                                tint = ICostTextSecondary,
-                                                modifier = Modifier.size(14.dp)
-                                            )
-                                        }
+                                        Text(label, fontSize = 12.sp, color = ICostTextSecondary)
                                         Spacer(modifier = Modifier.height(4.dp))
                                         Text(
                                             text = valStr,
@@ -1215,6 +1440,41 @@ private fun ICostBentoStatsCard(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatsEmptyChart(height: androidx.compose.ui.unit.Dp) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(height)
+            .clip(RoundedCornerShape(15.dp))
+            .background(ICostCellGray),
+        contentAlignment = Alignment.Center
+    ) {
+        Text("暂无数据", fontSize = 13.sp, color = ICostTextSecondary)
+    }
+}
+
+/** 与柱状图分桶一一对齐的坐标轴标签：每个分桶等宽，只显示选中的刻度。 */
+@Composable
+private fun BucketAxisLabels(buckets: List<StatsBucket>, visibleIndices: Set<Int>) {
+    Row(modifier = Modifier.fillMaxWidth()) {
+        buckets.forEachIndexed { idx, b ->
+            Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                if (idx in visibleIndices) {
+                    Text(
+                        text = b.axisLabel,
+                        fontSize = 10.sp,
+                        color = ICostTextMuted,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier.wrapContentWidth(unbounded = true)
+                    )
                 }
             }
         }
