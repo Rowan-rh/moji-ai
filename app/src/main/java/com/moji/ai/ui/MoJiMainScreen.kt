@@ -69,6 +69,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -116,17 +117,23 @@ import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostSmoothBottomSheet
 import com.moji.ai.ui.theme.ICostTextMuted
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.iCostHorizontalSwipeTrigger
 import com.moji.ai.ui.theme.iCostPressScale
+import com.moji.ai.ui.theme.preloadAllICostAssets
 import java.util.Calendar
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MoJiMainScreen(viewModel: MainViewModel) {
+    val appContext = LocalContext.current
+    LaunchedEffect(Unit) {
+        preloadAllICostAssets(appContext)
+    }
     val wallets by viewModel.wallets.collectAsState()
     val transactions by viewModel.transactions.collectAsState()
     val recurringRules by viewModel.recurringRules.collectAsState()
@@ -320,17 +327,17 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             )
         }
 
-        // 全屏收支日历页面（06_calendar_full.png）—— 弹簧上浮转场
+        // 全屏收支日历页面（06_calendar_full.png）—— 120Hz 高响应弹簧上浮转场
         AnimatedVisibility(
             visible = calendarMonthTxs != null,
             enter = slideInVertically(
-                initialOffsetY = { it / 4 },
-                animationSpec = spring(dampingRatio = 0.82f, stiffness = Spring.StiffnessMediumLow)
-            ) + fadeIn(tween(220)),
+                initialOffsetY = { it },
+                animationSpec = spring(dampingRatio = 0.94f, stiffness = 580f)
+            ) + fadeIn(tween(150)),
             exit = slideOutVertically(
-                targetOffsetY = { it / 4 },
-                animationSpec = tween(200, easing = FastOutSlowInEasing)
-            ) + fadeOut(tween(160))
+                targetOffsetY = { it },
+                animationSpec = spring(dampingRatio = 0.96f, stiffness = 680f)
+            ) + fadeOut(tween(130))
         ) {
             MonthlyCalendarSheet(
                 year = selectedYear,
@@ -457,13 +464,14 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             )
         }
 
-        // 1:1 iCost 分类+计算器记账面板（04_add_record_sheet.png）
-        if (showCalculatorSheet && wallets.isNotEmpty()) {
+        // 1:1 iCost 分类+计算器记账面板（04_add_record_sheet.png，后台常驻 keepWarm 预热，点击「+」0ms 首帧 120Hz 上滑）
+        if (wallets.isNotEmpty()) {
             ICostCalculatorSheet(
                 wallets = wallets,
                 currentLedger = currentLedger,
                 ledgers = ledgers,
                 onSelectLedger = { viewModel.selectLedger(it) },
+                visible = showCalculatorSheet,
                 editingTransaction = editingTx,
                 initialType = calcInitialType,
                 initialSourceWalletId = calcInitialSourceWalletId,
@@ -481,6 +489,90 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 },
                 onOpenAiSandbox = { showAiSandboxSheet = true }
             )
+        }
+        // AI 静默识账沙盒测试面板
+        if (showAiSandboxSheet) {
+            ICostSmoothBottomSheet(
+                onDismissRequest = { showAiSandboxSheet = false },
+                containerColor = ICostCardWhite
+            ) {
+                AiSandboxSheetContent(
+                    isParsing = isParsing,
+                    statusMessage = sandboxStatus,
+                    observabilityLogs = observabilityLogs,
+                    merchantMemories = merchantMemories,
+                    onRunSimulation = { text, pkg -> viewModel.simulateCapturedEvent(text, pkg) },
+                    onClearLogs = { viewModel.clearObservabilityLogs() }
+                )
+            }
+        }
+
+        // 账单 CSV 导入导出与全量快照备份恢复面板
+        if (showBackupTransferSheet) {
+            ICostSmoothBottomSheet(
+                onDismissRequest = { showBackupTransferSheet = false },
+                containerColor = ICostCardWhite
+            ) {
+                BackupAndCsvTransferSheet(
+                    initialTab = backupInitialTab,
+                    statusMessage = sandboxStatus,
+                    webDavConfig = webDavConfig,
+                    onPreviewCsv = { csv -> viewModel.previewCsvImport(csv) },
+                    onCommitCsvImport = { csv, applyBalance, onDone ->
+                        viewModel.commitCsvImport(csv, applyBalance, onDone)
+                    },
+                    onExportCsv = { viewModel.generateCsvExportString() },
+                    onExportFullBackup = { viewModel.generateFullBackupJson() },
+                    onRestoreFullBackup = { json, onDone ->
+                        viewModel.restoreFromBackupJson(json, onDone)
+                    },
+                    onUploadWebDav = { cfg, onDone ->
+                        viewModel.uploadBackupToWebDav(cfg, onDone)
+                    },
+                    onRestoreWebDav = { cfg, onDone ->
+                        viewModel.restoreBackupFromWebDav(cfg, onDone)
+                    }
+                )
+            }
+        }
+
+        // 国产 ROM 保活与 Android 13+ 受限设置一站式诊断向导面板
+        if (showKeepAliveGuideSheet) {
+            ICostSmoothBottomSheet(
+                onDismissRequest = { showKeepAliveGuideSheet = false },
+                containerColor = ICostCardWhite
+            ) {
+                RomKeepAliveGuideSheet()
+            }
+        }
+
+        // 批量报销核销中心面板
+        if (showBatchReimburseSheet) {
+            ICostSmoothBottomSheet(
+                onDismissRequest = { showBatchReimburseSheet = false },
+                containerColor = ICostCardWhite
+            ) {
+                BatchReimbursementSheet(
+                    transactions = transactions,
+                    wallets = wallets,
+                    onBatchSettle = { ids, recvWalletId, onDone ->
+                        viewModel.batchSettleReimbursements(ids, recvWalletId, onDone)
+                    }
+                )
+            }
+        }
+
+        // AI 大模型与系统权限配置面板
+        if (showAiSettingsSheet) {
+            ICostSmoothBottomSheet(
+                onDismissRequest = { showAiSettingsSheet = false },
+                containerColor = ICostCardWhite
+            ) {
+                AiAndPermissionsSheetContent(
+                    config = aiConfig,
+                    onSaveConfig = { viewModel.updateAiConfig(it) }
+                )
+            }
         }
     }
 
@@ -515,91 +607,6 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 TextButton(onClick = { showBudgetDialog = false }) { Text("取消") }
             }
         )
-    }
-
-    // AI 静默识账沙盒测试面板
-    if (showAiSandboxSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showAiSandboxSheet = false },
-            containerColor = ICostCardWhite
-        ) {
-            AiSandboxSheetContent(
-                isParsing = isParsing,
-                statusMessage = sandboxStatus,
-                observabilityLogs = observabilityLogs,
-                merchantMemories = merchantMemories,
-                onRunSimulation = { text, pkg -> viewModel.simulateCapturedEvent(text, pkg) },
-                onClearLogs = { viewModel.clearObservabilityLogs() }
-            )
-        }
-    }
-
-    // 账单 CSV 导入导出与全量快照备份恢复面板
-    if (showBackupTransferSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showBackupTransferSheet = false },
-            containerColor = ICostCardWhite
-        ) {
-            BackupAndCsvTransferSheet(
-                initialTab = backupInitialTab,
-                statusMessage = sandboxStatus,
-                webDavConfig = webDavConfig,
-                onPreviewCsv = { csv -> viewModel.previewCsvImport(csv) },
-                onCommitCsvImport = { csv, applyBalance, onDone ->
-                    viewModel.commitCsvImport(csv, applyBalance, onDone)
-                },
-                onExportCsv = { viewModel.generateCsvExportString() },
-                onExportFullBackup = { viewModel.generateFullBackupJson() },
-                onRestoreFullBackup = { json, onDone ->
-                    viewModel.restoreFromBackupJson(json, onDone)
-                },
-                onUploadWebDav = { cfg, onDone ->
-                    viewModel.uploadBackupToWebDav(cfg, onDone)
-                },
-                onRestoreWebDav = { cfg, onDone ->
-                    viewModel.restoreBackupFromWebDav(cfg, onDone)
-                }
-            )
-        }
-    }
-
-    // 国产 ROM 保活与 Android 13+ 受限设置一站式诊断向导面板
-    if (showKeepAliveGuideSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showKeepAliveGuideSheet = false },
-            containerColor = ICostCardWhite
-        ) {
-            RomKeepAliveGuideSheet()
-        }
-    }
-
-    // 批量报销核销中心面板
-    if (showBatchReimburseSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showBatchReimburseSheet = false },
-            containerColor = ICostCardWhite
-        ) {
-            BatchReimbursementSheet(
-                transactions = transactions,
-                wallets = wallets,
-                onBatchSettle = { ids, recvWalletId, onDone ->
-                    viewModel.batchSettleReimbursements(ids, recvWalletId, onDone)
-                }
-            )
-        }
-    }
-
-    // AI 大模型与系统权限配置面板
-    if (showAiSettingsSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showAiSettingsSheet = false },
-            containerColor = ICostCardWhite
-        ) {
-            AiAndPermissionsSheetContent(
-                config = aiConfig,
-                onSaveConfig = { viewModel.updateAiConfig(it) }
-            )
-        }
     }
 }
 

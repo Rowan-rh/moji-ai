@@ -42,6 +42,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableHighRefreshRateMode()
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.light(
                 android.graphics.Color.TRANSPARENT,
@@ -60,6 +61,34 @@ class MainActivity : ComponentActivity() {
                     MoJiMainScreen(viewModel = viewModel)
                 }
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        enableHighRefreshRateMode()
+    }
+
+    private fun enableHighRefreshRateMode() {
+        runCatching {
+            val win = window ?: return
+            val params = win.attributes
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val disp = display ?: win.decorView.display
+                val modes = disp?.supportedModes.orEmpty()
+                val maxWidth = modes.maxOfOrNull { it.physicalWidth } ?: 0
+                val bestMode = modes
+                    .filter { it.physicalWidth == maxWidth && it.refreshRate >= 119f }
+                    .minByOrNull { kotlin.math.abs(it.refreshRate - 120f) }
+                    ?: modes.maxByOrNull { it.refreshRate }
+                if (bestMode != null) {
+                    params.preferredDisplayModeId = bestMode.modeId
+                    params.preferredRefreshRate = bestMode.refreshRate
+                }
+            } else {
+                params.preferredRefreshRate = 120f
+            }
+            win.attributes = params
         }
     }
 
