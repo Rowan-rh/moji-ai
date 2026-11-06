@@ -12,7 +12,13 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -31,6 +37,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -54,6 +61,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -250,10 +259,10 @@ fun AnimatedMoneyText(
 }
 
 /**
- * 水平滑动手势触发修饰符（支持模块右滑/左滑快捷切换或展开扩展面板）
+ * 水平滑动手势触发修饰符（支持模块右滑/左滑快捷切换或展开扩展面板，内置速度感应与方向锁定）
  */
 fun Modifier.iCostHorizontalSwipeTrigger(
-    thresholdDp: Dp = 42.dp,
+    thresholdDp: Dp = 36.dp,
     onSwipeRight: (() -> Unit)? = null,
     onSwipeLeft: (() -> Unit)? = null
 ): Modifier = composed {
@@ -262,28 +271,50 @@ fun Modifier.iCostHorizontalSwipeTrigger(
     val thresholdPx = with(density) { thresholdDp.toPx() }
     var dragAccumulator by remember { mutableFloatStateOf(0f) }
 
-    this.pointerInput(onSwipeRight, onSwipeLeft) {
-        detectHorizontalDragGestures(
-            onDragStart = { dragAccumulator = 0f },
-            onDragEnd = {
-                when {
-                    dragAccumulator >= thresholdPx && onSwipeRight != null -> {
-                        runCatching { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
-                        onSwipeRight()
-                    }
-                    dragAccumulator <= -thresholdPx && onSwipeLeft != null -> {
-                        runCatching { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
-                        onSwipeLeft()
-                    }
+    val draggableState = rememberDraggableState { delta ->
+        dragAccumulator += delta
+    }
+
+    this.draggable(
+        state = draggableState,
+        orientation = Orientation.Horizontal,
+        onDragStarted = { dragAccumulator = 0f },
+        onDragStopped = { velocity ->
+            when {
+                (dragAccumulator >= thresholdPx || velocity > 420f) && dragAccumulator > 8f && onSwipeRight != null -> {
+                    runCatching { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+                    onSwipeRight()
                 }
-                dragAccumulator = 0f
-            },
-            onDragCancel = { dragAccumulator = 0f },
-            onHorizontalDrag = { change, dragAmount ->
-                change.consume()
-                dragAccumulator += dragAmount
+                (dragAccumulator <= -thresholdPx || velocity < -420f) && dragAccumulator < -8f && onSwipeLeft != null -> {
+                    runCatching { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+                    onSwipeLeft()
+                }
             }
-        )
+            dragAccumulator = 0f
+        }
+    )
+}
+
+/**
+ * 全局侧滑抽屉互斥协调器：确保同一时刻最多只有一行处于展开状态，滑开新行时自动丝滑收起上一行
+ */
+private object ActiveSwipeRowCoordinator {
+    private var activeRowKey: Any? = null
+    private var activeCloseCallback: (() -> Unit)? = null
+
+    fun notifyRowActive(rowKey: Any, closeCallback: () -> Unit) {
+        if (activeRowKey != null && activeRowKey != rowKey) {
+            activeCloseCallback?.invoke()
+        }
+        activeRowKey = rowKey
+        activeCloseCallback = closeCallback
+    }
+
+    fun clearIfMatch(rowKey: Any) {
+        if (activeRowKey == rowKey) {
+            activeRowKey = null
+            activeCloseCallback = null
+        }
     }
 }
 
@@ -299,14 +330,18 @@ data class SwipeActionItem(
 )
 
 /**
- * 1:1 iCost 模块侧滑扩展功能容器（同时支持「右滑展开左侧扩展按钮」与「左滑展开右侧扩展按钮」，内置弹簧吸附与触觉反馈）
+ * 1:1 iCost 高帧率侧滑扩展功能容器：
+ * 1. 全程在 Layout/Draw 阶段 (`offset {}` + `graphicsLayer {}`) 驱动位移，滑动过程 0 重组；
+ * 2. 手势挂载于外层全宽容器，展开后在行内任意位置（含右侧菜单区）往回轻拉或轻点主体卡片即可立即收起；
+ * 3. 限制最多展示 3 枚紧凑胶囊按钮（总宽约 144dp），留出充足主体拖拽区，彻底解决菜单过宽难回拖问题。
  */
 @Composable
 fun ICostSwipeActionRow(
     actions: List<SwipeActionItem>,
     modifier: Modifier = Modifier,
-    actionWidth: Dp = 56.dp,
-    actionHeight: Dp = 46.dp,
+    actionWidth: Dp = 44.dp,
+    actionHeight: Dp = 42.dp,
+    enableRightSwipe: Boolean = false,
     content: @Composable () -> Unit
 ) {
     if (actions.isEmpty()) {
@@ -314,142 +349,211 @@ fun ICostSwipeActionRow(
         return
     }
 
+    val compactActions = remember(actions) { actions.take(3) }
     val density = LocalDensity.current
     val haptic = LocalHapticFeedback.current
     val scope = rememberCoroutineScope()
     val offsetX = remember { Animatable(0f) }
+    val rowKey = remember { Any() }
     var hapticTriggeredInDrag by remember { mutableStateOf(false) }
+    var openOffsetAtDragStart by remember { mutableFloatStateOf(0f) }
 
-    val totalRevealWidthDp = (actionWidth * actions.size) + (6.dp * (actions.size - 1).coerceAtLeast(0)) + 16.dp
+    val compactWidthDp = actionWidth.coerceAtMost(46.dp)
+    val compactHeightDp = actionHeight.coerceAtMost(44.dp)
+    val totalRevealWidthDp = (compactWidthDp * compactActions.size) +
+        (5.dp * (compactActions.size - 1).coerceAtLeast(0)) + 12.dp
     val maxRevealPx = with(density) { totalRevealWidthDp.toPx() }
-    val snapThresholdPx = maxRevealPx * 0.30f
+    val openThresholdPx = maxRevealPx * 0.22f
+    val closeReturnThresholdPx = maxRevealPx * 0.85f
+
+    val animateClose: () -> Unit = remember(scope, offsetX, rowKey) {
+        {
+            ActiveSwipeRowCoordinator.clearIfMatch(rowKey)
+            scope.launch {
+                offsetX.animateTo(
+                    targetValue = 0f,
+                    animationSpec = spring(
+                        dampingRatio = 0.88f,
+                        stiffness = Spring.StiffnessMedium
+                    )
+                )
+            }
+        }
+    }
+
+    DisposableEffect(rowKey) {
+        onDispose {
+            ActiveSwipeRowCoordinator.clearIfMatch(rowKey)
+        }
+    }
+
+    val draggableState = rememberDraggableState { delta ->
+        val rawNext = offsetX.value + delta
+        val clamped = if (!enableRightSwipe) {
+            // 默认仅向左滑出右侧菜单，回拖到 0f 干脆止步，绝不越界滑到反方向
+            when {
+                rawNext > 0f -> 0f
+                rawNext < -maxRevealPx -> -maxRevealPx + (rawNext + maxRevealPx) * 0.20f
+                else -> rawNext
+            }
+        } else {
+            when {
+                openOffsetAtDragStart < -6f && rawNext > 0f -> 0f
+                openOffsetAtDragStart > 6f && rawNext < 0f -> 0f
+                rawNext > maxRevealPx -> maxRevealPx + (rawNext - maxRevealPx) * 0.20f
+                rawNext < -maxRevealPx -> -maxRevealPx + (rawNext + maxRevealPx) * 0.20f
+                else -> rawNext
+            }
+        }
+        if (!hapticTriggeredInDrag && abs(clamped - openOffsetAtDragStart) >= openThresholdPx) {
+            hapticTriggeredInDrag = true
+            runCatching { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+        }
+        scope.launch {
+            offsetX.snapTo(clamped)
+        }
+    }
 
     Box(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(16.dp))
+            .draggable(
+                state = draggableState,
+                orientation = Orientation.Horizontal,
+                onDragStarted = {
+                    hapticTriggeredInDrag = false
+                    openOffsetAtDragStart = offsetX.value
+                    ActiveSwipeRowCoordinator.notifyRowActive(rowKey, animateClose)
+                },
+                onDragStopped = { velocity ->
+                    val cur = offsetX.value
+                    val wasOpenLeft = openOffsetAtDragStart < -8f
+                    val wasOpenRight = openOffsetAtDragStart > 8f
+                    val target = when {
+                        // 已处于左滑展开态：往右轻拨 (velocity > 120f) 或往回拖超过 15% 即刻收起
+                        wasOpenLeft -> {
+                            if (velocity > 120f || cur > -closeReturnThresholdPx) 0f else -maxRevealPx
+                        }
+                        wasOpenRight -> {
+                            if (velocity < -120f || cur < closeReturnThresholdPx) 0f else maxRevealPx
+                        }
+                        // 从关闭态开始滑动：支持快速轻拂 (velocity < -260f) 或滑过 22% 阈值即展开
+                        else -> {
+                            when {
+                                velocity < -260f && cur < -4f -> -maxRevealPx
+                                velocity > 220f && cur <= 0f -> 0f
+                                enableRightSwipe && velocity > 260f && cur > 4f -> maxRevealPx
+                                cur <= -openThresholdPx -> -maxRevealPx
+                                enableRightSwipe && cur >= openThresholdPx -> maxRevealPx
+                                else -> 0f
+                            }
+                        }
+                    }
+                    if (target == 0f) {
+                        ActiveSwipeRowCoordinator.clearIfMatch(rowKey)
+                    } else {
+                        ActiveSwipeRowCoordinator.notifyRowActive(rowKey, animateClose)
+                    }
+                    scope.launch {
+                        offsetX.animateTo(
+                            targetValue = target,
+                            initialVelocity = velocity.coerceIn(-2400f, 2400f),
+                            animationSpec = spring(
+                                dampingRatio = 0.86f,
+                                stiffness = Spring.StiffnessMediumLow
+                            )
+                        )
+                    }
+                }
+            )
     ) {
-        // 背景扩展功能胶囊组：右滑（offsetX > 0）时在左侧呼出，左滑（offsetX < 0）时在右侧呼出
-        val currentOffset = offsetX.value
-        if (abs(currentOffset) > 2f) {
-            val revealProgress = (abs(currentOffset) / maxRevealPx).coerceIn(0f, 1f)
-            val isRightSwipe = currentOffset > 0f
-            Row(
-                modifier = Modifier
-                    .align(if (isRightSwipe) Alignment.CenterStart else Alignment.CenterEnd)
-                    .padding(horizontal = 8.dp)
-                    .graphicsLayer {
-                        alpha = (revealProgress * 1.25f).coerceIn(0f, 1f)
-                        scaleX = 0.82f + 0.18f * revealProgress
-                        scaleY = 0.82f + 0.18f * revealProgress
-                    },
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                actions.forEach { action ->
-                    Surface(
-                        shape = RoundedCornerShape(13.dp),
-                        color = action.backgroundColor,
-                        modifier = Modifier
-                            .width(actionWidth)
-                            .height(actionHeight)
-                            .iCostPressScale(pressedScale = 0.90f) {
-                                scope.launch {
-                                    offsetX.animateTo(
-                                        targetValue = 0f,
-                                        animationSpec = spring(
-                                            dampingRatio = 0.78f,
-                                            stiffness = Spring.StiffnessMedium
-                                        )
-                                    )
-                                }
+        // 背景紧凑胶囊按钮组：仅在 Draw 阶段读取 offsetX.value，全程 0 重组
+        Row(
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(horizontal = 6.dp)
+                .graphicsLayer {
+                    val cur = offsetX.value
+                    val revealProgress = (abs(cur) / maxRevealPx).coerceIn(0f, 1f)
+                    alpha = (revealProgress * 1.35f).coerceIn(0f, 1f)
+                    val s = 0.86f + 0.14f * revealProgress
+                    scaleX = s
+                    scaleY = s
+                    translationX = (1f - revealProgress) * 12f
+                },
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            compactActions.forEach { action ->
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = action.backgroundColor,
+                    modifier = Modifier
+                        .width(compactWidthDp)
+                        .height(compactHeightDp)
+                        .iCostPressScale(pressedScale = 0.90f) {
+                            if (abs(offsetX.value) > maxRevealPx * 0.25f) {
+                                animateClose()
                                 action.onClick()
                             }
-                    ) {
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center,
-                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)
-                        ) {
-                            if (action.iconAsset != null) {
-                                ICostAssetImage(
-                                    assetFile = action.iconAsset,
-                                    tint = action.contentColor,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.height(2.dp))
-                            }
-                            Text(
-                                text = action.label,
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = action.contentColor,
-                                maxLines = 1,
-                                softWrap = false
-                            )
                         }
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                        modifier = Modifier.padding(horizontal = 3.dp, vertical = 3.dp)
+                    ) {
+                        if (action.iconAsset != null) {
+                            ICostAssetImage(
+                                assetFile = action.iconAsset,
+                                tint = action.contentColor,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.height(1.dp))
+                        }
+                        Text(
+                            text = action.label,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = action.contentColor,
+                            maxLines = 1,
+                            softWrap = false
+                        )
                     }
                 }
             }
         }
 
-        // 前景可滑动模块主体
+        // 前景可滑动模块主体：在 Layout 阶段偏移，展开状态下轻点卡片任意空白处直接平滑收起菜单
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .offset { IntOffset(offsetX.value.roundToInt(), 0) }
                 .background(ICostCardWhite)
-                .pointerInput(actions.size, maxRevealPx) {
-                    detectHorizontalDragGestures(
-                        onDragStart = {
-                            hapticTriggeredInDrag = false
-                        },
-                        onDragEnd = {
-                            val cur = offsetX.value
-                            val target = when {
-                                cur >= snapThresholdPx -> maxRevealPx
-                                cur <= -snapThresholdPx -> -maxRevealPx
-                                else -> 0f
-                            }
-                            scope.launch {
-                                offsetX.animateTo(
-                                    targetValue = target,
-                                    animationSpec = spring(
-                                        dampingRatio = 0.72f,
-                                        stiffness = Spring.StiffnessMedium
-                                    )
-                                )
-                            }
-                        },
-                        onDragCancel = {
-                            scope.launch {
-                                offsetX.animateTo(
-                                    targetValue = 0f,
-                                    animationSpec = spring(
-                                        dampingRatio = 0.78f,
-                                        stiffness = Spring.StiffnessMedium
-                                    )
-                                )
-                            }
-                        },
-                        onHorizontalDrag = { change, dragAmount ->
-                            change.consume()
-                            val rawNext = offsetX.value + dragAmount
-                            // 超出最大展开宽度时提供阻尼橡皮筋手感
-                            val clamped = when {
-                                rawNext > maxRevealPx -> maxRevealPx + (rawNext - maxRevealPx) * 0.22f
-                                rawNext < -maxRevealPx -> -maxRevealPx + (rawNext + maxRevealPx) * 0.22f
-                                else -> rawNext
-                            }
-                            if (!hapticTriggeredInDrag && abs(clamped) >= snapThresholdPx) {
-                                hapticTriggeredInDrag = true
-                                runCatching { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
-                            }
-                            scope.launch {
-                                offsetX.snapTo(clamped)
+                .pointerInput(rowKey) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(pass = PointerEventPass.Initial, requireUnconsumed = false)
+                        if (abs(offsetX.value) > 6f) {
+                            val touchSlop = viewConfiguration.touchSlop
+                            var dragged = false
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (change.changedToUpIgnoreConsumed()) {
+                                    if (!dragged) {
+                                        change.consume()
+                                        animateClose()
+                                    }
+                                    break
+                                }
+                                if ((change.position - down.position).getDistance() > touchSlop) {
+                                    dragged = true
+                                    break
+                                }
                             }
                         }
-                    )
+                    }
                 }
         ) {
             content()

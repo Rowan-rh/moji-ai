@@ -886,31 +886,22 @@ fun ICostLedgerHomeScreen(
                                                     onClick = { onEditTransaction(tx) }
                                                 )
                                             )
-                                            add(
-                                                SwipeActionItem(
-                                                    label = "复制",
-                                                    iconAsset = "detail_template.webp",
-                                                    backgroundColor = Color(0xFFF59E0B),
-                                                    onClick = { onDuplicateTransaction(tx) }
-                                                )
-                                            )
                                             if (tx.type == TransactionType.EXPENSE && !tx.reimbursed) {
                                                 add(
                                                     SwipeActionItem(
-                                                        label = if (tx.reimbursable) "结报销" else "设报销",
+                                                        label = if (tx.reimbursable) "结报销" else "报销",
                                                         iconAsset = "detail_claim.webp",
                                                         backgroundColor = ICostGreenIncome,
                                                         onClick = { onToggleReimburse(tx) }
                                                     )
                                                 )
-                                            }
-                                            if (canRefund) {
+                                            } else {
                                                 add(
                                                     SwipeActionItem(
-                                                        label = "退款",
-                                                        iconAsset = "detail_refund.webp",
-                                                        backgroundColor = Color(0xFF8B5CF6),
-                                                        onClick = { refundingTx = tx }
+                                                        label = "复制",
+                                                        iconAsset = "detail_template.webp",
+                                                        backgroundColor = Color(0xFFF59E0B),
+                                                        onClick = { onDuplicateTransaction(tx) }
                                                     )
                                                 )
                                             }
@@ -926,8 +917,8 @@ fun ICostLedgerHomeScreen(
 
                                         ICostSwipeActionRow(
                                             actions = swipeActions,
-                                            actionWidth = 50.dp,
-                                            actionHeight = 46.dp
+                                            actionWidth = 44.dp,
+                                            actionHeight = 42.dp
                                         ) {
                                             ICostLedgerRow(
                                                 tx = tx,
