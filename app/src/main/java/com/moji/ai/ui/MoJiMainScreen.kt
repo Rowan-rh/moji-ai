@@ -227,11 +227,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var showKeepAliveGuideSheet by remember { mutableStateOf(false) }
     var showBatchReimburseSheet by remember { mutableStateOf(false) }
 
-    // 缓存最后一次打开的全屏日历与账单详情数据，确保退出动画期间内容不闪空
-    var cachedCalendarMonthTxs by remember { mutableStateOf<List<TransactionEntity>>(emptyList()) }
-    if (calendarMonthTxs != null) {
-        cachedCalendarMonthTxs = calendarMonthTxs!!
-    }
+    // 缓存最后一次打开的账单详情数据，确保退出动画期间内容不闪空（日历直接读取实时账单列表）
     val activeTx = inspectingTx?.let { target -> transactions.firstOrNull { it.id == target.id } ?: target }
     var cachedInspectingTx by remember { mutableStateOf<TransactionEntity?>(null) }
     if (activeTx != null) {
@@ -389,7 +385,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             MonthlyCalendarSheet(
                 year = selectedYear,
                 month = selectedMonth,
-                monthTransactions = cachedCalendarMonthTxs,
+                allTransactions = transactions,
+                currentLedger = currentLedger,
                 onDismiss = { calendarMonthTxs = null },
                 onSelectTransaction = { tx ->
                     inspectingTx = tx
@@ -433,7 +430,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     },
                     onSplitTransaction = { expId, catA, yuanA, catB, noteB ->
                         viewModel.splitExpenseTransaction(expId, catA, yuanA, catB, noteB)
-                    }
+                    },
+                    onDuplicate = { tx -> viewModel.duplicateTransactionNow(tx) }
                 )
             }
         }

@@ -545,16 +545,22 @@ fun ICostCalculatorSheet(
         }
     }
 
+    // 新记一笔且已输入金额时，关闭前确认，避免误触丢失（X、返回键、下拉、点遮罩都会拦截）
+    val hasUnsavedInput = !isEditing && !isSubmitting && expr.isNotEmpty()
     ICostSmoothBottomSheet(
         onDismissRequest = onDismiss,
         visible = visible,
         keepWarm = true,
         containerColor = ICostBgGray,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-        showDragHandle = false
+        showDragHandle = false,
+        confirmDismiss = {
+            if (hasUnsavedInput) {
+                showDiscardConfirm = true
+                false
+            } else true
+        }
     ) { requestDismiss ->
-        // 新记一笔且已输入金额时，关闭前确认，避免误触丢失
-        val hasUnsavedInput = !isEditing && !isSubmitting && expr.isNotEmpty()
         val requestCloseWithConfirm: () -> Unit = {
             if (hasUnsavedInput) showDiscardConfirm = true else requestDismiss()
         }
