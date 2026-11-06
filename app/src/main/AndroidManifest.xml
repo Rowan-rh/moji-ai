@@ -4,6 +4,14 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <queries>
+        <package android:name="com.tencent.mm" />
+        <package android:name="com.eg.android.AlipayGphone" />
+        <package android:name="com.unionpay" />
+        <package android:name="com.taobao.taobao" />
+    </queries>
 
     <application
         android:name=".MoJiApp"
@@ -11,6 +19,10 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="ocr" />
 
         <activity
             android:name=".MainActivity"
@@ -33,9 +45,9 @@
             </intent-filter>
         </service>
 
-        <!-- 2. 无障碍辅助服务：捕获付款完成页、红包/转账详情页的屏幕文本节点树 -->
+        <!-- 2. 无障碍辅助服务（SelectToSpeakService 兼容入口）：突破微信支付/账单详情节点屏蔽并支持 Android 11+ 免 Root 截屏 OCR -->
         <service
-            android:name=".service.PaymentAccessibilityService"
+            android:name="com.google.android.accessibility.selecttospeak.SelectToSpeakService"
             android:exported="true"
             android:label="@string/accessibility_service_label"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
@@ -47,7 +59,19 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
-        <!-- 3. 静默记账通知栏操作广播接收器（支持在通知栏直接点击“撤销入账”） -->
+        <!-- 3. 快捷设置控制中心磁贴：一键触发当前屏幕微信/支付宝账单识别 -->
+        <service
+            android:name=".service.OcrTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_ocr_tile"
+            android:label="@string/ocr_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- 4. 静默记账通知栏操作广播接收器（支持在通知栏直接点击“撤销入账”） -->
         <receiver
             android:name=".notification.TransactionActionReceiver"
             android:exported="false">

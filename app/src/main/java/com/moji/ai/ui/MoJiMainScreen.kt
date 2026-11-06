@@ -1151,8 +1151,8 @@ private fun ICostSmartBookkeepingFullScreen(
                         SmartSwitchRow(
                             title = "支付页自动识账",
                             subtitle = when {
-                                !aiConfig.enableAccessibilityCapture -> "读取微信 / 支付宝支付完成页，需要无障碍权限"
-                                isAccessGranted -> "运行中"
+                                !aiConfig.enableAccessibilityCapture -> "读取微信 / 支付宝付款完成页与账单详情页，需无障碍权限"
+                                isAccessGranted -> "运行中 · 支持微信/支付宝账单详情页与免Root截屏OCR兜底"
                                 else -> "未授权无障碍权限，点此前往开启"
                             },
                             subtitleIsWarning = aiConfig.enableAccessibilityCapture && !isAccessGranted,
@@ -1234,9 +1234,9 @@ private fun ICostSmartBookkeepingFullScreen(
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         listOf(
-                            "识别后直接入账，并推送可一键撤销的通知",
-                            "按商户与商品自动匹配分类，按卡号尾号匹配账户",
-                            "同一笔交易的支付页与银行通知自动合并，不重复记账"
+                            "打开微信/支付宝「账单详情」或完成支付时，自动记账并弹出顶部胶囊提示",
+                            "遇到自绘页面自动触发 Android 11+ 免 Root 截屏 + 端侧中文 OCR 兜底（也可添加控制中心「默记识屏记账」磁贴手动触发）",
+                            "按商户与商品说明自动匹配分类，按支付方式/卡号尾号匹配账户，30 秒内跨通道证据自动合并"
                         ).forEach { line ->
                             Row(verticalAlignment = Alignment.Top) {
                                 Icon(
@@ -2062,12 +2062,7 @@ private fun isNotificationListenerEnabled(context: Context): Boolean {
 }
 
 private fun isAccessibilityServiceEnabled(context: Context): Boolean {
-    val expected = ComponentName(context, PaymentAccessibilityService::class.java).flattenToString()
-    val flat = Settings.Secure.getString(
-        context.contentResolver,
-        Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-    ) ?: return false
-    return flat.contains(expected, ignoreCase = true)
+    return RomKeepAliveGuideHelper.checkAccessibilityServiceEnabled(context)
 }
 
 /**

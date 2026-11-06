@@ -4,6 +4,7 @@ import com.moji.ai.ai.AiAccountingEngine
 import com.moji.ai.ai.SmartRuleEngine
 import com.moji.ai.ai.SmartRuleExecutionResult
 import com.moji.ai.data.local.TransactionEntity
+import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.SilentBookkeepingNotifier
 import kotlinx.coroutines.CoroutineScope
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
+import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 @Serializable
@@ -39,14 +41,13 @@ data class CaptureObservabilityLogEntry(
 )
 
 /**
- * 智能防重、双通道（通知栏 + 无障碍页面）1.1s 滑动窗口聚合 + 30s 跨通道事后证据融合协调器
- * （对标 blue-whale-keeper 四通道证据融合与采集可观测面板）：
+ * 智能防重、三通道（通知栏 + 无障碍节点 + 免 Root 端侧 OCR）滑动窗口聚合 + 30s 跨通道事后证据融合协调器：
  *
- * 1) 1.1s 滑动窗口合并：同时到达的页面节点与通知直接拼接为 AI_MERGED 一次性送入 AI；
- * 2) 30s 跨通道事后证据融合（Evidence Fusion Patch）：
- *    若银行扣款通知/短信比支付页面晚到 3~30 秒（超出 1.1s 窗口），系统识别到同金额同币种流水后，
- *    自动用后到的「银行卡尾号账户」或「具体商户名/分类」增量补全（Patch）原账单并原子化联动钱包余额，既不漏信息也不重复记账；
- * 3) 采集可观测队列（Observability Log）：完整记录最近 50 条采集事件的命中最末状态与原因，支持在 App 内排查与一键重放。
+ * 1) 滑动窗口合并：同时到达的页面节点与通知直接拼接为 AI_MERGED 一次性送入 AI；
+ * 2) 交易单号级幂等去重 + 30s 跨通道事后证据融合（Evidence Fusion Patch）：
+ *    - 提取微信/支付宝「交易单号 / 订单号 / 转账单号 / 商户单号」，防止多阶延迟探测重复入账；
+ *    - 若银行扣款通知/短信比支付页面晚到 3~30 秒，识别到同金额同币种流水后自动补全尾号账户或具体商户；
+ * 3) 免悬浮窗权限顶部胶囊提示（RecognitionBanner）+ 静默通知栏一键撤销。
  */
 class CapturePipelineCoordinator(
     private val repository: LedgerRepository,
@@ -57,6 +58,7 @@ class CapturePipelineCoordinator(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val recentProcessedFingerprints = ConcurrentHashMap<String, Long>()
+    private val recentTransactionNumbers = ConcurrentHashMap<String, Long>()
     private val recentRecordedTransactions = ConcurrentHashMap<String, TransactionEntity>()
     private val pendingLock = Any()
     private var pendingTexts = mutableListOf<String>()
@@ -68,10 +70,16 @@ class CapturePipelineCoordinator(
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = _observabilityLogs.asStateFlow()
 
     private val financialKeywordRegex = Regex(
-        """(支付成功|付款成功|交易成功|消费|扣款|支出|转出|转账|收款|到账|还款|退款|退回|零钱|余额宝|花呗|白条|信用卡|储蓄卡|尾号|¥|￥|RMB|USD|HKD|\$)""",
+        """(支付成功|付款成功|交易成功|账单详情|交易详情|当前状态|交易状态|交易单号|商户单号|转账单号|订单号|支付方式|付款方式|对方已收钱|已存入零钱|已收钱|消费|扣款|支出|转出|转账|收款|到账|还款|退款|退回|零钱|余额宝|花呗|白条|信用卡|储蓄卡|尾号|¥|￥|RMB|USD|HKD|\$)""",
         RegexOption.IGNORE_CASE
     )
     private val numberRegex = Regex("""[0-9]+(\.[0-9]{1,2})?""")
+    private val txNumberRegex = Regex(
+        """(?:交易单号|订单号|转账单号|商户单号|商家订单号)\s*(?:\||[:：])?\s*([0-9A-Za-z_-]{10,42})"""
+    )
+    private val billTimeRegex = Regex(
+        """(?:支付时间|转账时间|收款时间|创建时间|到账时间|退款时间)\s*(?:\||[:：])?\s*(20\d{2}-\d{2}-\d{2}\s+\d{2}:\d{2}(?::\d{2})?)"""
+    )
 
     fun onRawFinancialEventCaptured(
         rawText: String,
@@ -93,21 +101,26 @@ class CapturePipelineCoordinator(
             return
         }
 
-        // 20秒内完全相同的文本直接拦截并记录到可观测面板
-        val exactHash = "${packageName}_${cleaned.hashCode()}"
         val now = System.currentTimeMillis()
         recentProcessedFingerprints.entries.removeIf { now - it.value > 30_000L }
+        recentTransactionNumbers.entries.removeIf { now - it.value > 180_000L }
+
+        // 1. 若包含明确的交易单号/订单号或账单支付时间戳且 3 分钟内已成功入账过同一单，直接静默拦截后续探测波次
+        val txIdentity = extractTransactionIdentity(cleaned)
+        if (txIdentity != null && recentTransactionNumbers.containsKey(txIdentity)) {
+            return
+        }
+
+        // 2. 20秒内完全相同的文本直接拦截
+        val exactHash = "${packageName}_${cleaned.hashCode()}"
         if (recentProcessedFingerprints.containsKey(exactHash)) {
-            appendLog(
-                packageName = packageName,
-                captureSource = captureSource,
-                rawText = cleaned.take(120),
-                outcome = CaptureEventOutcome.DEDUP_BLOCKED,
-                detailSummary = "20秒内相同应用与文本哈希重复触发，已幂等拦截"
-            )
             return
         }
         recentProcessedFingerprints[exactHash] = now
+
+        val isCompleteBillDetail = (cleaned.contains("账单详情") || cleaned.contains("交易详情")) &&
+            (txIdentity != null || cleaned.contains("支付时间") || cleaned.contains("创建时间"))
+        val waitWindowMs = if (isCompleteBillDetail || captureSource == "AI_OCR") 450L else 950L
 
         synchronized(pendingLock) {
             pendingTexts.add("[$captureSource | $packageName]: $cleaned")
@@ -116,8 +129,7 @@ class CapturePipelineCoordinator(
 
             debounceJob?.cancel()
             debounceJob = scope.launch {
-                // 等待 1100ms 聚合窗口，合并同时到达的页面节点与银行/微信通知
-                delay(1100L)
+                delay(waitWindowMs)
                 flushAndProcessBatch()
             }
         }
@@ -159,6 +171,19 @@ class CapturePipelineCoordinator(
         packageName: String,
         captureSource: String
     ): TransactionEntity? {
+        val txNo = extractTransactionIdentity(mergedText)
+        val now = System.currentTimeMillis()
+        if (captureSource != "AI_SANDBOX" && txNo != null && recentTransactionNumbers.containsKey(txNo)) {
+            appendLog(
+                packageName = packageName,
+                captureSource = captureSource,
+                rawText = mergedText.take(140),
+                outcome = CaptureEventOutcome.DEDUP_BLOCKED,
+                detailSummary = "账单标识 ($txNo) 已入账，跳过后续重复探测波次"
+            )
+            return null
+        }
+
         val wallets = repository.getAllWallets()
         val recentExpenses = repository.getRecentRefundableExpenses(15)
 
@@ -209,10 +234,8 @@ class CapturePipelineCoordinator(
         }
 
         val amountTypeFingerprint = "AMT_${parsedTx.type}_${parsedTx.amountCents}_${parsedTx.currency}"
-        val now = System.currentTimeMillis()
 
         // 30 秒跨通道事后证据融合（Evidence Fusion Patch）：
-        // 若 30 秒内已有同类型、同金额、同币种的交易入账，检查新事件是否携带了更具体的「商户名」或「尾号银行卡账户」
         val prevTx = recentRecordedTransactions[amountTypeFingerprint]
         if (prevTx != null && (now - prevTx.timestamp) <= 30_000L) {
             val prevHadGenericMerchant = prevTx.merchant.isBlank() || prevTx.merchant == "日常商户"
@@ -234,6 +257,9 @@ class CapturePipelineCoordinator(
                 )
                 repository.updateExistingTransaction(fusedTx)
                 recentRecordedTransactions[amountTypeFingerprint] = fusedTx
+                if (txNo != null) {
+                    recentTransactionNumbers[txNo] = now
+                }
                 val walletName = wallets.firstOrNull { it.id == fusedTx.sourceWalletId }?.name ?: "默认账户"
                 appendLog(
                     packageName = packageName,
@@ -243,8 +269,12 @@ class CapturePipelineCoordinator(
                     detailSummary = "30s内跨通道证据融合：补全账单 #${fusedTx.id} 商户「${fusedTx.merchant}」/ 账户「$walletName」",
                     transactionId = fusedTx.id
                 )
+                showOverlayBannerForTransaction(fusedTx, walletName, isFused = true)
                 return fusedTx
             } else if (captureSource != "AI_SANDBOX") {
+                if (txNo != null) {
+                    recentTransactionNumbers[txNo] = now
+                }
                 appendLog(
                     packageName = packageName,
                     captureSource = captureSource,
@@ -261,6 +291,9 @@ class CapturePipelineCoordinator(
         val savedTx = parsedTx.copy(id = newId)
         recentRecordedTransactions[amountTypeFingerprint] = savedTx
         recentProcessedFingerprints[amountTypeFingerprint] = now
+        if (txNo != null) {
+            recentTransactionNumbers[txNo] = now
+        }
 
         val walletName = wallets.firstOrNull { it.id == (savedTx.sourceWalletId ?: savedTx.targetWalletId) }?.name ?: "默认账户"
         appendLog(
@@ -272,10 +305,46 @@ class CapturePipelineCoordinator(
             transactionId = savedTx.id
         )
 
-        // 后台静默入账完成后，发送带“一键撤销”按钮的系统通知栏提醒
+        // 1. 弹出免悬浮窗权限的无障碍顶部胶囊横幅（对标花有谱 & AutoAccounting 即时反馈）
+        showOverlayBannerForTransaction(savedTx, walletName, isFused = false)
+
+        // 2. 后台静默入账完成后，发送带“一键撤销”按钮的系统通知栏提醒
         val updatedWallets = repository.getAllWallets()
         notifier.sendSilentRecordedNotification(savedTx, updatedWallets)
         return savedTx
+    }
+
+    private fun showOverlayBannerForTransaction(
+        tx: TransactionEntity,
+        walletName: String,
+        isFused: Boolean
+    ) {
+        val isIncome = tx.type == TransactionType.INCOME || tx.type == TransactionType.REFUND_OFFSET
+        val sign = when (tx.type) {
+            TransactionType.INCOME, TransactionType.REFUND_OFFSET -> "+"
+            TransactionType.EXPENSE -> "-"
+            else -> ""
+        }
+        val amtStr = String.format(Locale.US, "%.2f", tx.amountCents / 100.0)
+        val prefix = if (isFused) "已补全账单" else "已自动记账"
+        val title = "$prefix $sign¥$amtStr"
+        val merchantPart = tx.merchant.ifBlank { tx.category }
+        val subtitle = "${tx.category} · $merchantPart · $walletName"
+        RecognitionBanner.show(
+            title = title,
+            subtitle = subtitle,
+            isIncome = isIncome
+        )
+    }
+
+    private fun extractTransactionIdentity(text: String): String? {
+        txNumberRegex.find(text)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.length >= 10 }?.let {
+            return "NO_$it"
+        }
+        billTimeRegex.find(text)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.length >= 16 }?.let {
+            return "TIME_$it"
+        }
+        return null
     }
 
     private fun appendLog(

@@ -115,12 +115,19 @@ object RomKeepAliveGuideHelper {
     }
 
     fun checkAccessibilityServiceEnabled(context: Context): Boolean {
-        val expected = ComponentName(context, PaymentAccessibilityService::class.java).flattenToString()
+        if (PaymentAccessibilityService.instance != null) return true
+        val selectToSpeak = ComponentName(
+            context.packageName,
+            "com.google.android.accessibility.selecttospeak.SelectToSpeakService"
+        ).flattenToString()
+        val legacy = ComponentName(context, PaymentAccessibilityService::class.java).flattenToString()
         val flat = Settings.Secure.getString(
             context.contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
-        return flat.contains(expected, ignoreCase = true)
+        return flat.contains(selectToSpeak, ignoreCase = true) ||
+            flat.contains(legacy, ignoreCase = true) ||
+            flat.contains("${context.packageName}/", ignoreCase = true)
     }
 
     fun checkBatteryOptimizationIgnored(context: Context): Boolean {

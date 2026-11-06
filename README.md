@@ -6,10 +6,10 @@
 
 ## 核心亮点
 
-1. **AI 双通道无感采集 + 1.1s 滑动窗口聚合 + 30s 跨通道事后证据融合 (`AI_FUSED`)**：
+1. **AI 三模无感采集（通知栏 + 微信/支付宝无障碍兼容入口 + 免 Root 端侧 OCR 兜底）+ 30s 跨通道事后证据融合 (`AI_FUSED`)**：
    - [`PaymentNotificationListenerService`](app/src/main/java/com/moji/ai/service/PaymentNotificationListenerService.kt)：实时捕获微信支付、支付宝、云闪付、银行 App 及扣款短信通知。
-   - [`PaymentAccessibilityService`](app/src/main/java/com/moji/ai/service/PaymentAccessibilityService.kt)：包名白名单前置过滤 + 350ms 节流机制，轻量级提取支付完成页、转账详情页文本节点树（无需截屏 OCR，极速省电且绝不拖慢宿主应用滚动帧率）。
-   - [`CapturePipelineCoordinator`](app/src/main/java/com/moji/ai/service/CapturePipelineCoordinator.kt)：1.1 秒滑动聚合窗口 + **30 秒跨通道事后证据融合（Evidence Fusion Patch）**——若银行扣款通知比支付页面晚到 3~30 秒，自动用后到的银行卡尾号或具体商户名增量补全原账单并原子联动钱包余额；同时内置 **最近 50 条采集可观测性日志队列**（支持一键重放）。
+   - [`SelectToSpeakService`](app/src/main/java/com/google/android/accessibility/selecttospeak/SelectToSpeakService.kt) & [`PaymentAccessibilityService`](app/src/main/java/com/moji/ai/service/PaymentAccessibilityService.kt)：参考 AutoAccounting 与花有谱账本，通过 `SelectToSpeakService` 兼容入口 + `FLAG_REQUEST_ENHANCED_WEB_ACCESSIBILITY` 突破微信 WebView/LiteApp 节点屏蔽；采用多窗口包名隔离、4 阶延迟探测（`150/450/1000/1800ms`）与单笔详情锚点过滤，精准识别微信/支付宝「支付成功」与「账单详情」页；遇到自绘页面或点击控制中心「默记识屏记账」磁贴（[`OcrTileService`](app/src/main/java/com/moji/ai/service/OcrTileService.kt)）时，调用 Android 11+ `takeScreenshot` + 端侧离线中文 OCR 兜底。
+   - [`CapturePipelineCoordinator`](app/src/main/java/com/moji/ai/service/CapturePipelineCoordinator.kt) & [`RecognitionBanner`](app/src/main/java/com/moji/ai/service/RecognitionBanner.kt)：支持交易单号/支付时间级幂等去重、滑动窗口聚合与 **30 秒跨通道事后证据融合（Evidence Fusion Patch）**；入账瞬间通过免悬浮窗权限的 `TYPE_ACCESSIBILITY_OVERLAY` 在屏幕顶部弹出胶囊提示（如 `✓ 已自动记账 -¥7.51`）。
 2. **通用大模型兼容 + 商户记忆自学习 + 可视化条件规则 (`When -> Then`) + 带排除词权重的离线语义引擎**：
    - [`AiAccountingEngine`](app/src/main/java/com/moji/ai/ai/AiAccountingEngine.kt)、[`MerchantMemoryAndWeightedClassifier.kt`](app/src/main/java/com/moji/ai/ai/MerchantMemoryAndWeightedClassifier.kt) & [`SmartRuleEngine.kt`](app/src/main/java/com/moji/ai/ai/SmartRuleEngine.kt)：支持任意 OpenAI 兼容接口与 Google Gemini 官方接口；内置 **商户记忆自学习引擎 (`MerchantMemoryManager`)**、**带排除词一票否决权重的离线分类器 (`WeightedCategoryClassifier`)** 以及 **可视化条件规则引擎 (`SmartRuleEngine`)**（支持按关键词、金额区间、24 小时时段组合自动覆盖分类/账本/标签、自动标记待报销或静默拦截验证码通知）。
 3. **1:1 iCost 级视觉、模块侧滑扩展功能与丝滑弹簧动效体系**：
