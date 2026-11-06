@@ -1,6 +1,16 @@
 package com.moji.ai.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -54,6 +64,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -64,6 +75,7 @@ import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.ui.theme.AnimatedMoneyText
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
 import com.moji.ai.ui.theme.ICostAssetImage
@@ -81,6 +93,7 @@ import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
+import com.moji.ai.ui.theme.iCostPressScale
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -325,10 +338,11 @@ fun ICostLedgerHomeScreen(
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Surface(
-                        onClick = onPrevMonth,
                         shape = CircleShape,
                         color = ICostCardWhite,
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier
+                            .size(28.dp)
+                            .iCostPressScale(pressedScale = 0.88f, onClick = onPrevMonth)
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
@@ -341,10 +355,11 @@ fun ICostLedgerHomeScreen(
                     }
                     Spacer(modifier = Modifier.width(8.dp))
                     Surface(
-                        onClick = onNextMonth,
                         shape = CircleShape,
                         color = ICostCardWhite,
-                        modifier = Modifier.size(28.dp)
+                        modifier = Modifier
+                            .size(28.dp)
+                            .iCostPressScale(pressedScale = 0.88f, onClick = onNextMonth)
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
@@ -358,9 +373,11 @@ fun ICostLedgerHomeScreen(
                 }
 
                 Surface(
-                    onClick = { onOpenCalendar(monthTransactions) },
                     shape = RoundedCornerShape(14.dp),
-                    color = Color(0xFFEBEBEB)
+                    color = Color(0xFFEBEBEB),
+                    modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
+                        onOpenCalendar(monthTransactions)
+                    }
                 ) {
                     Text(
                         text = "收支日历",
@@ -379,10 +396,7 @@ fun ICostLedgerHomeScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(22.dp))
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) {
+                    .iCostPressScale(pressedScale = 0.985f) {
                         scope.launch {
                             pagerState.animateScrollToPage((pagerState.currentPage + 1) % 3)
                         }
@@ -429,14 +443,10 @@ fun ICostLedgerHomeScreen(
 
                                     Spacer(modifier = Modifier.height(6.dp))
 
-                                    Text(
-                                        text = formatMoneyCents(monthExpenseCents),
-                                        fontFamily = ICDinFontFamily,
+                                    AnimatedMoneyText(
+                                        cents = monthExpenseCents,
                                         fontSize = 36.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = ICostTextPrimary,
-                                        maxLines = 1,
-                                        softWrap = false
+                                        color = ICostTextPrimary
                                     )
 
                                     Spacer(modifier = Modifier.height(8.dp))
@@ -521,14 +531,10 @@ fun ICostLedgerHomeScreen(
 
                                     Spacer(modifier = Modifier.height(6.dp))
 
-                                    Text(
-                                        text = formatMoneyCents(remainCents),
-                                        fontFamily = ICDinFontFamily,
+                                    AnimatedMoneyText(
+                                        cents = remainCents,
                                         fontSize = 36.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = ICostTextPrimary,
-                                        maxLines = 1,
-                                        softWrap = false
+                                        color = ICostTextPrimary
                                     )
 
                                     Spacer(modifier = Modifier.height(8.dp))
@@ -576,14 +582,10 @@ fun ICostLedgerHomeScreen(
 
                                     Spacer(modifier = Modifier.height(6.dp))
 
-                                    Text(
-                                        text = formatMoneyCents(pendingReimburseCents),
-                                        fontFamily = ICDinFontFamily,
+                                    AnimatedMoneyText(
+                                        cents = pendingReimburseCents,
                                         fontSize = 36.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = ICostTextPrimary,
-                                        maxLines = 1,
-                                        softWrap = false
+                                        color = ICostTextPrimary
                                     )
 
                                     Spacer(modifier = Modifier.height(8.dp))
@@ -607,18 +609,30 @@ fun ICostLedgerHomeScreen(
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    // 三圆点指示器（黄点激活 #F5B400，灰点 #E0E0E0）
+                    // 三圆点动态胶囊指示器（激活态平滑拉伸为 16dp 琥珀金胶囊）
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         repeat(3) { idx ->
+                            val isSelected = pagerState.currentPage == idx
+                            val dotWidth by animateDpAsState(
+                                targetValue = if (isSelected) 16.dp else 6.dp,
+                                animationSpec = spring(dampingRatio = 0.65f, stiffness = Spring.StiffnessMedium),
+                                label = "PagerDotWidth"
+                            )
+                            val dotColor by animateColorAsState(
+                                targetValue = if (isSelected) ICostAmberGold else Color(0xFFE0E0E0),
+                                animationSpec = tween(220),
+                                label = "PagerDotColor"
+                            )
                             Box(
                                 modifier = Modifier
-                                    .size(6.dp)
+                                    .height(6.dp)
+                                    .width(dotWidth)
                                     .clip(CircleShape)
-                                    .background(if (pagerState.currentPage == idx) ICostAmberGold else Color(0xFFE0E0E0))
+                                    .background(dotColor)
                             )
                             if (idx < 2) Spacer(modifier = Modifier.width(6.dp))
                         }
@@ -668,12 +682,21 @@ fun ICostLedgerHomeScreen(
                 val isCollapsed = collapsedDays[dayHeader] == true
 
                 item(key = "day_$dayHeader") {
-                    Column(modifier = Modifier.fillMaxWidth()) {
+                    val arrowRotation by animateFloatAsState(
+                        targetValue = if (isCollapsed) -90f else 0f,
+                        animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMedium),
+                        label = "DayCollapseArrow"
+                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .animateItem()
+                    ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(8.dp))
-                                .clickable { collapsedDays[dayHeader] = !isCollapsed }
+                                .iCostPressScale(pressedScale = 0.98f) { collapsedDays[dayHeader] = !isCollapsed }
                                 .padding(horizontal = 4.dp, vertical = 5.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
@@ -694,15 +717,25 @@ fun ICostLedgerHomeScreen(
                                 )
                                 Spacer(modifier = Modifier.width(2.dp))
                                 Icon(
-                                    imageVector = if (isCollapsed) Icons.AutoMirrored.Filled.KeyboardArrowRight else Icons.Default.KeyboardArrowDown,
+                                    imageVector = Icons.Default.KeyboardArrowDown,
                                     contentDescription = null,
                                     tint = ICostTextSecondary,
-                                    modifier = Modifier.size(16.dp)
+                                    modifier = Modifier
+                                        .size(16.dp)
+                                        .graphicsLayer { rotationZ = arrowRotation }
                                 )
                             }
                         }
 
-                        AnimatedVisibility(visible = !isCollapsed) {
+                        AnimatedVisibility(
+                            visible = !isCollapsed,
+                            enter = expandVertically(
+                                animationSpec = spring(dampingRatio = 0.80f, stiffness = Spring.StiffnessMediumLow)
+                            ) + fadeIn(tween(180)),
+                            exit = shrinkVertically(
+                                animationSpec = tween(200)
+                            ) + fadeOut(tween(150))
+                        ) {
                             Card(
                                 modifier = Modifier.fillMaxWidth(),
                                 shape = RoundedCornerShape(22.dp),
@@ -866,7 +899,7 @@ private fun ICostLedgerRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick() }
+            .iCostPressScale(pressedScale = 0.98f, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 13.dp),
         verticalAlignment = Alignment.Top
     ) {

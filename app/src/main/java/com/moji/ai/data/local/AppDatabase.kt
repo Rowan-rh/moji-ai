@@ -70,7 +70,7 @@ interface TransactionDao {
     @Query("SELECT * FROM transactions ORDER BY timestamp DESC")
     fun observeAllTransactions(): Flow<List<TransactionEntity>>
 
-    @Query("SELECT * FROM transactions WHERE type = 'EXPENSE' AND (amountCents - refundedAmountCents) > 0 ORDER BY timestamp DESC LIMIT :limit")
+    @Query("SELECT * FROM transactions WHERE type = 'EXPENSE' AND (amountCnyCents - refundedAmountCents) > 0 ORDER BY timestamp DESC LIMIT :limit")
     suspend fun getRecentRefundableExpenses(limit: Int = 15): List<TransactionEntity>
 
     @Query("SELECT * FROM transactions WHERE id = :id LIMIT 1")

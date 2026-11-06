@@ -1,6 +1,8 @@
 package com.moji.ai.ui.components
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -65,6 +67,7 @@ import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
+import com.moji.ai.ui.theme.iCostPressScale
 import com.moji.ai.ui.theme.resolveTransactionBadgeColor
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -242,7 +245,7 @@ fun TransactionDetailSheet(
                     Row(
                         modifier = Modifier
                             .weight(1f)
-                            .clickable {
+                            .iCostPressScale(pressedScale = 0.92f) {
                                 onDismiss()
                                 onEdit(tx)
                             }
@@ -274,7 +277,7 @@ fun TransactionDetailSheet(
                     Row(
                         modifier = Modifier
                             .weight(1f)
-                            .clickable { onDelete(tx.id) }
+                            .iCostPressScale(pressedScale = 0.92f) { onDelete(tx.id) }
                             .padding(vertical = 12.dp),
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
@@ -312,11 +315,17 @@ fun TransactionDetailSheet(
                     Row(
                         modifier = Modifier
                             .weight(1f)
-                            .clickable(enabled = canRefund || canReimburse) {
-                                if (canReimburse) {
-                                    onSettleReimburse(tx.id, tx.sourceWalletId)
-                                } else if (canRefund) {
-                                    showRefundDialog = true
+                            .let { mod ->
+                                if (canRefund || canReimburse) {
+                                    mod.iCostPressScale(pressedScale = 0.92f) {
+                                        if (canReimburse) {
+                                            onSettleReimburse(tx.id, tx.sourceWalletId)
+                                        } else if (canRefund) {
+                                            showRefundDialog = true
+                                        }
+                                    }
+                                } else {
+                                    mod
                                 }
                             }
                             .padding(vertical = 12.dp),
@@ -347,7 +356,7 @@ fun TransactionDetailSheet(
                     Row(
                         modifier = Modifier
                             .weight(1f)
-                            .clickable { templateSavedBanner = true }
+                            .iCostPressScale(pressedScale = 0.92f) { templateSavedBanner = true }
                             .padding(vertical = 12.dp),
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
@@ -649,12 +658,17 @@ fun MonthlyCalendarSheet(
                                         val isSelected = selectedDay == dayNum
                                         val hasExp = dayExp > 0L
 
-                                        val cellBg = when {
+                                        val targetCellBg = when {
                                             isSelected -> ICostCoralRed
                                             hasExp -> Color(0xFFFDECE9)
                                             dayInc > 0L -> Color(0xFFE8F8F0)
                                             else -> Color(0xFFF7F7F8)
                                         }
+                                        val cellBg by animateColorAsState(
+                                            targetValue = targetCellBg,
+                                            animationSpec = tween(180),
+                                            label = "CalendarCellBg"
+                                        )
 
                                         Column(
                                             modifier = Modifier
@@ -662,10 +676,7 @@ fun MonthlyCalendarSheet(
                                                 .height(50.dp)
                                                 .clip(RoundedCornerShape(10.dp))
                                                 .background(cellBg)
-                                                .clickable(
-                                                    interactionSource = remember { MutableInteractionSource() },
-                                                    indication = null
-                                                ) { selectedDay = dayNum }
+                                                .iCostPressScale(pressedScale = 0.90f) { selectedDay = dayNum }
                                                 .padding(vertical = 4.dp, horizontal = 2.dp),
                                             horizontalAlignment = Alignment.CenterHorizontally,
                                             verticalArrangement = Arrangement.SpaceBetween

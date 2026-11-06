@@ -2,6 +2,17 @@ package com.moji.ai.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -54,6 +65,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
@@ -66,6 +78,7 @@ import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.WalletType
 import com.moji.ai.ui.theme.AccountBrandOption
+import com.moji.ai.ui.theme.AnimatedMoneyText
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAccountBrandCatalog
 import com.moji.ai.ui.theme.ICostAmberGold
@@ -86,6 +99,7 @@ import com.moji.ai.ui.theme.WalletBrandAvatar
 import com.moji.ai.ui.theme.daysUntilRepaymentText
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
+import com.moji.ai.ui.theme.iCostPressScale
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -241,11 +255,7 @@ fun ICostAssetsScreen(
                                 modifier = Modifier
                                     .size(28.dp)
                                     .clip(CircleShape)
-                                    .clickable(
-                                        interactionSource = remember { MutableInteractionSource() },
-                                        indication = null,
-                                        onClick = onToggleHideAmounts
-                                    ),
+                                    .iCostPressScale(pressedScale = 0.85f, onClick = onToggleHideAmounts),
                                 contentAlignment = Alignment.Center
                             ) {
                                 ICostAssetImage(
@@ -257,14 +267,13 @@ fun ICostAssetsScreen(
 
                         Spacer(modifier = Modifier.height(6.dp))
 
-                        Text(
-                            text = formatMoneyCents(netWorthCnyCents, "CNY", hideAmounts),
-                            fontFamily = ICDinFontFamily,
+                        AnimatedMoneyText(
+                            cents = netWorthCnyCents,
+                            currency = "CNY",
+                            hideAmounts = hideAmounts,
                             fontSize = 36.sp,
                             fontWeight = FontWeight.Bold,
-                            color = ICostTextPrimary,
-                            maxLines = 1,
-                            softWrap = false
+                            color = ICostTextPrimary
                         )
 
                         Spacer(modifier = Modifier.height(10.dp))
@@ -299,12 +308,13 @@ fun ICostAssetsScreen(
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Surface(
-                        onClick = {
-                            onQuickActionWithWallet(TransactionType.LOAN_IN, assetWallets.firstOrNull()?.id, null)
-                        },
                         shape = RoundedCornerShape(20.dp),
                         color = ICostCardWhite,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .iCostPressScale(pressedScale = 0.96f) {
+                                onQuickActionWithWallet(TransactionType.LOAN_IN, assetWallets.firstOrNull()?.id, null)
+                            }
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp),
@@ -313,14 +323,13 @@ fun ICostAssetsScreen(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text("总借入", fontSize = 13.sp, color = ICostTextSecondary)
                                 Spacer(modifier = Modifier.height(3.dp))
-                                Text(
-                                    text = formatMoneyCents(totalLoanInCents, "CNY", hideAmounts),
-                                    fontFamily = ICDinFontFamily,
+                                AnimatedMoneyText(
+                                    cents = totalLoanInCents,
+                                    currency = "CNY",
+                                    hideAmounts = hideAmounts,
                                     fontSize = 19.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = ICostTextPrimary,
-                                    maxLines = 1,
-                                    softWrap = false
+                                    color = ICostTextPrimary
                                 )
                             }
                             ICostAssetImage(
@@ -331,12 +340,13 @@ fun ICostAssetsScreen(
                     }
 
                     Surface(
-                        onClick = {
-                            onQuickActionWithWallet(TransactionType.LOAN_OUT, assetWallets.firstOrNull()?.id, null)
-                        },
                         shape = RoundedCornerShape(20.dp),
                         color = ICostCardWhite,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .iCostPressScale(pressedScale = 0.96f) {
+                                onQuickActionWithWallet(TransactionType.LOAN_OUT, assetWallets.firstOrNull()?.id, null)
+                            }
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp),
@@ -345,14 +355,13 @@ fun ICostAssetsScreen(
                             Column(modifier = Modifier.weight(1f)) {
                                 Text("总借出", fontSize = 13.sp, color = ICostTextSecondary)
                                 Spacer(modifier = Modifier.height(3.dp))
-                                Text(
-                                    text = formatMoneyCents(totalLoanOutCents, "CNY", hideAmounts),
-                                    fontFamily = ICDinFontFamily,
+                                AnimatedMoneyText(
+                                    cents = totalLoanOutCents,
+                                    currency = "CNY",
+                                    hideAmounts = hideAmounts,
                                     fontSize = 19.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = ICostTextPrimary,
-                                    maxLines = 1,
-                                    softWrap = false
+                                    color = ICostTextPrimary
                                 )
                             }
                             ICostAssetImage(
@@ -382,7 +391,13 @@ fun ICostAssetsScreen(
                                 onToggle = { creditExpanded = !creditExpanded }
                             )
 
-                            AnimatedVisibility(visible = creditExpanded) {
+                            AnimatedVisibility(
+                                visible = creditExpanded,
+                                enter = expandVertically(
+                                    animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+                                ) + fadeIn(tween(180)),
+                                exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                            ) {
                                 Column(modifier = Modifier.fillMaxWidth()) {
                                     creditWallets.forEachIndexed { idx, w ->
                                         ICostAccountItemRow(
@@ -423,7 +438,13 @@ fun ICostAssetsScreen(
                                 onToggle = { assetExpanded = !assetExpanded }
                             )
 
-                            AnimatedVisibility(visible = assetExpanded) {
+                            AnimatedVisibility(
+                                visible = assetExpanded,
+                                enter = expandVertically(
+                                    animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+                                ) + fadeIn(tween(180)),
+                                exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                            ) {
                                 Column(modifier = Modifier.fillMaxWidth()) {
                                     assetWallets.forEachIndexed { idx, w ->
                                         ICostAccountItemRow(
@@ -496,44 +517,71 @@ fun ICostAssetsScreen(
             }
         }
 
-        // 全屏二级页面：账户详情（对齐 10_asset_detail_real.png）
+        // 全屏二级页面：账户详情（对齐 10_asset_detail_real.png，带平滑水平推入/退出过渡）
         val currentInspecting = inspectingWallet?.let { target -> wallets.firstOrNull { it.id == target.id } ?: target }
+        var cachedInspectingWallet by remember { mutableStateOf<WalletEntity?>(null) }
         if (currentInspecting != null) {
-            ICostWalletDetailFullScreen(
-                wallet = currentInspecting,
-                allWallets = wallets,
-                walletTransactions = transactions.filter {
-                    it.sourceWalletId == currentInspecting.id || it.targetWalletId == currentInspecting.id
-                },
-                onBack = { inspectingWallet = null },
-                onEditWallet = {
-                    editingWallet = currentInspecting
-                },
-                onRepayOrTransfer = {
-                    val wid = currentInspecting.id
-                    if (currentInspecting.type.isLiability) {
-                        onQuickActionWithWallet(TransactionType.REPAYMENT, assetWallets.firstOrNull()?.id, wid)
-                    } else {
-                        onQuickActionWithWallet(
-                            TransactionType.TRANSFER,
-                            wid,
-                            assetWallets.firstOrNull { it.id != wid }?.id
-                        )
-                    }
-                },
-                onAddRecordWithWallet = {
-                    onQuickActionWithWallet(TransactionType.EXPENSE, currentInspecting.id, null)
-                },
-                onDeleteWallet = {
-                    onDeleteWallet(currentInspecting)
-                    inspectingWallet = null
-                },
-                onClickTransaction = onSelectTransaction
-            )
+            cachedInspectingWallet = currentInspecting
+        }
+        AnimatedVisibility(
+            visible = currentInspecting != null,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(290, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            val activeWallet = currentInspecting ?: cachedInspectingWallet
+            if (activeWallet != null) {
+                ICostWalletDetailFullScreen(
+                    wallet = activeWallet,
+                    allWallets = wallets,
+                    walletTransactions = transactions.filter {
+                        it.sourceWalletId == activeWallet.id || it.targetWalletId == activeWallet.id
+                    },
+                    onBack = { inspectingWallet = null },
+                    onEditWallet = {
+                        editingWallet = activeWallet
+                    },
+                    onRepayOrTransfer = {
+                        val wid = activeWallet.id
+                        if (activeWallet.type.isLiability) {
+                            onQuickActionWithWallet(TransactionType.REPAYMENT, assetWallets.firstOrNull()?.id, wid)
+                        } else {
+                            onQuickActionWithWallet(
+                                TransactionType.TRANSFER,
+                                wid,
+                                assetWallets.firstOrNull { it.id != wid }?.id
+                            )
+                        }
+                    },
+                    onAddRecordWithWallet = {
+                        onQuickActionWithWallet(TransactionType.EXPENSE, activeWallet.id, null)
+                    },
+                    onDeleteWallet = {
+                        onDeleteWallet(activeWallet)
+                        inspectingWallet = null
+                    },
+                    onClickTransaction = onSelectTransaction
+                )
+            }
         }
 
-        // 全屏二级页面：选择类型（对齐 11_add_asset_real.png）
-        if (showSelectTypeFullScreen) {
+        // 全屏二级页面：选择类型（对齐 11_add_asset_real.png，带平滑水平推入/退出过渡）
+        AnimatedVisibility(
+            visible = showSelectTypeFullScreen,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(290, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
             ICostSelectAccountTypeFullScreen(
                 onBack = { showSelectTypeFullScreen = false },
                 onSelectPreset = { option ->
@@ -570,10 +618,15 @@ private fun CollapsibleGroupHeaderInsideCard(
     expanded: Boolean,
     onToggle: () -> Unit
 ) {
+    val chevronRot by animateFloatAsState(
+        targetValue = if (expanded) 0f else -90f,
+        animationSpec = spring(dampingRatio = 0.72f, stiffness = Spring.StiffnessMedium),
+        label = "AssetGroupChevronRot"
+    )
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onToggle() }
+            .iCostPressScale(pressedScale = 0.98f, onClick = onToggle)
             .padding(horizontal = 16.dp, vertical = 13.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -603,10 +656,12 @@ private fun CollapsibleGroupHeaderInsideCard(
             )
             Spacer(modifier = Modifier.width(2.dp))
             Icon(
-                imageVector = if (expanded) Icons.Default.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                imageVector = Icons.Default.KeyboardArrowDown,
                 contentDescription = null,
                 tint = ICostTextSecondary,
-                modifier = Modifier.size(16.dp)
+                modifier = Modifier
+                    .size(16.dp)
+                    .graphicsLayer { rotationZ = chevronRot }
             )
         }
     }
@@ -631,7 +686,7 @@ private fun ICostAccountItemRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable { onClick() }
+            .iCostPressScale(pressedScale = 0.98f, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
