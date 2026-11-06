@@ -1,8 +1,10 @@
 package com.moji.ai.ui.components
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -28,6 +30,8 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -39,14 +43,16 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -55,13 +61,17 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -70,6 +80,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -97,11 +108,62 @@ import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
 import com.moji.ai.ui.theme.iCostHorizontalSwipeTrigger
 import com.moji.ai.ui.theme.iCostPressScale
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import kotlin.math.roundToLong
 
+/** 金额最多允许的整数位数（9 位 = 亿级），防止误触产生天文数字 */
+internal const val MAX_AMOUNT_INTEGER_DIGITS = 9
+
+/**
+ * 金额输入过滤：仅保留数字与一个小数点，最多两位小数、最多 [MAX_AMOUNT_INTEGER_DIGITS] 位整数。
+ * 供计算器内的优惠/手续费弹窗、首页预算弹窗、详情页退款/拆分弹窗共用。
+ */
+internal fun sanitizeMoneyInput(raw: String): String {
+    val sb = StringBuilder()
+    var seenDot = false
+    var decimals = 0
+    var integers = 0
+    for (ch in raw) {
+        when {
+            ch in '0'..'9' && !seenDot -> {
+                if (integers < MAX_AMOUNT_INTEGER_DIGITS) {
+                    sb.append(ch)
+                    integers++
+                }
+            }
+            ch in '0'..'9' && seenDot -> {
+                if (decimals < 2) {
+                    sb.append(ch)
+                    decimals++
+                }
+            }
+            (ch == '.' || ch == '。') && !seenDot -> {
+                if (sb.isEmpty()) sb.append('0')
+                sb.append('.')
+                seenDot = true
+            }
+        }
+    }
+    return sb.toString()
+}
+
+/** 元字符串转分；空串或非法返回 null */
+internal fun parseYuanToCents(text: String): Long? {
+    val v = text.trim().toDoubleOrNull() ?: return null
+    if (v.isNaN() || v.isInfinite() || v < 0.0) return null
+    return (v * 100.0).roundToLong()
+}
+
+/**
+ * @param onSelectLedger 已不再使用：面板内选择账本只影响本次记账，不会切换首页账本。保留参数以兼容旧调用。
+ * @param onOpenAiSandbox 已不再使用：记账面板不再提供 AI 测试入口。保留参数以兼容旧调用。
+ */
+@Suppress("UNUSED_PARAMETER")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ICostCalculatorSheet(
@@ -118,6 +180,7 @@ fun ICostCalculatorSheet(
     onSaveTransaction: (TransactionEntity, keepOpen: Boolean) -> Unit,
     onOpenAiSandbox: () -> Unit = {}
 ) {
+    val isEditing = editingTransaction != null
     // 1:1 iCost 顶部三态：支出 | 收入 | 转账（若外部传入 REPAYMENT 则归在转账 tab 并在保存时自动判断目标账户）
     var txType by remember {
         val raw = editingTransaction?.type ?: initialType
@@ -173,6 +236,17 @@ fun ICostCalculatorSheet(
             editingTransaction?.targetWalletId ?: initialTargetWalletId
         )
     }
+    // 记账时间：每次打开面板时重置；用户可点时间胶囊补记过去的账
+    var entryTimestamp by remember {
+        mutableLongStateOf(editingTransaction?.timestamp ?: System.currentTimeMillis())
+    }
+    var timeManuallySet by remember { mutableStateOf(false) }
+    // 本次记入的账本：仅作用于当前面板，不切换首页账本
+    var targetLedger by remember { mutableStateOf(editingTransaction?.ledgerName ?: currentLedger) }
+    // 防重复提交（「完成」后面板收起动画期间的连点）
+    var isSubmitting by remember { mutableStateOf(false) }
+    var inlineError by remember { mutableStateOf<String?>(null) }
+    var showDiscardConfirm by remember { mutableStateOf(false) }
 
     // 每次唤起面板时同步重置表单状态，配合 keepWarm 预热实现 0ms 首帧唤醒
     LaunchedEffect(visible, editingTransaction, initialType, initialSourceWalletId, initialTargetWalletId) {
@@ -202,6 +276,12 @@ fun ICostCalculatorSheet(
             tagText = editingTransaction?.tags ?: ""
             sourceWalletId = editingTransaction?.sourceWalletId ?: initialSourceWalletId
             targetWalletId = editingTransaction?.targetWalletId ?: initialTargetWalletId
+            entryTimestamp = editingTransaction?.timestamp ?: System.currentTimeMillis()
+            timeManuallySet = false
+            targetLedger = editingTransaction?.ledgerName ?: currentLedger
+            isSubmitting = false
+            inlineError = null
+            showDiscardConfirm = false
         }
     }
 
@@ -211,18 +291,40 @@ fun ICostCalculatorSheet(
     var showTagDialog by remember { mutableStateOf(false) }
     var showLedgerPicker by remember { mutableStateOf(false) }
     var showCurrencyPicker by remember { mutableStateOf(false) }
+    var showDatePicker by remember { mutableStateOf(false) }
+    var showTimePicker by remember { mutableStateOf(false) }
 
-    val timeNowStr = remember(editingTransaction) {
-        SimpleDateFormat("HH:mm", Locale.getDefault()).format(
-            Date(editingTransaction?.timestamp ?: System.currentTimeMillis())
-        )
+    val scope = rememberCoroutineScope()
+    val amountShake = remember { Animatable(0f) }
+    fun flashError(message: String) {
+        inlineError = message
+        scope.launch {
+            amountShake.snapTo(0f)
+            for (dx in listOf(14f, -12f, 9f, -6f, 3f, 0f)) {
+                amountShake.animateTo(dx, tween(45))
+            }
+        }
+    }
+
+    val timeLabel = remember(entryTimestamp) {
+        val now = Calendar.getInstance()
+        val c = Calendar.getInstance().apply { timeInMillis = entryTimestamp }
+        val sameDay = now.get(Calendar.YEAR) == c.get(Calendar.YEAR) &&
+            now.get(Calendar.DAY_OF_YEAR) == c.get(Calendar.DAY_OF_YEAR)
+        val pattern = when {
+            sameDay -> "HH:mm"
+            now.get(Calendar.YEAR) == c.get(Calendar.YEAR) -> "M月d日 HH:mm"
+            else -> "yyyy/M/d HH:mm"
+        }
+        SimpleDateFormat(pattern, Locale.CHINA).format(Date(entryTimestamp))
     }
 
     val operators = setOf('+', '-', '×', '÷')
     val hasPendingOperator = expr.drop(1).any { it in operators }
     val sym = CurrencyCode.fromCode(currency).symbol
 
-    fun evaluateExpr(raw: String): Double {
+    /** 计算表达式；除以 0 时返回 null */
+    fun evaluateExpr(raw: String): Double? {
         if (raw.isBlank()) return 0.0
         val tokens = mutableListOf<String>()
         val numBuf = StringBuilder()
@@ -248,7 +350,8 @@ fun ICostCalculatorSheet(
             if ((tok == "×" || tok == "÷") && pass1.isNotEmpty() && i + 1 < tokens.size) {
                 val left = pass1.removeAt(pass1.lastIndex).toDoubleOrNull() ?: 0.0
                 val right = tokens[i + 1].toDoubleOrNull() ?: 1.0
-                val res = if (tok == "×") left * right else if (right != 0.0) left / right else left
+                if (tok == "÷" && right == 0.0) return null
+                val res = if (tok == "×") left * right else left / right
                 pass1.add(res.toString())
                 i += 2
             } else {
@@ -266,7 +369,19 @@ fun ICostCalculatorSheet(
             total = if (op == "+") total + rhs else total - rhs
             j += 2
         }
-        return total.coerceAtLeast(0.0)
+        return total
+    }
+
+    val maxAmount = Math.pow(10.0, MAX_AMOUNT_INTEGER_DIGITS.toDouble())
+
+    /** 校验表达式结果；不合法时提示并返回 null */
+    fun evaluateOrFlash(): Double? {
+        val result = evaluateExpr(expr)
+        return when {
+            result == null -> { flashError("不能除以 0"); null }
+            result >= maxAmount -> { flashError("金额过大，最多 $MAX_AMOUNT_INTEGER_DIGITS 位整数"); null }
+            else -> result
+        }
     }
 
     fun appendOperator(primary: Char, alternate: Char) {
@@ -280,19 +395,58 @@ fun ICostCalculatorSheet(
         }
     }
 
+    fun appendDigit(key: String) {
+        val lastPart = expr.split('+', '-', '×', '÷').lastOrNull() ?: ""
+        if (lastPart.contains('.')) {
+            val decimals = lastPart.substringAfter('.')
+            if (decimals.length < 2) expr += key
+            return
+        }
+        when {
+            lastPart == "0" -> expr = expr.dropLast(1) + key // 去掉无意义的前导 0
+            lastPart.length >= MAX_AMOUNT_INTEGER_DIGITS -> flashError("最多 $MAX_AMOUNT_INTEGER_DIGITS 位整数")
+            else -> expr += key
+        }
+    }
+
     fun buildAndSubmit(keepOpen: Boolean, requestSheetDismiss: () -> Unit) {
-        val evaluated = evaluateExpr(expr)
-        if (evaluated <= 0.0) return
+        if (isSubmitting) return
+        val evaluated = evaluateOrFlash() ?: return
+        if (evaluated <= 0.0) {
+            flashError(if (expr.isEmpty()) "请先输入金额" else "金额需大于 0")
+            return
+        }
         val cents = (evaluated * 100.0).roundToLong()
+        if (cents <= 0L) {
+            flashError("金额需大于 0")
+            return
+        }
         val rate = CurrencyCode.fromCode(currency).defaultRateToCny
         val cnyCents = (cents * rate).roundToLong()
-        val discountCents = ((discountYuanStr.toDoubleOrNull() ?: 0.0) * 100.0).roundToLong()
-        val feeCents = ((feeYuanStr.toDoubleOrNull() ?: 0.0) * 100.0).roundToLong()
+        val discountCents = if (txType == TransactionType.EXPENSE) parseYuanToCents(discountYuanStr) ?: 0L else 0L
+        val feeCents = if (txType == TransactionType.TRANSFER) parseYuanToCents(feeYuanStr) ?: 0L else 0L
 
-        val defaultWallet = wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull()
-        val resolvedSourceId = sourceWalletId ?: defaultWallet?.id
+        val resolvedSourceId: Long?
+        val resolvedTargetId: Long?
+        if (txType == TransactionType.TRANSFER) {
+            // 转账必须由用户明确选择两个不同的账户，不再自动代选
+            if (sourceWalletId == null || targetWalletId == null) {
+                flashError(if (sourceWalletId == null) "请选择转出账户" else "请选择转入账户")
+                return
+            }
+            if (sourceWalletId == targetWalletId) {
+                flashError("转出和转入不能是同一个账户")
+                return
+            }
+            resolvedSourceId = sourceWalletId
+            resolvedTargetId = targetWalletId
+        } else {
+            val defaultWallet = wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull()
+            resolvedSourceId = sourceWalletId ?: defaultWallet?.id
+            resolvedTargetId = null
+        }
         val resolvedSourceWallet = wallets.firstOrNull { it.id == resolvedSourceId }
-        val resolvedTargetWallet = wallets.firstOrNull { it.id == targetWalletId }
+        val resolvedTargetWallet = wallets.firstOrNull { it.id == resolvedTargetId }
 
         // 当用户处在「转账」模式且由资产账户转入信用账户时，自动记录为 REPAYMENT
         val actualType = if (
@@ -314,9 +468,34 @@ fun ICostCalculatorSheet(
             else -> if (selectedSubCategory.isNotBlank()) "$selectedMainCategory-$selectedSubCategory" else selectedMainCategory
         }
 
-        val entity = TransactionEntity(
-            id = editingTransaction?.id ?: 0L,
-            ledgerName = editingTransaction?.ledgerName ?: currentLedger,
+        // 备注回写：编辑时只回写当初展示在输入框里的那个字段，避免覆盖另一份独立备注
+        val typedText = noteText.trim()
+        val (finalMerchant, finalNote) = if (editingTransaction == null) {
+            typedText to typedText
+        } else if (editingTransaction.merchant.isNotBlank()) {
+            val noteWasMirror = editingTransaction.note.isBlank() ||
+                editingTransaction.note == editingTransaction.merchant
+            typedText to (if (noteWasMirror) typedText else editingTransaction.note)
+        } else {
+            editingTransaction.merchant to typedText
+        }
+
+        val finalSourceId = if (actualType == TransactionType.INCOME) null else resolvedSourceId
+        val finalTargetId = when (actualType) {
+            TransactionType.INCOME -> resolvedSourceId
+            TransactionType.TRANSFER, TransactionType.REPAYMENT -> resolvedTargetId
+            else -> null
+        }
+        val finalReimbursable = if (actualType == TransactionType.EXPENSE) reimbursable else false
+        val finalTimestamp = if (editingTransaction == null && !timeManuallySet) {
+            System.currentTimeMillis()
+        } else {
+            entryTimestamp
+        }
+
+        // 编辑时基于原账单 copy，保留退款金额、关联账单、原始采集文本、AI 置信度等字段
+        val entity = editingTransaction?.copy(
+            ledgerName = targetLedger,
             type = actualType,
             amountCents = cents,
             currency = currency,
@@ -325,28 +504,42 @@ fun ICostCalculatorSheet(
             discountCents = discountCents,
             feeCents = feeCents,
             category = finalCategory,
-            merchant = noteText.trim(),
-            note = noteText.trim(),
-            sourceWalletId = if (actualType == TransactionType.INCOME) null else resolvedSourceId,
-            targetWalletId = when (actualType) {
-                TransactionType.INCOME -> resolvedSourceId
-                TransactionType.TRANSFER, TransactionType.REPAYMENT ->
-                    targetWalletId ?: wallets.lastOrNull { it.id != resolvedSourceId }?.id
-                else -> null
-            },
-            reimbursable = if (actualType == TransactionType.EXPENSE) reimbursable else false,
-            reimbursed = editingTransaction?.reimbursed ?: false,
+            merchant = finalMerchant,
+            note = finalNote,
+            sourceWalletId = finalSourceId,
+            targetWalletId = finalTargetId,
+            reimbursable = finalReimbursable,
             tags = tagText.trim(),
-            timestamp = editingTransaction?.timestamp ?: System.currentTimeMillis(),
-            captureSource = editingTransaction?.captureSource ?: "MANUAL"
+            timestamp = finalTimestamp
+        ) ?: TransactionEntity(
+            ledgerName = targetLedger,
+            type = actualType,
+            amountCents = cents,
+            currency = currency,
+            exchangeRateToCny = rate,
+            amountCnyCents = cnyCents,
+            discountCents = discountCents,
+            feeCents = feeCents,
+            category = finalCategory,
+            merchant = finalMerchant,
+            note = finalNote,
+            sourceWalletId = finalSourceId,
+            targetWalletId = finalTargetId,
+            reimbursable = finalReimbursable,
+            tags = tagText.trim(),
+            timestamp = finalTimestamp,
+            captureSource = "MANUAL"
         )
-        if (keepOpen) {
+        inlineError = null
+        if (keepOpen && editingTransaction == null) {
             onSaveTransaction(entity, true)
             expr = ""
             noteText = ""
             discountYuanStr = ""
             feeYuanStr = ""
         } else {
+            // 先保存（keepOpen = true 让外层不立即隐藏），再走抽屉自身的收起动画
+            isSubmitting = true
             onSaveTransaction(entity, true)
             requestSheetDismiss()
         }
@@ -360,6 +553,34 @@ fun ICostCalculatorSheet(
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
         showDragHandle = false
     ) { requestDismiss ->
+        // 新记一笔且已输入金额时，关闭前确认，避免误触丢失
+        val hasUnsavedInput = !isEditing && !isSubmitting && expr.isNotEmpty()
+        val requestCloseWithConfirm: () -> Unit = {
+            if (hasUnsavedInput) showDiscardConfirm = true else requestDismiss()
+        }
+        // 晚于抽屉自身注册，优先拦截系统返回键
+        BackHandler(enabled = visible && hasUnsavedInput) { showDiscardConfirm = true }
+
+        if (showDiscardConfirm) {
+            AlertDialog(
+                onDismissRequest = { showDiscardConfirm = false },
+                containerColor = ICostCardWhite,
+                title = { Text("放弃本次记账？", fontWeight = FontWeight.ExtraBold) },
+                text = { Text("已输入的金额和备注不会保存。", fontSize = 14.sp, color = ICostTextSecondary) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        showDiscardConfirm = false
+                        requestDismiss()
+                    }) {
+                        Text("放弃", color = ICostCoralRed, fontWeight = FontWeight.Bold)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDiscardConfirm = false }) { Text("继续记账") }
+                }
+            )
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -374,7 +595,7 @@ fun ICostCalculatorSheet(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                ICostCircleIconButton(onClick = requestDismiss, size = 38.dp) {
+                ICostCircleIconButton(onClick = requestCloseWithConfirm, size = 40.dp) {
                     Icon(
                         Icons.Default.Close,
                         contentDescription = "关闭",
@@ -405,7 +626,9 @@ fun ICostCalculatorSheet(
                                     .clip(RoundedCornerShape(19.dp))
                                     .background(modeBgColor)
                                     .iCostPressScale(pressedScale = 0.92f) {
+                                        if (txType == mode) return@iCostPressScale
                                         txType = mode
+                                        inlineError = null
                                         if (mode == TransactionType.INCOME) {
                                             selectedMainCategory = CategoryCatalog.incomeCategories.first().name
                                             selectedSubCategory = ""
@@ -429,13 +652,16 @@ fun ICostCalculatorSheet(
                 }
 
                 Text(
-                    text = currentLedger,
+                    text = targetLedger,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
                     color = ICostBlueAccent,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier
+                        .widthIn(max = 96.dp)
                         .iCostPressScale(pressedScale = 0.92f) { showLedgerPicker = true }
-                        .padding(horizontal = 4.dp, vertical = 4.dp)
+                        .padding(horizontal = 4.dp, vertical = 10.dp)
                 )
             }
 
@@ -450,8 +676,12 @@ fun ICostCalculatorSheet(
             val modeOrder = listOf(TransactionType.EXPENSE, TransactionType.INCOME, TransactionType.TRANSFER)
             fun switchCalcModeByDelta(delta: Int) {
                 val curIdx = modeOrder.indexOf(txType).coerceAtLeast(0)
-                val nextMode = modeOrder[(curIdx + delta + modeOrder.size) % modeOrder.size]
+                val nextIdx = curIdx + delta
+                // 到两端即停，不再从「转账」绕回「支出」
+                if (nextIdx !in modeOrder.indices) return
+                val nextMode = modeOrder[nextIdx]
                 txType = nextMode
+                inlineError = null
                 if (nextMode == TransactionType.INCOME) {
                     selectedMainCategory = CategoryCatalog.incomeCategories.first().name
                     selectedSubCategory = ""
@@ -707,6 +937,7 @@ fun ICostCalculatorSheet(
                                     .background(ICostCardWhite)
                                     .iCostPressScale(pressedScale = 0.85f) {
                                         swapRotCount += 1
+                                        inlineError = null
                                         val tmp = sourceWalletId
                                         sourceWalletId = targetWalletId
                                         targetWalletId = tmp
@@ -768,8 +999,11 @@ fun ICostCalculatorSheet(
                 }
             }
 
-            // 3. 快捷属性胶囊栏（1:1 对齐 iCost：选择账户 | 报销 | 优惠 | 图片 | 标签 + 右侧齿轮 opt_setup.webp）
+            // 3. 快捷属性胶囊栏（选择账户 | 报销 | 优惠 | 标签 + 右侧币种胶囊）
+            // 未手动选择时展示保存时实际会使用的默认账户，避免「显示未选、实际记入某账户」
             val currentWallet = wallets.firstOrNull { it.id == sourceWalletId }
+                ?: wallets.firstOrNull { !it.type.isLiability }
+                ?: wallets.firstOrNull()
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -785,7 +1019,7 @@ fun ICostCalculatorSheet(
                             ICostOptionPill(
                                 assetFile = "opt_account.webp",
                                 label = currentWallet?.name ?: "选择账户",
-                                active = currentWallet != null,
+                                active = sourceWalletId != null,
                                 onClick = { showWalletPickerForTarget = false }
                             )
                         }
@@ -824,14 +1058,6 @@ fun ICostCalculatorSheet(
                     }
                     item {
                         ICostOptionPill(
-                            assetFile = "opt_photo.webp",
-                            label = "图片",
-                            active = false,
-                            onClick = onOpenAiSandbox
-                        )
-                    }
-                    item {
-                        ICostOptionPill(
                             assetFile = "opt_tag.webp",
                             label = if (tagText.isNotBlank()) "#$tagText" else "标签",
                             active = tagText.isNotBlank(),
@@ -843,17 +1069,18 @@ fun ICostCalculatorSheet(
                 Spacer(modifier = Modifier.width(8.dp))
 
                 Surface(
-                    onClick = { showCurrencyPicker = true },
-                    shape = CircleShape,
-                    color = ICostCardWhite,
-                    modifier = Modifier.size(32.dp)
+                    shape = RoundedCornerShape(16.dp),
+                    color = if (currency != "CNY") Color(0xFFEAF2FF) else ICostCardWhite,
+                    modifier = Modifier.iCostPressScale(pressedScale = 0.92f) { showCurrencyPicker = true }
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        ICostAssetImage(
-                            assetFile = "opt_setup.webp",
-                            modifier = Modifier.size(16.dp)
-                        )
-                    }
+                    Text(
+                        text = "$sym $currency",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextPrimary,
+                        maxLines = 1,
+                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
+                    )
                 }
             }
 
@@ -879,8 +1106,22 @@ fun ICostCalculatorSheet(
                         fontWeight = FontWeight.Bold,
                         color = amountColor,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.graphicsLayer { translationX = amountShake.value * density }
                     )
+                    AnimatedVisibility(
+                        visible = inlineError != null,
+                        enter = expandVertically(tween(160)) + fadeIn(tween(160)),
+                        exit = shrinkVertically(tween(140)) + fadeOut(tween(120))
+                    ) {
+                        Text(
+                            text = inlineError.orEmpty(),
+                            fontSize = 12.sp,
+                            color = ICostCoralRed,
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
 
                     Spacer(modifier = Modifier.height(8.dp))
                     HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFF0F0F0))
@@ -892,21 +1133,22 @@ fun ICostCalculatorSheet(
                     ) {
                         Surface(
                             shape = RoundedCornerShape(14.dp),
-                            color = Color(0xFFF3F3F5)
+                            color = if (timeManuallySet) Color(0xFFEAF2FF) else Color(0xFFF3F3F5),
+                            modifier = Modifier.iCostPressScale(pressedScale = 0.92f) { showDatePicker = true }
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
                                     Icons.Default.AccessTime,
-                                    contentDescription = null,
+                                    contentDescription = "修改记账时间",
                                     tint = ICostTextPrimary,
                                     modifier = Modifier.size(14.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
                                 Text(
-                                    text = timeNowStr,
+                                    text = timeLabel,
                                     fontSize = 12.sp,
                                     color = ICostTextPrimary,
                                     fontWeight = FontWeight.Medium
@@ -928,23 +1170,17 @@ fun ICostCalculatorSheet(
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
-
-                        Icon(
-                            imageVector = Icons.Default.KeyboardArrowUp,
-                            contentDescription = null,
-                            tint = Color(0xFFB0B0B0),
-                            modifier = Modifier.size(20.dp)
-                        )
                     }
                 }
             }
 
             // 5. 4x4 圆角白色数字计算器键盘（1:1 复刻 iCost `+ ×` 与 `- ÷` 复合键）
+            // 编辑已有账单时隐藏「保存再记」，避免反复覆盖同一笔
             val keyRows = listOf(
                 listOf("1", "2", "3", "BACK"),
                 listOf("4", "5", "6", "+×"),
                 listOf("7", "8", "9", "-÷"),
-                listOf(".", "0", "AGAIN", "DONE")
+                if (isEditing) listOf(".", "0", "DONE") else listOf(".", "0", "AGAIN", "DONE")
             )
 
             Column(
@@ -974,9 +1210,11 @@ fun ICostCalculatorSheet(
                                 shape = RoundedCornerShape(16.dp),
                                 color = bgColor,
                                 modifier = Modifier
-                                    .weight(1f)
+                                    .weight(if (isEditing && isDoneKey) 2f else 1f)
                                     .height(48.dp)
                                     .iCostPressScale(pressedScale = 0.91f) {
+                                        if (isSubmitting) return@iCostPressScale
+                                        if (key != "AGAIN" && key != "DONE") inlineError = null
                                         when (key) {
                                             "BACK" -> if (expr.isNotEmpty()) expr = expr.dropLast(1)
                                             "+×" -> appendOperator('+', '×')
@@ -990,19 +1228,19 @@ fun ICostCalculatorSheet(
                                             "AGAIN" -> buildAndSubmit(keepOpen = true, requestSheetDismiss = requestDismiss)
                                             "DONE" -> {
                                                 if (hasPendingOperator) {
-                                                    val res = evaluateExpr(expr)
-                                                    expr = String.format(Locale.US, "%.2f", res).trimEnd('0').trimEnd('.')
+                                                    val res = evaluateOrFlash()
+                                                    if (res != null) {
+                                                        inlineError = null
+                                                        expr = if (res <= 0.0) "" else {
+                                                            String.format(Locale.US, "%.2f", res).trimEnd('0').trimEnd('.')
+                                                        }
+                                                        if (res < 0.0) flashError("结果小于 0，已清空")
+                                                    }
                                                 } else {
                                                     buildAndSubmit(keepOpen = false, requestSheetDismiss = requestDismiss)
                                                 }
                                             }
-                                            else -> {
-                                                val lastPart = expr.split('+', '-', '×', '÷').lastOrNull() ?: ""
-                                                val decimals = lastPart.substringAfter('.', missingDelimiterValue = "")
-                                                if (!lastPart.contains('.') || decimals.length < 2) {
-                                                    expr += key
-                                                }
-                                            }
+                                            else -> appendDigit(key)
                                         }
                                     }
                             ) {
@@ -1058,7 +1296,16 @@ fun ICostCalculatorSheet(
         AlertDialog(
             onDismissRequest = { showWalletPickerForTarget = null },
             containerColor = ICostCardWhite,
-            title = { Text(if (pickingTarget) "选择转入账户" else "选择账户", fontWeight = FontWeight.Bold) },
+            title = {
+                Text(
+                    when {
+                        pickingTarget -> "选择转入账户"
+                        txType == TransactionType.TRANSFER -> "选择转出账户"
+                        else -> "选择账户"
+                    },
+                    fontWeight = FontWeight.Bold
+                )
+            },
             text = {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     items(wallets) { w ->
@@ -1068,6 +1315,7 @@ fun ICostCalculatorSheet(
                                 .clip(RoundedCornerShape(12.dp))
                                 .clickable {
                                     if (pickingTarget) targetWalletId = w.id else sourceWalletId = w.id
+                                    inlineError = null
                                     showWalletPickerForTarget = null
                                 }
                                 .padding(vertical = 10.dp, horizontal = 8.dp),
@@ -1115,21 +1363,26 @@ fun ICostCalculatorSheet(
             containerColor = ICostCardWhite,
             title = { Text("选择记入账本", fontWeight = FontWeight.Bold) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .heightIn(max = 360.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
                     ledgers.forEach { name ->
                         Surface(
                             onClick = {
-                                onSelectLedger(name)
+                                targetLedger = name
                                 showLedgerPicker = false
                             },
                             shape = RoundedCornerShape(12.dp),
-                            color = if (name == currentLedger) Color(0xFFEAF2FF) else ICostCellGray,
+                            color = if (name == targetLedger) Color(0xFFEAF2FF) else ICostCellGray,
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
-                                text = if (name == currentLedger) "✓  $name" else name,
-                                fontWeight = if (name == currentLedger) FontWeight.Bold else FontWeight.Medium,
-                                color = if (name == currentLedger) ICostBlueAccent else ICostTextPrimary,
+                                text = if (name == targetLedger) "✓  $name" else name,
+                                fontWeight = if (name == targetLedger) FontWeight.Bold else FontWeight.Medium,
+                                color = if (name == targetLedger) ICostBlueAccent else ICostTextPrimary,
                                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
                             )
                         }
@@ -1176,39 +1429,97 @@ fun ICostCalculatorSheet(
     }
 
     if (showDiscountDialog) {
-        AlertDialog(
-            onDismissRequest = { showDiscountDialog = false },
-            containerColor = ICostCardWhite,
-            title = { Text("设置满减/立减优惠", fontWeight = FontWeight.Bold) },
-            text = {
-                OutlinedTextField(
-                    value = discountYuanStr,
-                    onValueChange = { discountYuanStr = it },
-                    label = { Text("优惠金额（元），计入统计页「优惠」") },
-                    singleLine = true
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { showDiscountDialog = false }) { Text("确定") }
+        MoneyInputDialog(
+            title = "设置优惠金额",
+            label = "优惠金额（元）",
+            supporting = "留空表示没有优惠",
+            initial = discountYuanStr,
+            onDismiss = { showDiscountDialog = false },
+            onConfirm = { value ->
+                discountYuanStr = value
+                showDiscountDialog = false
             }
         )
     }
 
     if (showFeeDialog) {
+        MoneyInputDialog(
+            title = "设置转账手续费",
+            label = "手续费（元）",
+            supporting = "留空表示没有手续费",
+            initial = feeYuanStr,
+            onDismiss = { showFeeDialog = false },
+            onConfirm = { value ->
+                feeYuanStr = value
+                showFeeDialog = false
+            }
+        )
+    }
+
+    if (showDatePicker) {
+        val initialUtcMillis = remember(entryTimestamp) {
+            // DatePicker 以 UTC 零点表示日期：把本地日期换算到对应的 UTC 零点
+            val local = Calendar.getInstance().apply { timeInMillis = entryTimestamp }
+            Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply {
+                clear()
+                set(local.get(Calendar.YEAR), local.get(Calendar.MONTH), local.get(Calendar.DAY_OF_MONTH))
+            }.timeInMillis
+        }
+        val datePickerState = rememberDatePickerState(initialSelectedDateMillis = initialUtcMillis)
+        DatePickerDialog(
+            onDismissRequest = { showDatePicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    val picked = datePickerState.selectedDateMillis
+                    if (picked != null) {
+                        val utc = Calendar.getInstance(TimeZone.getTimeZone("UTC")).apply { timeInMillis = picked }
+                        val local = Calendar.getInstance().apply { timeInMillis = entryTimestamp }
+                        local.set(utc.get(Calendar.YEAR), utc.get(Calendar.MONTH), utc.get(Calendar.DAY_OF_MONTH))
+                        entryTimestamp = local.timeInMillis
+                        timeManuallySet = true
+                    }
+                    showDatePicker = false
+                    showTimePicker = true
+                }) { Text("下一步", fontWeight = FontWeight.Bold, color = ICostBlueAccent) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDatePicker = false }) { Text("取消") }
+            }
+        ) {
+            DatePicker(state = datePickerState, showModeToggle = false)
+        }
+    }
+
+    if (showTimePicker) {
+        val local = remember { Calendar.getInstance().apply { timeInMillis = entryTimestamp } }
+        val timePickerState = rememberTimePickerState(
+            initialHour = local.get(Calendar.HOUR_OF_DAY),
+            initialMinute = local.get(Calendar.MINUTE),
+            is24Hour = true
+        )
         AlertDialog(
-            onDismissRequest = { showFeeDialog = false },
+            onDismissRequest = { showTimePicker = false },
             containerColor = ICostCardWhite,
-            title = { Text("设置转账手续费", fontWeight = FontWeight.Bold) },
+            title = { Text("选择时间", fontWeight = FontWeight.Bold) },
             text = {
-                OutlinedTextField(
-                    value = feeYuanStr,
-                    onValueChange = { feeYuanStr = it },
-                    label = { Text("手续费金额（元），计入统计页「手续费」") },
-                    singleLine = true
-                )
+                Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    TimePicker(state = timePickerState)
+                }
             },
             confirmButton = {
-                TextButton(onClick = { showFeeDialog = false }) { Text("确定") }
+                TextButton(onClick = {
+                    val c = Calendar.getInstance().apply { timeInMillis = entryTimestamp }
+                    c.set(Calendar.HOUR_OF_DAY, timePickerState.hour)
+                    c.set(Calendar.MINUTE, timePickerState.minute)
+                    c.set(Calendar.SECOND, 0)
+                    c.set(Calendar.MILLISECOND, 0)
+                    entryTimestamp = c.timeInMillis
+                    timeManuallySet = true
+                    showTimePicker = false
+                }) { Text("确定", fontWeight = FontWeight.Bold, color = ICostBlueAccent) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showTimePicker = false }) { Text("跳过") }
             }
         )
     }
@@ -1233,6 +1544,50 @@ fun ICostCalculatorSheet(
     }
 }
 
+/**
+ * 通用金额输入弹窗：数字键盘 + 两位小数过滤；留空表示清除。
+ */
+@Composable
+private fun MoneyInputDialog(
+    title: String,
+    label: String,
+    supporting: String,
+    initial: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var text by remember { mutableStateOf(initial) }
+    val cents = parseYuanToCents(text)
+    val isError = text.isNotBlank() && cents == null
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = ICostCardWhite,
+        title = { Text(title, fontWeight = FontWeight.Bold) },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = sanitizeMoneyInput(it) },
+                label = { Text(label) },
+                supportingText = { Text(if (isError) "请输入正确的金额" else supporting) },
+                isError = isError,
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+            )
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !isError,
+                onClick = {
+                    onConfirm(if (cents == null || cents == 0L) "" else text.trimEnd('.'))
+                }
+            ) { Text("确定", fontWeight = FontWeight.Bold) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
 @Composable
 private fun ICostOptionPill(
     assetFile: String,
@@ -1253,7 +1608,7 @@ private fun ICostOptionPill(
         modifier = Modifier.iCostPressScale(pressedScale = 0.92f, onClick = onClick)
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+            modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             ICostAssetImage(
