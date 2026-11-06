@@ -188,6 +188,11 @@ fun ICostSmoothBottomSheet(
     containerColor: Color = ICostBgGray,
     shape: Shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
     showDragHandle: Boolean = true,
+    /**
+     * 用户通过下拉或点击遮罩关闭前的拦截：返回 false 时抽屉弹回原位不关闭
+     * （例如记账面板已输入金额时先弹出「放弃本次记账？」确认）
+     */
+    confirmDismiss: (() -> Boolean)? = null,
     content: @Composable (requestDismiss: () -> Unit) -> Unit
 ) {
     val density = LocalDensity.current
@@ -273,8 +278,11 @@ fun ICostSmoothBottomSheet(
         return
     }
 
-    BackHandler(enabled = visible && !isDismissing) {
-        triggerAnimatedDismiss(0f)
+    // 仅在可见时注册（而不是常驻注册再切换 enabled），保证每次打开都排在最新、优先于其下方页面
+    if (visible) {
+        BackHandler(enabled = !isDismissing) {
+            triggerAnimatedDismiss(0f)
+        }
     }
 
     val verticalDragState = rememberDraggableState { delta ->
@@ -307,7 +315,9 @@ fun ICostSmoothBottomSheet(
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
                         indication = null,
-                        onClick = { triggerAnimatedDismiss(0f) }
+                        onClick = {
+                            if (confirmDismiss?.invoke() != false) triggerAnimatedDismiss(0f)
+                        }
                     )
             )
         }
@@ -343,7 +353,8 @@ fun ICostSmoothBottomSheet(
                     onDragStopped = { velocity ->
                         if (visible && !isDismissing) {
                             val closeThreshold = sheetHeightPx * 0.22f
-                            if (velocity > 420f || offsetYPx > closeThreshold) {
+                            val wantsClose = velocity > 420f || offsetYPx > closeThreshold
+                            if (wantsClose && confirmDismiss?.invoke() != false) {
                                 triggerAnimatedDismiss(velocity.coerceAtLeast(0f))
                             } else {
                                 settleJob?.cancel()
