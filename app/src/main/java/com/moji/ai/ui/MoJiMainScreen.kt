@@ -84,6 +84,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.runtime.DisposableEffect
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.ai.AiConfig
@@ -409,8 +421,6 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onBack = { showSettingsPage = false },
                 onOpenSmartBookkeeping = { showSmartBookkeepingPage = true },
                 onOpenBudgetDialog = { showBudgetDialog = true },
-                onOpenAiModelConfig = { showAiSettingsSheet = true },
-                onOpenAiSandbox = { showAiSandboxSheet = true },
                 onOpenCsvImport = {
                     backupInitialTab = 0
                     showBackupTransferSheet = true
@@ -419,12 +429,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     backupInitialTab = 1
                     showBackupTransferSheet = true
                 },
-                onOpenBackupRestore = {
-                    backupInitialTab = 2
-                    showBackupTransferSheet = true
-                },
                 onOpenWebDavSync = {
-                    backupInitialTab = 3
+                    backupInitialTab = 2
                     showBackupTransferSheet = true
                 },
                 onOpenBatchReimburse = {
@@ -733,11 +739,66 @@ private data class SettingRowDef(
     val iconAsset: String,
     val title: String,
     val trailingText: String = "",
-    val onClick: () -> Unit = {}
+    /** 为 null 表示功能尚未开放：行内显示「敬请期待」且不可点击，避免用户点了没反应 */
+    val onClick: (() -> Unit)? = null
 )
 
 /**
+ * 页面重新回到前台（ON_RESUME）时自增的计数器：用于从系统设置页返回后刷新权限状态
+ */
+@Composable
+private fun rememberResumeTick(): Int {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var tick by remember { mutableIntStateOf(0) }
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) tick++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    return tick
+}
+
+/**
+ * 二级全屏页统一顶栏：返回按钮 + 大标题
+ */
+@Composable
+private fun SubpageHeader(title: String, onBack: () -> Unit) {
+    Spacer(modifier = Modifier.height(8.dp))
+    ICostCircleIconButton(onClick = onBack, size = 42.dp) {
+        ICostAssetImage(
+            assetFile = "record_back_icon.webp",
+            tint = ICostTextPrimary,
+            modifier = Modifier.size(16.dp)
+        )
+    }
+    Spacer(modifier = Modifier.height(12.dp))
+    Text(
+        text = title,
+        fontSize = 30.sp,
+        fontWeight = FontWeight.ExtraBold,
+        color = ICostTextPrimary,
+        modifier = Modifier.padding(horizontal = 4.dp)
+    )
+    Spacer(modifier = Modifier.height(14.dp))
+}
+
+@Composable
+private fun SettingsSectionTitle(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        fontSize = 13.sp,
+        color = ICostTextSecondary,
+        modifier = modifier.padding(start = 6.dp, bottom = 8.dp)
+    )
+}
+
+/**
  * 1:1 iCost 全屏「设置」页（对齐 09_settings_full.png）
+ *
+ * 分组按使用频率排列：记账 → 数据 → 尚未开放；尚未开放的条目统一置灰并标注「敬请期待」，
+ * 不再出现点了没反应的行，也不再展示虚构的会员状态。
  */
 @Composable
 private fun ICostSettingsFullScreen(
@@ -746,11 +807,8 @@ private fun ICostSettingsFullScreen(
     onBack: () -> Unit,
     onOpenSmartBookkeeping: () -> Unit,
     onOpenBudgetDialog: () -> Unit,
-    onOpenAiModelConfig: () -> Unit,
-    onOpenAiSandbox: () -> Unit,
     onOpenCsvImport: () -> Unit = {},
     onOpenCsvExport: () -> Unit = {},
-    onOpenBackupRestore: () -> Unit = {},
     onOpenWebDavSync: () -> Unit = {},
     onOpenBatchReimburse: () -> Unit = {}
 ) {
@@ -767,145 +825,85 @@ private fun ICostSettingsFullScreen(
             )
             .padding(horizontal = 16.dp)
     ) {
-        Spacer(modifier = Modifier.height(8.dp))
-        ICostCircleIconButton(onClick = onBack, size = 42.dp) {
-            ICostAssetImage(
-                assetFile = "record_back_icon.webp",
-                tint = ICostTextPrimary,
-                modifier = Modifier.size(16.dp)
-            )
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-        Text(
-            text = "设置",
-            fontSize = 30.sp,
-            fontWeight = FontWeight.ExtraBold,
-            color = ICostTextPrimary,
-            modifier = Modifier.padding(horizontal = 4.dp)
-        )
-
-        Spacer(modifier = Modifier.height(14.dp))
+        SubpageHeader(title = "设置", onBack = onBack)
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
             contentPadding = PaddingValues(bottom = 48.dp)
         ) {
-            // 用户头像与 VIP 状态卡片
+            // 应用信息卡片
             item {
                 Surface(
                     shape = RoundedCornerShape(20.dp),
                     color = ICostCardWhite,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            ICostAvatarButton(onClick = {}, size = 46.dp)
-                            Spacer(modifier = Modifier.width(12.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ICostAvatarButton(onClick = {}, size = 46.dp)
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = "MoJi 默记",
                                 fontSize = 17.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = ICostTextPrimary,
-                                modifier = Modifier.weight(1f)
+                                color = ICostTextPrimary
                             )
-                            Icon(
-                                imageVector = Icons.Default.ChevronRight,
-                                contentDescription = null,
-                                tint = ICostTextMuted
-                            )
-                        }
-
-                        HorizontalDivider(
-                            modifier = Modifier.padding(vertical = 12.dp),
-                            color = ICostDivider
-                        )
-
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onOpenSmartBookkeeping() },
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            ICostAssetImage(
-                                assetFile = "setting_vip.webp",
-                                modifier = Modifier.size(22.dp)
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
+                            Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                text = "已解锁完整功能",
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = Color(0xFFD97706),
-                                modifier = Modifier.weight(1f)
-                            )
-                            Text(
-                                text = "终身会员",
+                                text = "当前账本：$currentLedger",
                                 fontSize = 13.sp,
                                 color = ICostTextSecondary
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Icon(
-                                imageVector = Icons.Default.ChevronRight,
-                                contentDescription = null,
-                                tint = ICostTextMuted
                             )
                         }
                     }
                 }
             }
 
-            // 第一组：多账本、智能记账、云备份
             item {
+                SettingsSectionTitle("记账")
                 SettingsGroupCard(
                     rows = listOf(
-                        SettingRowDef("setting_multi_book.webp", "多账本", currentLedger),
-                        SettingRowDef("setting_auto.webp", "智能记账", "去开启", onClick = onOpenSmartBookkeeping),
-                        SettingRowDef("setting_backup.webp", "全量快照与 WebDAV 云同步", "备份/恢复", onClick = onOpenWebDavSync)
+                        SettingRowDef("setting_auto.webp", "智能记账", "自动识账与规则", onClick = onOpenSmartBookkeeping),
+                        SettingRowDef(
+                            "setting_budget.webp",
+                            "预算管理",
+                            if (monthlyBudgetCents > 0) formatMoneyCents(monthlyBudgetCents) else "未设置",
+                            onClick = onOpenBudgetDialog
+                        ),
+                        SettingRowDef("setting_reimbursement.webp", "报销管理", "批量核销", onClick = onOpenBatchReimburse),
+                        SettingRowDef("setting_multi_book.webp", "多账本", "在首页顶部切换")
                     )
                 )
             }
 
-            // 第二组：分类管理、标签管理、预算管理、周期记账、分期管理、存钱计划、报销管理、退款管理、货币和汇率、记账模板、资产设置、统计设置、账单图片
             item {
+                SettingsSectionTitle("数据")
+                SettingsGroupCard(
+                    rows = listOf(
+                        SettingRowDef("setting_import.webp", "账单导入", "微信 / 支付宝 / 钱迹", onClick = onOpenCsvImport),
+                        SettingRowDef("setting_export.webp", "账单导出", "CSV", onClick = onOpenCsvExport),
+                        SettingRowDef("setting_backup.webp", "备份与云同步", "快照 / WebDAV", onClick = onOpenWebDavSync)
+                    )
+                )
+            }
+
+            item {
+                SettingsSectionTitle("更多功能")
                 SettingsGroupCard(
                     rows = listOf(
                         SettingRowDef("setting_category.webp", "分类管理"),
                         SettingRowDef("setting_tag.webp", "标签管理"),
-                        SettingRowDef(
-                            "setting_budget.webp",
-                            "预算管理",
-                            formatMoneyCents(monthlyBudgetCents),
-                            onClick = onOpenBudgetDialog
-                        ),
-                        SettingRowDef("setting_period.webp", "周期记账"),
-                        SettingRowDef("setting_installment.webp", "分期管理"),
-                        SettingRowDef("setting_save_money.webp", "存钱计划"),
-                        SettingRowDef("setting_reimbursement.webp", "报销管理 (批量核销)", "一键结算", onClick = onOpenBatchReimburse),
-                        SettingRowDef("setting_refund.webp", "退款管理"),
-                        SettingRowDef("setting_currency.webp", "货币和汇率", "人民币 (CNY)"),
                         SettingRowDef("setting_template.webp", "记账模板"),
-                        SettingRowDef("setting_asset.webp", "AI 模型与权限中心", "配置", onClick = onOpenAiModelConfig),
-                        SettingRowDef("setting_statistics.webp", "统计设置"),
-                        SettingRowDef("setting_bill_image.webp", "AI 静默识账测试沙盒", "立即测试", onClick = onOpenAiSandbox)
-                    )
-                )
-            }
-
-            // 第三组：账单导入、账单导出、密码保护、定时提醒、外观显示、个性化
-            item {
-                SettingsGroupCard(
-                    rows = listOf(
-                        SettingRowDef("setting_import.webp", "账单导入", "微信/支付宝/钱迹 CSV", onClick = onOpenCsvImport),
-                        SettingRowDef("setting_export.webp", "账单导出", "标准 CSV 报表", onClick = onOpenCsvExport),
+                        SettingRowDef("setting_currency.webp", "货币和汇率"),
                         SettingRowDef("setting_password.webp", "密码保护"),
                         SettingRowDef("setting_time.webp", "定时提醒"),
-                        SettingRowDef("setting_appearance.webp", "外观显示"),
-                        SettingRowDef("setting_personalization.webp", "个性化")
+                        SettingRowDef("setting_appearance.webp", "外观显示")
                     )
                 )
             }
@@ -922,44 +920,54 @@ private fun SettingsGroupCard(
         color = ICostCardWhite,
         modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+        Column(modifier = Modifier.padding(vertical = 4.dp)) {
             rows.forEachIndexed { index, row ->
+                val action = row.onClick
+                val isComingSoon = action == null && row.trailingText.isBlank()
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { row.onClick() }
-                        .padding(vertical = 14.dp),
+                        .then(if (action != null) Modifier.clickable(onClick = action) else Modifier)
+                        .padding(horizontal = 16.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     ICostAssetImage(
                         assetFile = row.iconAsset,
-                        modifier = Modifier.size(22.dp)
+                        modifier = Modifier
+                            .size(22.dp)
+                            .graphicsLayer { alpha = if (isComingSoon) 0.45f else 1f }
                     )
                     Spacer(modifier = Modifier.width(14.dp))
                     Text(
                         text = row.title,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Medium,
-                        color = ICostTextPrimary,
+                        color = if (isComingSoon) ICostTextMuted else ICostTextPrimary,
                         modifier = Modifier.weight(1f)
                     )
-                    if (row.trailingText.isNotBlank()) {
+                    val trailing = if (isComingSoon) "敬请期待" else row.trailingText
+                    if (trailing.isNotBlank()) {
                         Text(
-                            text = row.trailingText,
+                            text = trailing,
                             fontSize = 13.sp,
-                            color = ICostTextSecondary
+                            color = if (action != null) ICostTextSecondary else ICostTextMuted
                         )
-                        Spacer(modifier = Modifier.width(4.dp))
                     }
-                    Icon(
-                        imageVector = Icons.Default.ChevronRight,
-                        contentDescription = null,
-                        tint = ICostTextMuted,
-                        modifier = Modifier.size(18.dp)
-                    )
+                    if (action != null) {
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Icon(
+                            imageVector = Icons.Default.ChevronRight,
+                            contentDescription = null,
+                            tint = ICostTextMuted,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                 }
                 if (index < rows.lastIndex) {
-                    HorizontalDivider(color = ICostDivider)
+                    HorizontalDivider(
+                        color = ICostDivider,
+                        modifier = Modifier.padding(start = 52.dp, end = 16.dp)
+                    )
                 }
             }
         }
@@ -968,7 +976,12 @@ private fun SettingsGroupCard(
 
 /**
  * 1:1 iCost 全屏「智能记账」页面（对齐 09_smart_bookkeeping.png）
+ *
+ * - 权限状态在每次回到前台时刷新，从系统设置返回后无需重进页面；
+ * - 去掉了不落盘、不生效的「假开关」，改为只读说明，避免用户误以为可以关闭；
+ * - 删除规则需二次确认；场景列表不再伪装成可点击的行。
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ICostSmartBookkeepingFullScreen(
     aiConfig: AiConfig,
@@ -989,15 +1002,12 @@ private fun ICostSmartBookkeepingFullScreen(
 ) {
     BackHandler(onBack = onBack)
     val context = LocalContext.current
-    val isNotifGranted = isNotificationListenerEnabled(context)
-    val isAccessGranted = isAccessibilityServiceEnabled(context)
+    val resumeTick = rememberResumeTick()
+    val isNotifGranted = remember(resumeTick) { isNotificationListenerEnabled(context) }
+    val isAccessGranted = remember(resumeTick) { isAccessibilityServiceEnabled(context) }
 
-    var autoConfirm by remember { mutableStateOf(true) }
-    var useDefaultLedger by remember { mutableStateOf(true) }
-    var autoMatchCategory by remember { mutableStateOf(true) }
-    var autoMatchWallet by remember { mutableStateOf(true) }
-    var mergeRuleEnabled by remember { mutableStateOf(true) }
     var showAddSmartRuleDialog by remember { mutableStateOf(false) }
+    var pendingDeleteRule by remember { mutableStateOf<SmartConditionRule?>(null) }
 
     Column(
         modifier = Modifier
@@ -1010,33 +1020,16 @@ private fun ICostSmartBookkeepingFullScreen(
             )
             .padding(horizontal = 16.dp)
     ) {
-        Spacer(modifier = Modifier.height(8.dp))
-        ICostCircleIconButton(onClick = onBack, size = 42.dp) {
-            ICostAssetImage(
-                assetFile = "record_back_icon.webp",
-                tint = ICostTextPrimary,
-                modifier = Modifier.size(16.dp)
-            )
-        }
-
-        Spacer(modifier = Modifier.height(12.dp))
-        Text(
-            text = "智能记账",
-            fontSize = 30.sp,
-            fontWeight = FontWeight.ExtraBold,
-            color = ICostTextPrimary,
-            modifier = Modifier.padding(horizontal = 4.dp)
-        )
-
-        Spacer(modifier = Modifier.height(14.dp))
+        SubpageHeader(title = "智能记账", onBack = onBack)
 
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            verticalArrangement = Arrangement.spacedBy(18.dp),
             contentPadding = PaddingValues(bottom = 48.dp)
         ) {
-            // 权限与开关卡片
+            // 识账来源：开关 + 实时授权状态
             item {
+                SettingsSectionTitle("识账来源")
                 Surface(
                     shape = RoundedCornerShape(20.dp),
                     color = ICostCardWhite,
@@ -1044,8 +1037,16 @@ private fun ICostSmartBookkeepingFullScreen(
                 ) {
                     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
                         SmartSwitchRow(
-                            title = "无障碍自动识账",
-                            subtitle = if (isAccessGranted) "无障碍支付页监听运行中" else "开启无障碍权限以实时识别微信/支付宝账单",
+                            title = "支付页自动识账",
+                            subtitle = when {
+                                !aiConfig.enableAccessibilityCapture -> "读取微信 / 支付宝支付完成页，需要无障碍权限"
+                                isAccessGranted -> "运行中"
+                                else -> "未授权无障碍权限，点此前往开启"
+                            },
+                            subtitleIsWarning = aiConfig.enableAccessibilityCapture && !isAccessGranted,
+                            onSubtitleClick = if (aiConfig.enableAccessibilityCapture && !isAccessGranted) {
+                                { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                            } else null,
                             checked = aiConfig.enableAccessibilityCapture,
                             onCheckedChange = {
                                 onUpdateAiConfig(aiConfig.copy(enableAccessibilityCapture = it))
@@ -1056,8 +1057,16 @@ private fun ICostSmartBookkeepingFullScreen(
                         )
                         HorizontalDivider(color = ICostDivider)
                         SmartSwitchRow(
-                            title = "通知栏静默记账",
-                            subtitle = if (isNotifGranted) "通知监听服务运行中" else "开启通知使用权以捕获银行及支付通知",
+                            title = "通知栏自动识账",
+                            subtitle = when {
+                                !aiConfig.enableNotificationCapture -> "读取银行与支付通知，需要通知使用权"
+                                isNotifGranted -> "运行中"
+                                else -> "未授权通知使用权，点此前往开启"
+                            },
+                            subtitleIsWarning = aiConfig.enableNotificationCapture && !isNotifGranted,
+                            onSubtitleClick = if (aiConfig.enableNotificationCapture && !isNotifGranted) {
+                                { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
+                            } else null,
                             checked = aiConfig.enableNotificationCapture,
                             onCheckedChange = {
                                 onUpdateAiConfig(aiConfig.copy(enableNotificationCapture = it))
@@ -1068,145 +1077,189 @@ private fun ICostSmartBookkeepingFullScreen(
                         )
                         HorizontalDivider(color = ICostDivider)
                         SmartArrowRow(
-                            title = "国产 ROM 保活与 Android 13+ 受限设置诊断向导",
-                            trailing = "一键诊断",
+                            title = "后台保活诊断",
+                            trailing = "防止漏记",
                             onClick = onOpenKeepAliveGuide
                         )
                     }
                 }
             }
 
-            // 记账自动化选项卡片
+            // AI 识别
             item {
+                SettingsSectionTitle("AI 识别")
                 Surface(
                     shape = RoundedCornerShape(20.dp),
                     color = ICostCardWhite,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
-                        SmartSwitchRow(
-                            title = "自动确认入账",
-                            subtitle = "开启后静默入账并推送通知栏提醒（支持一键原子撤销）",
-                            checked = autoConfirm,
-                            onCheckedChange = { autoConfirm = it }
-                        )
-                        HorizontalDivider(color = ICostDivider)
-                        SmartSwitchRow(
-                            title = "使用默认账本",
-                            subtitle = null,
-                            checked = useDefaultLedger,
-                            onCheckedChange = { useDefaultLedger = it }
-                        )
-                        HorizontalDivider(color = ICostDivider)
-                        SmartSwitchRow(
-                            title = "自动匹配分类",
-                            subtitle = "根据交易商户或商品信息，自动匹配对应分类",
-                            checked = autoMatchCategory,
-                            onCheckedChange = { autoMatchCategory = it }
-                        )
-                        HorizontalDivider(color = ICostDivider)
-                        SmartSwitchRow(
-                            title = "自动匹配账户",
-                            subtitle = "根据支付方式与银行卡尾号，自动匹配对应资产或信用卡",
-                            checked = autoMatchWallet,
-                            onCheckedChange = { autoMatchWallet = it }
-                        )
-                        HorizontalDivider(color = ICostDivider)
-                        SmartSwitchRow(
-                            title = "1.1秒滑动窗口防重合并",
-                            subtitle = "自动将同一笔交易的页面文本与银行扣款通知合并",
-                            checked = mergeRuleEnabled,
-                            onCheckedChange = { mergeRuleEnabled = it }
-                        )
-                        HorizontalDivider(color = ICostDivider)
                         SmartArrowRow(
-                            title = "AI 大模型接口配置",
-                            trailing = aiConfig.modelName,
+                            title = "大模型接口",
+                            trailing = if (aiConfig.apiKey.isBlank()) "未配置 · 使用本地引擎" else aiConfig.modelName,
                             onClick = onOpenAiModelConfig
                         )
                         HorizontalDivider(color = ICostDivider)
                         SmartArrowRow(
-                            title = "AI 静默识账测试沙盒",
-                            trailing = "立即模拟",
+                            title = "识账测试",
+                            trailing = "粘贴文本试一试",
                             onClick = onOpenAiSandbox
                         )
                     }
                 }
             }
 
-            // 可视化条件规则引擎 When -> Then（对标 pennywiseai-tracker Smart Rules Engine）
+            // 自动处理说明（只读，这些行为目前始终开启）
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                SettingsSectionTitle("自动处理")
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = ICostCardWhite,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text(
-                            text = "可视化条件规则引擎 When ➔ Then (${smartRules.count { it.enabled }}/${smartRules.size} 启用)",
-                            fontSize = 13.sp,
-                            color = ICostTextSecondary
-                        )
-                        Text(
-                            text = "+ 新增规则",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = ICostBlueAccent,
-                            modifier = Modifier.clickable { showAddSmartRuleDialog = true }
-                        )
+                        listOf(
+                            "识别后直接入账，并推送可一键撤销的通知",
+                            "按商户与商品自动匹配分类，按卡号尾号匹配账户",
+                            "同一笔交易的支付页与银行通知自动合并，不重复记账"
+                        ).forEach { line ->
+                            Row(verticalAlignment = Alignment.Top) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = ICostGreenIncome,
+                                    modifier = Modifier
+                                        .padding(top = 1.dp)
+                                        .size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(text = line, fontSize = 13.sp, color = ICostTextPrimary)
+                            }
+                        }
                     }
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = ICostCardWhite,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                            smartRules.forEachIndexed { idx, rule ->
+                }
+            }
+
+            // 条件规则 When -> Then
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    SettingsSectionTitle(
+                        text = if (smartRules.isEmpty()) "分类规则" else "分类规则 · ${smartRules.count { it.enabled }}/${smartRules.size} 启用",
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { showAddSmartRuleDialog = true }) {
+                        Text("新增规则", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = ICostBlueAccent)
+                    }
+                }
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = ICostCardWhite,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                        if (smartRules.isEmpty()) {
+                            Text(
+                                text = "还没有规则。例如：包含「美团」且金额低于 50 元时，归入「餐饮-三餐」。",
+                                fontSize = 13.sp,
+                                color = ICostTextSecondary,
+                                modifier = Modifier.padding(vertical = 12.dp)
+                            )
+                        }
+                        smartRules.forEachIndexed { idx, rule ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                    Text(
+                                        text = rule.name,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (rule.enabled) ICostTextPrimary else ICostTextMuted
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "当 ${rule.conditionSummary()}",
+                                        fontSize = 12.sp,
+                                        color = ICostTextSecondary
+                                    )
+                                    Text(
+                                        text = "则 ${rule.actionSummary()}",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = if (rule.interceptIgnore) ICostCoralRed else ICostBlueAccent
+                                    )
+                                }
+                                TextButton(onClick = { pendingDeleteRule = rule }) {
+                                    Text("删除", fontSize = 13.sp, color = ICostCoralRed)
+                                }
+                                Switch(
+                                    checked = rule.enabled,
+                                    onCheckedChange = { onToggleSmartRule(rule.id, it) },
+                                    colors = iCostSwitchColors()
+                                )
+                            }
+                            if (idx < smartRules.lastIndex) {
+                                HorizontalDivider(color = ICostDivider)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 商户记忆
+            item {
+                SettingsSectionTitle(
+                    if (merchantMemories.isEmpty()) "商户记忆" else "商户记忆 · 已记住 ${merchantMemories.size} 个"
+                )
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = ICostCardWhite,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                        if (merchantMemories.isEmpty()) {
+                            Text(
+                                text = "手动记账或修改账单分类后，会自动记住该商户，下次直接套用。",
+                                fontSize = 13.sp,
+                                color = ICostTextSecondary,
+                                modifier = Modifier.padding(vertical = 12.dp)
+                            )
+                        } else {
+                            val visibleMemories = merchantMemories.take(10)
+                            visibleMemories.forEachIndexed { idx, entry ->
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(vertical = 8.dp),
+                                        .padding(vertical = 6.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
-                                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                    Column(modifier = Modifier.weight(1f)) {
                                         Text(
-                                            text = rule.name,
+                                            text = "${entry.merchantKeyword} → ${entry.category}",
                                             fontSize = 14.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = ICostTextPrimary
                                         )
                                         Text(
-                                            text = "当：${rule.conditionSummary()}",
-                                            fontSize = 11.sp,
+                                            text = "已使用 ${entry.hitCount} 次",
+                                            fontSize = 12.sp,
                                             color = ICostTextSecondary
                                         )
-                                        Text(
-                                            text = "则：${rule.actionSummary()}",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Medium,
-                                            color = if (rule.interceptIgnore) ICostCoralRed else ICostBlueAccent
-                                        )
                                     }
-                                    Text(
-                                        text = "删除",
-                                        fontSize = 11.sp,
-                                        color = ICostCoralRed,
-                                        modifier = Modifier
-                                            .clickable { onDeleteSmartRule(rule.id) }
-                                            .padding(horizontal = 6.dp, vertical = 4.dp)
-                                    )
-                                    Switch(
-                                        checked = rule.enabled,
-                                        onCheckedChange = { onToggleSmartRule(rule.id, it) },
-                                        colors = SwitchDefaults.colors(
-                                            checkedThumbColor = Color.White,
-                                            checkedTrackColor = ICostBlueAccent
-                                        )
-                                    )
+                                    TextButton(onClick = { onRemoveMerchantMemory(entry.merchantKeyword) }) {
+                                        Text("移除", fontSize = 13.sp, color = ICostCoralRed)
+                                    }
                                 }
-                                if (idx < smartRules.lastIndex) {
+                                if (idx < visibleMemories.lastIndex) {
                                     HorizontalDivider(color = ICostDivider)
                                 }
                             }
@@ -1215,139 +1268,60 @@ private fun ICostSmartBookkeepingFullScreen(
                 }
             }
 
-            // 商户记忆自学习引擎（对标 Cashew 关联修正 + AutoAccounting AI 学习注入）
+            // 识别日志
             item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "商户记忆自学习规则库（已记住 ${merchantMemories.size} 个商户，保存/编辑账单时自动更新）",
-                        fontSize = 13.sp,
-                        color = ICostTextSecondary,
-                        modifier = Modifier.padding(horizontal = 6.dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    SettingsSectionTitle(
+                        text = if (observabilityLogs.isEmpty()) "识别日志" else "识别日志 · ${observabilityLogs.size} 条",
+                        modifier = Modifier.weight(1f)
                     )
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = ICostCardWhite,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                            if (merchantMemories.isEmpty()) {
-                                Text(
-                                    text = "暂无记忆规则，手动新增或修正任意账单分类后将自动记住该商户",
-                                    fontSize = 13.sp,
-                                    color = ICostTextSecondary,
-                                    modifier = Modifier.padding(vertical = 8.dp)
-                                )
-                            } else {
-                                merchantMemories.take(10).forEachIndexed { idx, entry ->
-                                    Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 10.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = "${entry.merchantKeyword}  ➔  ${entry.category}",
-                                                fontSize = 14.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = ICostTextPrimary
-                                            )
-                                            Text(
-                                                text = "累计命中/修正 ${entry.hitCount} 次 · 优先于离线通用词库与大模型",
-                                                fontSize = 11.sp,
-                                                color = ICostTextSecondary
-                                            )
-                                        }
-                                        Text(
-                                            text = "移除",
-                                            fontSize = 12.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = ICostCoralRed,
-                                            modifier = Modifier
-                                                .clickable { onRemoveMerchantMemory(entry.merchantKeyword) }
-                                                .padding(horizontal = 6.dp, vertical = 4.dp)
-                                        )
-                                    }
-                                    if (idx < merchantMemories.take(10).lastIndex) {
-                                        HorizontalDivider(color = ICostDivider)
-                                    }
-                                }
-                            }
+                    if (observabilityLogs.isNotEmpty()) {
+                        TextButton(onClick = onClearLogs) {
+                            Text("清空", fontSize = 13.sp, color = ICostBlueAccent)
                         }
                     }
                 }
-            }
-
-            // 30 秒跨通道事后证据融合 + 采集可观测性日志面板
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 6.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "采集可观测日志 & 30s 跨通道证据融合 (${observabilityLogs.size})",
-                            fontSize = 13.sp,
-                            color = ICostTextSecondary
-                        )
-                        if (observabilityLogs.isNotEmpty()) {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = ICostCardWhite,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
+                        if (observabilityLogs.isEmpty()) {
                             Text(
-                                text = "清空日志",
-                                fontSize = 12.sp,
-                                color = ICostBlueAccent,
-                                modifier = Modifier.clickable { onClearLogs() }
+                                text = "暂无识别记录。收到支付通知或打开支付完成页后会显示在这里。",
+                                fontSize = 13.sp,
+                                color = ICostTextSecondary,
+                                modifier = Modifier.padding(vertical = 12.dp)
                             )
-                        }
-                    }
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = ICostCardWhite,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                            if (observabilityLogs.isEmpty()) {
-                                Text(
-                                    text = "暂无实时采集事件。可在「AI 静默识账测试沙盒」中模拟通知或跨通道补全事件。",
-                                    fontSize = 13.sp,
-                                    color = ICostTextSecondary,
-                                    modifier = Modifier.padding(vertical = 8.dp)
-                                )
-                            } else {
-                                observabilityLogs.take(8).forEachIndexed { idx, log ->
-                                    val badgeColor = when (log.outcome) {
-                                        CaptureEventOutcome.RECORDED -> ICostGreenIncome
-                                        CaptureEventOutcome.FUSED_PATCH -> ICostBlueAccent
-                                        CaptureEventOutcome.DEDUP_BLOCKED -> ICostAmberGold
-                                        CaptureEventOutcome.NOISE_IGNORED -> ICostTextSecondary
-                                    }
+                        } else {
+                            val visibleLogs = observabilityLogs.take(8)
+                            visibleLogs.forEachIndexed { idx, log ->
+                                val badgeColor = when (log.outcome) {
+                                    CaptureEventOutcome.RECORDED -> ICostGreenIncome
+                                    CaptureEventOutcome.FUSED_PATCH -> ICostBlueAccent
+                                    CaptureEventOutcome.DEDUP_BLOCKED -> ICostAmberGold
+                                    CaptureEventOutcome.NOISE_IGNORED -> ICostTextSecondary
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
                                     Column(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(vertical = 8.dp),
-                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(3.dp)
                                     ) {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                text = "[${log.outcome.badgeLabel}] ${log.captureSource}",
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = badgeColor
-                                            )
-                                            Text(
-                                                text = "一键重放",
-                                                fontSize = 12.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = ICostBlueAccent,
-                                                modifier = Modifier.clickable { onReplayLog(log) }
-                                            )
-                                        }
+                                        Text(
+                                            text = "${log.outcome.badgeLabel} · ${log.captureSource}",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = badgeColor
+                                        )
                                         Text(
                                             text = log.detailSummary,
                                             fontSize = 13.sp,
@@ -1357,52 +1331,15 @@ private fun ICostSmartBookkeepingFullScreen(
                                         Text(
                                             text = log.rawText.replace("\n", " ").take(80),
                                             fontSize = 11.sp,
-                                            color = ICostTextSecondary
+                                            color = ICostTextSecondary,
+                                            maxLines = 2
                                         )
                                     }
-                                    if (idx < observabilityLogs.take(8).lastIndex) {
-                                        HorizontalDivider(color = ICostDivider)
+                                    TextButton(onClick = { onReplayLog(log) }) {
+                                        Text("重新识别", fontSize = 12.sp, color = ICostBlueAccent)
                                     }
                                 }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 已支持的场景列表（对齐 09_smart_bookkeeping.png）
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "已支持的场景",
-                        fontSize = 13.sp,
-                        color = ICostTextSecondary,
-                        modifier = Modifier.padding(horizontal = 6.dp)
-                    )
-                    Surface(
-                        shape = RoundedCornerShape(20.dp),
-                        color = ICostCardWhite,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        val scenes = listOf(
-                            "微信支付与账单详情页",
-                            "微信红包详情页",
-                            "微信转账详情页",
-                            "支付宝支付与账单详情页",
-                            "云闪付交易详情页",
-                            "京东订单详情页",
-                            "拼多多订单详情页",
-                            "美团账单详情页",
-                            "招商银行 / 掌上生活扣款与还款通知"
-                        )
-                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)) {
-                            scenes.forEachIndexed { idx, scene ->
-                                SmartArrowRow(
-                                    title = scene,
-                                    trailing = "已启用",
-                                    onClick = onOpenAiSandbox
-                                )
-                                if (idx < scenes.lastIndex) {
+                                if (idx < visibleLogs.lastIndex) {
                                     HorizontalDivider(color = ICostDivider)
                                 }
                             }
@@ -1410,7 +1347,56 @@ private fun ICostSmartBookkeepingFullScreen(
                     }
                 }
             }
+
+            // 已支持的场景（纯展示）
+            item {
+                SettingsSectionTitle("已支持的场景")
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = ICostCardWhite,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    FlowRow(
+                        modifier = Modifier.padding(14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(
+                            "微信支付", "微信红包", "微信转账", "支付宝", "云闪付",
+                            "京东", "拼多多", "美团", "招商银行 / 掌上生活"
+                        ).forEach { scene ->
+                            Text(
+                                text = scene,
+                                fontSize = 12.sp,
+                                color = ICostTextPrimary,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(ICostBgGray)
+                                    .padding(horizontal = 10.dp, vertical = 6.dp)
+                            )
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    pendingDeleteRule?.let { rule ->
+        AlertDialog(
+            onDismissRequest = { pendingDeleteRule = null },
+            containerColor = ICostCardWhite,
+            title = { Text("删除规则？", fontWeight = FontWeight.ExtraBold) },
+            text = { Text("「${rule.name}」删除后不可恢复，已入账的账单不受影响。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    onDeleteSmartRule(rule.id)
+                    pendingDeleteRule = null
+                }) { Text("删除", color = ICostCoralRed, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDeleteRule = null }) { Text("取消") }
+            }
+        )
     }
 
     if (showAddSmartRuleDialog) {
@@ -1422,50 +1408,73 @@ private fun ICostSmartBookkeepingFullScreen(
         var markReimburse by remember { mutableStateOf(false) }
         var tagStr by remember { mutableStateOf("") }
 
+        val minYuan = minYuanStr.toDoubleOrNull()
+        val maxYuan = maxYuanStr.toDoubleOrNull()
+        val amountError = when {
+            minYuanStr.isNotBlank() && minYuan == null -> "最低金额格式不正确"
+            maxYuanStr.isNotBlank() && maxYuan == null -> "最高金额格式不正确"
+            minYuan != null && maxYuan != null && minYuan > maxYuan -> "最低金额不能大于最高金额"
+            else -> null
+        }
+        val hasCondition = keywordStr.isNotBlank() || minYuan != null || maxYuan != null
+
         AlertDialog(
             onDismissRequest = { showAddSmartRuleDialog = false },
             containerColor = ICostCardWhite,
-            title = { Text("新增条件规则 (When ➔ Then)", fontWeight = FontWeight.ExtraBold) },
+            title = { Text("新增分类规则", fontWeight = FontWeight.ExtraBold) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
                     OutlinedTextField(
                         value = ruleName,
                         onValueChange = { ruleName = it },
-                        label = { Text("规则名称 (如：公司园区晚餐报销)") },
+                        label = { Text("规则名称") },
+                        placeholder = { Text("如：园区晚餐报销") },
                         singleLine = true
                     )
+                    Text("当满足（至少填一项）", fontSize = 12.sp, color = ICostTextSecondary)
                     OutlinedTextField(
                         value = keywordStr,
                         onValueChange = { keywordStr = it },
-                        label = { Text("当包含关键词 (逗号分隔，如：美团,饿了么)") },
+                        label = { Text("包含关键词") },
+                        placeholder = { Text("多个用逗号分隔，如：美团,饿了么") },
                         singleLine = true
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
                             value = minYuanStr,
                             onValueChange = { minYuanStr = it },
-                            label = { Text("最低金额(选填)") },
+                            label = { Text("最低金额") },
                             modifier = Modifier.weight(1f),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true
                         )
                         OutlinedTextField(
                             value = maxYuanStr,
                             onValueChange = { maxYuanStr = it },
-                            label = { Text("最高金额(选填)") },
+                            label = { Text("最高金额") },
                             modifier = Modifier.weight(1f),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                             singleLine = true
                         )
                     }
+                    if (amountError != null) {
+                        Text(amountError, fontSize = 12.sp, color = ICostCoralRed)
+                    }
+                    Text("则执行", fontSize = 12.sp, color = ICostTextSecondary)
                     OutlinedTextField(
                         value = targetCat,
                         onValueChange = { targetCat = it },
-                        label = { Text("则自动归入分类 (如：餐饮-三餐)") },
+                        label = { Text("归入分类") },
+                        placeholder = { Text("如：餐饮-三餐") },
                         singleLine = true
                     )
                     OutlinedTextField(
                         value = tagStr,
                         onValueChange = { tagStr = it },
-                        label = { Text("自动附加标签 (选填)") },
+                        label = { Text("附加标签（选填）") },
                         singleLine = true
                     )
                     Row(
@@ -1473,22 +1482,26 @@ private fun ICostSmartBookkeepingFullScreen(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("自动标记为「待报销」", fontSize = 13.sp, color = ICostTextPrimary)
-                        Switch(checked = markReimburse, onCheckedChange = { markReimburse = it })
+                        Text("标记为待报销", fontSize = 14.sp, color = ICostTextPrimary)
+                        Switch(
+                            checked = markReimburse,
+                            onCheckedChange = { markReimburse = it },
+                            colors = iCostSwitchColors()
+                        )
                     }
                 }
             },
             confirmButton = {
                 Button(
-                    enabled = ruleName.isNotBlank() && (keywordStr.isNotBlank() || minYuanStr.isNotBlank() || maxYuanStr.isNotBlank()),
+                    enabled = ruleName.isNotBlank() && hasCondition && amountError == null && targetCat.isNotBlank(),
                     onClick = {
                         onAddSmartRule(
                             SmartConditionRule(
                                 name = ruleName.trim(),
                                 enabled = true,
                                 keywordContains = keywordStr.trim(),
-                                minAmountYuan = minYuanStr.toDoubleOrNull(),
-                                maxAmountYuan = maxYuanStr.toDoubleOrNull(),
+                                minAmountYuan = minYuan,
+                                maxAmountYuan = maxYuan,
                                 targetCategory = targetCat.trim(),
                                 markReimbursable = markReimburse,
                                 appendTag = tagStr.trim()
@@ -1498,7 +1511,7 @@ private fun ICostSmartBookkeepingFullScreen(
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent)
                 ) {
-                    Text("保存规则")
+                    Text("保存")
                 }
             },
             dismissButton = {
@@ -1509,15 +1522,27 @@ private fun ICostSmartBookkeepingFullScreen(
 }
 
 @Composable
+private fun iCostSwitchColors() = SwitchDefaults.colors(
+    checkedThumbColor = Color.White,
+    checkedTrackColor = ICostBlueAccent,
+    uncheckedThumbColor = Color.White,
+    uncheckedTrackColor = Color(0xFFE0E0E5),
+    uncheckedBorderColor = Color.Transparent
+)
+
+@Composable
 private fun SmartSwitchRow(
     title: String,
     subtitle: String?,
     checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
+    onCheckedChange: (Boolean) -> Unit,
+    subtitleIsWarning: Boolean = false,
+    onSubtitleClick: (() -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable { onCheckedChange(!checked) }
             .padding(vertical = 10.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
@@ -1526,18 +1551,19 @@ private fun SmartSwitchRow(
             Text(text = title, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = ICostTextPrimary)
             if (!subtitle.isNullOrBlank()) {
                 Spacer(modifier = Modifier.height(2.dp))
-                Text(text = subtitle, fontSize = 12.sp, color = ICostTextSecondary)
+                Text(
+                    text = subtitle,
+                    fontSize = 12.sp,
+                    color = if (subtitleIsWarning) ICostAmberGold else ICostTextSecondary,
+                    fontWeight = if (subtitleIsWarning) FontWeight.Medium else FontWeight.Normal,
+                    modifier = if (onSubtitleClick != null) Modifier.clickable(onClick = onSubtitleClick) else Modifier
+                )
             }
         }
         Switch(
             checked = checked,
             onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.White,
-                checkedTrackColor = ICostBlueAccent,
-                uncheckedThumbColor = Color.White,
-                uncheckedTrackColor = Color(0xFFE0E0E5)
-            )
+            colors = iCostSwitchColors()
         )
     }
 }

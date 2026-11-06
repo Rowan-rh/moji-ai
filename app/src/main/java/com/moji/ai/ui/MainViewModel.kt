@@ -19,7 +19,10 @@ import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.service.CaptureObservabilityLogEntry
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -63,6 +66,14 @@ data class InstallmentPlanItem(
     val category: String = "数码"
 )
 
+/**
+ * 一次性的界面提示（Snackbar）。undoTransactionId 不为空时提供「撤销」按钮，撤销即删除该笔新建账单并回滚余额。
+ */
+data class UiMessage(
+    val text: String,
+    val undoTransactionId: Long? = null
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MoJiApp
     private val repository = app.repository
@@ -100,8 +111,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     )
     val hideAssetAmounts: StateFlow<Boolean> = _hideAssetAmounts.asStateFlow()
 
+    // 未设置预算时为 0，界面显示「未设置」而不是虚构一个默认金额
     private val _monthlyBudgetCents = MutableStateFlow(
-        uiPrefs.getLong("monthly_budget_cents", 300_000L) // 默认月预算 ¥3,000.00
+        uiPrefs.getLong("monthly_budget_cents", 0L)
     )
     val monthlyBudgetCents: StateFlow<Long> = _monthlyBudgetCents.asStateFlow()
 
@@ -112,6 +124,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val sandboxStatus: StateFlow<String?> = _sandboxStatus.asStateFlow()
 
     private val jsonCodec = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
+    private val _uiMessages = MutableSharedFlow<UiMessage>(extraBufferCapacity = 8)
+    val uiMessages: SharedFlow<UiMessage> = _uiMessages.asSharedFlow()
+
+    private fun postMessage(text: String, undoTransactionId: Long? = null) {
+        _uiMessages.tryEmit(UiMessage(text, undoTransactionId))
+    }
+
+    /** Snackbar「撤销」：删除刚刚一键生成的账单并回滚余额 */
+    fun undoCreatedTransaction(txId: Long) {
+        viewModelScope.launch {
+            repository.undoAndDeleteTransaction(txId)
+        }
+    }
 
     private val _isParsing = MutableStateFlow(false)
     val isParsing: StateFlow<Boolean> = _isParsing.asStateFlow()
@@ -130,12 +156,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!raw.isNullOrBlank()) {
             runCatching { return jsonCodec.decodeFromString<List<QuickBookkeepingTemplate>>(raw) }
         }
-        return listOf(
-            QuickBookkeepingTemplate(1L, "瑞幸冰美式", "EXPENSE", "餐饮-咖啡", 990L, "CNY", 5L, "瑞幸咖啡"),
-            QuickBookkeepingTemplate(2L, "通勤地铁", "EXPENSE", "交通-地铁", 400L, "CNY", 4L, "地铁出行"),
-            QuickBookkeepingTemplate(3L, "工作简餐", "EXPENSE", "餐饮-三餐", 2600L, "CNY", 5L, "工作日午餐"),
-            QuickBookkeepingTemplate(4L, "月度话费", "EXPENSE", "通讯", 5900L, "CNY", 4L, "手机话费充值")
-        )
+        return emptyList()
     }
 
     private fun loadSavedSavingPlans(): List<SavingPlanItem> {
@@ -143,11 +164,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!raw.isNullOrBlank()) {
             runCatching { return jsonCodec.decodeFromString<List<SavingPlanItem>>(raw) }
         }
-        return listOf(
-            SavingPlanItem(1L, "年度旅行基金", 1_500_000L, 680_000L, "2026-12-31"),
-            SavingPlanItem(2L, "应急备用金", 3_000_000L, 1_850_000L, "2027-06-30"),
-            SavingPlanItem(3L, "数码装备换新", 800_000L, 520_000L, "2026-11-30")
-        )
+        return emptyList()
     }
 
     private fun loadSavedInstallments(): List<InstallmentPlanItem> {
@@ -155,10 +172,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!raw.isNullOrBlank()) {
             runCatching { return jsonCodec.decodeFromString<List<InstallmentPlanItem>>(raw) }
         }
-        return listOf(
-            InstallmentPlanItem(1L, "MacBook Pro 12期免息", 1L, 1_499_900L, 0L, 12, 4, "数码-电脑"),
-            InstallmentPlanItem(2L, "年度健身私教卡 6期", 3L, 360_000L, 1200L, 6, 2, "运动")
-        )
+        return emptyList()
     }
 
     fun saveTemplateFromTransaction(tx: TransactionEntity) {
@@ -173,9 +187,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             walletId = tx.sourceWalletId ?: tx.targetWalletId,
             note = tx.merchant.ifBlank { tx.note }
         )
+        val duplicated = _templates.value.any {
+            it.title == newItem.title && it.category == newItem.category &&
+                it.amountCents == newItem.amountCents && it.typeName == newItem.typeName
+        }
+        if (duplicated) {
+            postMessage("已存在相同的模板")
+            return
+        }
         val updated = listOf(newItem) + _templates.value
         _templates.value = updated
         uiPrefs.edit().putString("saved_templates_json", jsonCodec.encodeToString(updated)).apply()
+        postMessage("已存为模板「${newItem.title}」，可在首页一键记账")
     }
 
     fun addCustomTemplate(title: String, category: String, amountYuan: Double, walletId: Long?) {
@@ -220,7 +243,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 targetWalletId = if (type == TransactionType.INCOME) tpl.walletId else null,
                 captureSource = "TEMPLATE"
             )
-            repository.recordTransaction(tx)
+            val newId = repository.recordTransaction(tx)
+            postMessage("已记一笔「${tpl.title}」", undoTransactionId = newId)
         }
     }
 
@@ -233,7 +257,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 timestamp = System.currentTimeMillis(),
                 captureSource = "MANUAL_COPY"
             )
-            repository.recordTransaction(copyTx)
+            val newId = repository.recordTransaction(copyTx)
+            postMessage("已复制一笔到今天", undoTransactionId = newId)
         }
     }
 
@@ -241,8 +266,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             if (!tx.reimbursable) {
                 repository.updateExistingTransaction(tx.copy(reimbursable = true))
+                postMessage("已标记为待报销")
             } else if (!tx.reimbursed) {
                 repository.settleReimbursement(tx.id, tx.sourceWalletId)
+                postMessage("报销已入账")
             }
         }
     }
@@ -268,6 +295,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         _savingPlans.value = updated
         uiPrefs.edit().putString("saved_saving_plans_json", jsonCodec.encodeToString(updated)).apply()
+        postMessage("已存入 ¥${String.format("%.2f", addCents / 100.0)}")
     }
 
     fun deleteSavingPlan(planId: Long) {
@@ -327,7 +355,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 tags = "分期",
                 captureSource = "INSTALLMENT"
             )
-            repository.recordTransaction(tx)
+            val newId = repository.recordTransaction(tx)
+            postMessage("已记入第 ${nextPeriod}/${plan.totalPeriods} 期还款", undoTransactionId = newId)
         }
     }
 
@@ -520,7 +549,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun deleteTransaction(txId: Long) {
         viewModelScope.launch {
-            repository.undoAndDeleteTransaction(txId)
+            if (repository.undoAndDeleteTransaction(txId)) {
+                postMessage("账单已删除，余额已回滚")
+            }
         }
     }
 
@@ -533,7 +564,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val cents = (refundYuan * 100.0).roundToLong()
             if (cents > 0L) {
-                repository.refundExpense(expenseId, cents, receiveWalletId, note)
+                val refundId = repository.refundExpense(expenseId, cents, receiveWalletId, note)
+                if (refundId != null) {
+                    postMessage("已退款 ¥${String.format("%.2f", cents / 100.0)}")
+                }
             }
         }
     }
@@ -541,6 +575,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun settleReimbursement(expenseId: Long, receiveWalletId: Long?) {
         viewModelScope.launch {
             repository.settleReimbursement(expenseId, receiveWalletId)
+            postMessage("报销已入账")
         }
     }
 
@@ -644,6 +679,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteWallet(wallet: WalletEntity) {
         viewModelScope.launch {
             repository.deleteWallet(wallet)
+            postMessage("已删除账户「${wallet.name}」")
         }
     }
 
@@ -703,12 +739,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val created = repository.processDueRecurringRules()
             val allWallets = repository.getAllWallets()
             created.forEach { app.notifier.sendSilentRecordedNotification(it, allWallets) }
+            val mine = created.firstOrNull { it.merchant == rule.title }
+            if (mine != null) {
+                postMessage("已记一笔「${rule.title}」", undoTransactionId = mine.id)
+            }
         }
     }
 
     fun deleteRecurringRule(rule: RecurringRuleEntity) {
         viewModelScope.launch {
             repository.deleteRecurringRule(rule)
+            postMessage("已删除周期账单「${rule.title}」")
         }
     }
 }
