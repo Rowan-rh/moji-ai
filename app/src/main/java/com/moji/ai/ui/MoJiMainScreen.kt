@@ -96,6 +96,16 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.Snackbar
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.ai.AiConfig
@@ -164,11 +174,29 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val observabilityLogs by viewModel.observabilityLogs.collectAsState()
     val webDavConfig by viewModel.webDavConfig.collectAsState()
 
-    var selectedTab by remember { mutableIntStateOf(0) } // 0: 账本, 1: 资产, 2: 统计
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) } // 0: 账本, 1: 资产, 2: 统计
+    // 每个 Tab 独立保存 rememberSaveable 状态（搜索词、折叠状态、统计周期等），切换 Tab 回来不丢失
+    val tabStateHolder = rememberSaveableStateHolder()
 
     val nowCal = remember { Calendar.getInstance() }
-    var selectedYear by remember { mutableIntStateOf(nowCal.get(Calendar.YEAR)) }
-    var selectedMonth by remember { mutableIntStateOf(nowCal.get(Calendar.MONTH) + 1) }
+    var selectedYear by rememberSaveable { mutableIntStateOf(nowCal.get(Calendar.YEAR)) }
+    var selectedMonth by rememberSaveable { mutableIntStateOf(nowCal.get(Calendar.MONTH) + 1) }
+
+    // 全局操作反馈：删除、一键记账、退款等完成后弹出 Snackbar，可撤销的操作附带「撤销」按钮
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(viewModel) {
+        viewModel.uiMessages.collect { msg ->
+            snackbarHostState.currentSnackbarData?.dismiss()
+            val result = snackbarHostState.showSnackbar(
+                message = msg.text,
+                actionLabel = if (msg.undoTransactionId != null) "撤销" else null,
+                duration = SnackbarDuration.Short
+            )
+            if (result == SnackbarResult.ActionPerformed) {
+                msg.undoTransactionId?.let { viewModel.undoCreatedTransaction(it) }
+            }
+        }
+    }
 
     // 记账计算器弹窗状态
     var showCalculatorSheet by remember { mutableStateOf(false) }
@@ -231,6 +259,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             },
             label = "MainTabTransition"
         ) { tabIndex ->
+            tabStateHolder.SaveableStateProvider(tabIndex) {
             when (tabIndex) {
                 0 -> ICostLedgerHomeScreen(
                     currentLedger = currentLedger,
@@ -308,6 +337,12 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onOpenSettingsPage = { showSettingsPage = true }
                 )
             }
+            }
+        }
+
+        // 非首页 Tab 按返回键先回到「账本」，而不是直接退出应用（二级页面与弹窗各自的返回处理优先级更高）
+        BackHandler(enabled = selectedTab != 0 && !hasFullScreenOverlay && !showCalculatorSheet) {
+            selectedTab = 0
         }
 
         // 1:1 iCost 底部半透明毛玻璃悬浮胶囊导航栏 + 右下角独立白色大圆 "+" 记账按钮（进出全屏二级页时平滑升降隐藏）
@@ -580,33 +615,65 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 )
             }
         }
+
+        // 全局 Snackbar：位于所有页面之上；底部导航可见时上移，避免遮挡「+」按钮
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(
+                    start = 16.dp,
+                    end = 16.dp,
+                    bottom = if (!hasFullScreenOverlay && !showCalculatorSheet) 84.dp else 16.dp
+                )
+        ) { data ->
+            Snackbar(
+                snackbarData = data,
+                shape = RoundedCornerShape(16.dp),
+                containerColor = Color(0xFF262628),
+                contentColor = Color.White,
+                actionColor = Color(0xFF6AA8FF)
+            )
+        }
     }
 
     if (showBudgetDialog) {
         var budgetInput by remember(monthlyBudgetCents) {
-            mutableStateOf(String.format("%.0f", monthlyBudgetCents / 100.0))
+            mutableStateOf(if (monthlyBudgetCents > 0) String.format("%.0f", monthlyBudgetCents / 100.0) else "")
         }
+        val parsedBudget = budgetInput.toDoubleOrNull()
+        val budgetError = budgetInput.isNotBlank() && (parsedBudget == null || parsedBudget < 0)
         AlertDialog(
             onDismissRequest = { showBudgetDialog = false },
             containerColor = ICostCardWhite,
-            title = { Text("设置月度预算", fontWeight = FontWeight.ExtraBold) },
+            title = { Text("月度预算", fontWeight = FontWeight.ExtraBold) },
             text = {
-                OutlinedTextField(
-                    value = budgetInput,
-                    onValueChange = { budgetInput = it },
-                    label = { Text("每月预算金额 (¥)") },
-                    singleLine = true
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedTextField(
+                        value = budgetInput,
+                        onValueChange = { input -> budgetInput = sanitizeAmountInput(input) },
+                        label = { Text("每月预算 (¥)") },
+                        placeholder = { Text("留空表示不设预算") },
+                        singleLine = true,
+                        isError = budgetError,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                    )
+                    if (budgetError) {
+                        Text("请输入有效金额", fontSize = 12.sp, color = ICostCoralRed)
+                    }
+                }
             },
             confirmButton = {
                 Button(
+                    enabled = !budgetError,
                     onClick = {
-                        budgetInput.toDoubleOrNull()?.let { viewModel.updateMonthlyBudgetYuan(it) }
+                        viewModel.updateMonthlyBudgetYuan(parsedBudget ?: 0.0)
                         showBudgetDialog = false
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent)
                 ) {
-                    Text("确定")
+                    Text("保存")
                 }
             },
             dismissButton = {
@@ -614,6 +681,31 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             }
         )
     }
+}
+
+/**
+ * 金额输入过滤：只保留数字与一个小数点，小数最多两位
+ */
+private fun sanitizeAmountInput(raw: String): String {
+    val sb = StringBuilder()
+    var dotSeen = false
+    var decimals = 0
+    for (c in raw) {
+        when {
+            c.isDigit() -> {
+                if (dotSeen) {
+                    if (decimals >= 2) continue
+                    decimals++
+                }
+                sb.append(c)
+            }
+            c == '.' && !dotSeen -> {
+                dotSeen = true
+                sb.append(c)
+            }
+        }
+    }
+    return sb.toString().take(12)
 }
 
 /**
@@ -637,8 +729,8 @@ private fun ICostFloatingBottomBar(
                 .height(58.dp)
                 .iCostHorizontalSwipeTrigger(
                     thresholdDp = 36.dp,
-                    onSwipeRight = { onSelectTab((selectedTab + 1) % 3) },
-                    onSwipeLeft = { onSelectTab((selectedTab + 2) % 3) }
+                    onSwipeRight = { if (selectedTab < 2) onSelectTab(selectedTab + 1) },
+                    onSwipeLeft = { if (selectedTab > 0) onSelectTab(selectedTab - 1) }
                 )
                 .shadow(
                     elevation = 10.dp,
@@ -729,7 +821,9 @@ private fun ICostFloatingBottomBar(
             ICostAssetImage(
                 assetFile = "tab_add.webp",
                 tint = ICostTextPrimary,
-                modifier = Modifier.size(22.dp)
+                modifier = Modifier
+                    .size(22.dp)
+                    .semantics { contentDescription = "记一笔" }
             )
         }
     }
@@ -1616,13 +1710,13 @@ private fun AiSandboxSheetContent(
     }
 
     val presetScenarios = listOf(
-        "盒马买菜 ¥32.80" to "【支付宝】付款成功：向商户【盒马】付款 32.80元，付款方式：账户余额",
-        "排除词分类: 美团外卖 ¥26.5" to "【微信支付】美团外卖 支付成功 26.50元，商品：隆江猪脚饭外卖，零钱支付",
-        "融合步骤1: 仅招行卡扣款 ¥88" to "【招商银行】您尾号3354的信用卡消费人民币88.00元",
-        "融合步骤2: 30s内补全山姆商户" to "【微信支付】向商户【山姆会员商店】付款88.00元",
-        "京东购物(招行信用卡)" to "【招商银行】您尾号3354的招商银行信用卡消费人民币69.00元，商户：京东商城",
-        "唐久零食退款 ¥5.00" to "【微信支付】退款入账通知：商户【唐久(环普产业园店)】已退回 5.00元 至您的账户余额",
-        "招行储蓄卡还信用卡" to "【招商银行】还款成功：您已使用招商银行储蓄卡(8848)成功偿还招商银行信用卡(3354)账单 500.00元"
+        "支付宝付款" to "【支付宝】付款成功：向商户【盒马】付款 32.80元，付款方式：账户余额",
+        "微信外卖" to "【微信支付】美团外卖 支付成功 26.50元，商品：隆江猪脚饭外卖，零钱支付",
+        "银行卡扣款" to "【招商银行】您尾号3354的信用卡消费人民币88.00元",
+        "补全商户" to "【微信支付】向商户【山姆会员商店】付款88.00元",
+        "信用卡消费" to "【招商银行】您尾号3354的招商银行信用卡消费人民币69.00元，商户：京东商城",
+        "退款" to "【微信支付】退款入账通知：商户【唐久(环普产业园店)】已退回 5.00元 至您的账户余额",
+        "信用卡还款" to "【招商银行】还款成功：您已使用招商银行储蓄卡(8848)成功偿还招商银行信用卡(3354)账单 500.00元"
     )
 
     LazyColumn(
@@ -1634,10 +1728,10 @@ private fun AiSandboxSheetContent(
         contentPadding = PaddingValues(bottom = 16.dp)
     ) {
         item {
-            Text("AI 静默识账测试沙盒", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = ICostTextPrimary)
+            Text("识账测试", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = ICostTextPrimary)
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                "支持测试：排除词加权分类（如美团外卖自动排除旅游/购物归入餐饮-三餐）、商户记忆优先匹配（已记住 ${merchantMemories.size} 个商户）、30 秒跨通道事后证据融合补全：",
+                "粘贴一条支付通知或账单文本，看看会被识别成什么。识别成功会真实记入当前账本，可在首页左滑删除。",
                 fontSize = 12.sp,
                 color = ICostTextSecondary
             )
@@ -1649,11 +1743,10 @@ private fun AiSandboxSheetContent(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 presetScenarios.forEach { (label, sampleText) ->
-                    AssistChip(
-                        onClick = {
-                            customInput = sampleText
-                            onRunSimulation(sampleText, "com.tencent.mm")
-                        },
+                    // 点击示例只填入文本，由用户确认后再识别，避免误触直接记账
+                    FilterChip(
+                        selected = customInput == sampleText,
+                        onClick = { customInput = sampleText },
                         label = { Text(label, fontSize = 12.sp) }
                     )
                 }
@@ -1664,7 +1757,7 @@ private fun AiSandboxSheetContent(
             OutlinedTextField(
                 value = customInput,
                 onValueChange = { customInput = it },
-                label = { Text("模拟通知栏 / 无障碍屏幕抓取文本") },
+                label = { Text("通知或账单文本") },
                 modifier = Modifier.fillMaxWidth(),
                 minLines = 3
             )
@@ -1674,7 +1767,7 @@ private fun AiSandboxSheetContent(
             Button(
                 onClick = { onRunSimulation(customInput, "com.tencent.mm") },
                 enabled = !isParsing && customInput.isNotBlank(),
-                colors = ButtonDefaults.buttonColors(containerColor = ICostCoralRed),
+                colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
                 shape = RoundedCornerShape(16.dp),
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1683,11 +1776,11 @@ private fun AiSandboxSheetContent(
                 if (isParsing) {
                     CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp, color = Color.White)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("AI 正在静默入账...")
+                    Text("正在识别…")
                 } else {
                     Icon(Icons.Default.AutoAwesome, contentDescription = null)
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("立即静默入账并推送通知提醒", fontWeight = FontWeight.Bold)
+                    Text("识别并记账", fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -1726,7 +1819,7 @@ private fun AiSandboxSheetContent(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "最近采集/融合可观测日志 (${observabilityLogs.size})",
+                                text = "最近识别记录 (${observabilityLogs.size})",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = ICostTextPrimary
@@ -1740,7 +1833,7 @@ private fun AiSandboxSheetContent(
                         }
                         observabilityLogs.take(4).forEach { log ->
                             Text(
-                                text = "• [${log.outcome.badgeLabel}] ${log.detailSummary}",
+                                text = "${log.outcome.badgeLabel} · ${log.detailSummary}",
                                 fontSize = 11.sp,
                                 color = ICostTextSecondary
                             )
@@ -1765,10 +1858,13 @@ private fun AiAndPermissionsSheetContent(
     var enableAccessibility by remember(config) { mutableStateOf(config.enableAccessibilityCapture) }
     var enableNotification by remember(config) { mutableStateOf(config.enableNotificationCapture) }
     var enableFallback by remember(config) { mutableStateOf(config.enableHeuristicFallback) }
-    var savedBanner by remember { mutableStateOf(false) }
+    var showApiKey by remember { mutableStateOf(false) }
+    val hasUnsavedChanges = provider != config.provider || baseUrl != config.baseUrl ||
+        apiKey != config.apiKey || modelName != config.modelName || enableFallback != config.enableHeuristicFallback
 
-    val isNotifGranted = isNotificationListenerEnabled(context)
-    val isAccessGranted = isAccessibilityServiceEnabled(context)
+    val resumeTick = rememberResumeTick()
+    val isNotifGranted = remember(resumeTick) { isNotificationListenerEnabled(context) }
+    val isAccessGranted = remember(resumeTick) { isAccessibilityServiceEnabled(context) }
 
     LazyColumn(
         modifier = Modifier
@@ -1779,7 +1875,13 @@ private fun AiAndPermissionsSheetContent(
         contentPadding = PaddingValues(bottom = 24.dp)
     ) {
         item {
-            Text("AI 自动识账与权限中心", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
+            Text("大模型与权限", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold)
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "不填 API Key 也能用：会使用内置的本地识别引擎。",
+                fontSize = 12.sp,
+                color = ICostTextSecondary
+            )
         }
 
         item {
@@ -1798,7 +1900,7 @@ private fun AiAndPermissionsSheetContent(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("通知栏静默识账权限", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("通知使用权", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         }
                         OutlinedButton(onClick = {
                             context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
@@ -1820,7 +1922,7 @@ private fun AiAndPermissionsSheetContent(
                                 modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("无障碍支付页识账权限", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text("无障碍权限", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         }
                         OutlinedButton(onClick = {
                             context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
@@ -1850,15 +1952,17 @@ private fun AiAndPermissionsSheetContent(
             OutlinedTextField(
                 value = baseUrl,
                 onValueChange = { baseUrl = it },
-                label = { Text("API Base URL") },
+                label = { Text("接口地址") },
                 modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                 singleLine = true
             )
             Spacer(modifier = Modifier.height(6.dp))
             OutlinedTextField(
                 value = modelName,
                 onValueChange = { modelName = it },
-                label = { Text("模型名称 (如 deepseek-chat / gemini-2.5-flash)") },
+                label = { Text("模型名称") },
+                placeholder = { Text("如 deepseek-chat / gemini-2.5-flash") },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true
             )
@@ -1866,9 +1970,16 @@ private fun AiAndPermissionsSheetContent(
             OutlinedTextField(
                 value = apiKey,
                 onValueChange = { apiKey = it },
-                label = { Text("API Key (留空则使用内置本地语义引擎)") },
+                label = { Text("API Key（选填）") },
                 modifier = Modifier.fillMaxWidth(),
-                singleLine = true
+                singleLine = true,
+                visualTransformation = if (showApiKey) VisualTransformation.None else PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                trailingIcon = {
+                    TextButton(onClick = { showApiKey = !showApiKey }) {
+                        Text(if (showApiKey) "隐藏" else "显示", fontSize = 12.sp)
+                    }
+                }
             )
         }
 
@@ -1878,8 +1989,11 @@ private fun AiAndPermissionsSheetContent(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("断网或未填 Key 时启用本地语义引擎", fontSize = 14.sp)
-                Switch(checked = enableFallback, onCheckedChange = { enableFallback = it })
+                Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                    Text("本地引擎兜底", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text("断网或接口出错时改用本地识别", fontSize = 12.sp, color = ICostTextSecondary)
+                }
+                Switch(checked = enableFallback, onCheckedChange = { enableFallback = it }, colors = iCostSwitchColors())
             }
         }
 
@@ -1897,19 +2011,15 @@ private fun AiAndPermissionsSheetContent(
                             enableHeuristicFallback = enableFallback
                         )
                     )
-                    savedBanner = true
                 },
+                enabled = hasUnsavedChanges,
                 colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
                 shape = RoundedCornerShape(16.dp),
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(48.dp)
             ) {
-                Text("保存配置", fontWeight = FontWeight.Bold)
-            }
-            if (savedBanner) {
-                Spacer(modifier = Modifier.height(4.dp))
-                Text("✅ 已保存生效！", color = ICostGreenIncome, fontSize = 13.sp)
+                Text(if (hasUnsavedChanges) "保存" else "已保存", fontWeight = FontWeight.Bold)
             }
         }
     }
@@ -1948,7 +2058,11 @@ private fun BackupAndCsvTransferSheet(
 ) {
     val context = LocalContext.current
     var currentTab by remember(initialTab) { mutableIntStateOf(initialTab) }
-    var csvText by remember { mutableStateOf(BackupAndCsvTransferEngine.SAMPLE_WECHAT_CSV) }
+    // 默认留空：之前预填的是示例账单，用户直接点「导入」会把假数据写进账本
+    var csvText by remember { mutableStateOf("") }
+    var showDavPassword by remember { mutableStateOf(false) }
+    // 恢复会覆盖现有数据，先二次确认：0 = 无，1 = 从快照恢复，2 = 从 WebDAV 恢复
+    var pendingRestoreKind by remember { mutableIntStateOf(0) }
     var previewResult by remember { mutableStateOf<CsvParsePreviewResult?>(null) }
     var applyImportToWalletBalance by remember { mutableStateOf(true) }
     var exportedCsvText by remember { mutableStateOf("") }
@@ -1974,7 +2088,7 @@ private fun BackupAndCsvTransferSheet(
     ) {
         item {
             Text(
-                text = "账单迁移、全量备份与 WebDAV 云同步",
+                text = "导入、导出与备份",
                 fontSize = 20.sp,
                 fontWeight = FontWeight.ExtraBold,
                 color = ICostTextPrimary
@@ -1987,8 +2101,8 @@ private fun BackupAndCsvTransferSheet(
                 val tabs = listOf(
                     0 to "导入 CSV",
                     1 to "导出 CSV",
-                    2 to "全量快照 (.mojibackup)",
-                    3 to "WebDAV 云同步"
+                    2 to "备份快照",
+                    3 to "WebDAV 同步"
                 )
                 tabs.forEach { (idx, title) ->
                     FilterChip(
@@ -2006,7 +2120,7 @@ private fun BackupAndCsvTransferSheet(
         if (currentTab == 0) {
             item {
                 Text(
-                    text = "自动识别「微信支付官方账单 CSV」「支付宝官方账单 CSV」「钱迹 / iCost 导出 CSV」，支持导入前预览、商户记忆匹配与重复流水自动跳过：",
+                    text = "支持微信、支付宝官方账单和钱迹 / iCost 导出的 CSV。先预览再导入，重复的账单会自动跳过。",
                     fontSize = 12.sp,
                     color = ICostTextSecondary
                 )
@@ -2015,27 +2129,6 @@ private fun BackupAndCsvTransferSheet(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    AssistChip(
-                        onClick = {
-                            csvText = BackupAndCsvTransferEngine.SAMPLE_WECHAT_CSV
-                            previewResult = onPreviewCsv(csvText)
-                        },
-                        label = { Text("载入微信账单样例", fontSize = 12.sp) }
-                    )
-                    AssistChip(
-                        onClick = {
-                            csvText = BackupAndCsvTransferEngine.SAMPLE_ALIPAY_CSV
-                            previewResult = onPreviewCsv(csvText)
-                        },
-                        label = { Text("载入支付宝账单样例", fontSize = 12.sp) }
-                    )
-                    AssistChip(
-                        onClick = {
-                            csvText = BackupAndCsvTransferEngine.SAMPLE_QIANJI_CSV
-                            previewResult = onPreviewCsv(csvText)
-                        },
-                        label = { Text("载入钱迹/iCost样例", fontSize = 12.sp) }
-                    )
                     AssistChip(
                         onClick = {
                             val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
@@ -2047,7 +2140,15 @@ private fun BackupAndCsvTransferSheet(
                                 localBanner = "剪贴板为空"
                             }
                         },
-                        label = { Text("从剪贴板粘贴 CSV", fontSize = 12.sp) }
+                        label = { Text("从剪贴板粘贴", fontSize = 12.sp) }
+                    )
+                    AssistChip(
+                        onClick = {
+                            csvText = BackupAndCsvTransferEngine.SAMPLE_WECHAT_CSV
+                            previewResult = onPreviewCsv(csvText)
+                            localBanner = "已填入示例，仅供查看格式，请勿直接导入"
+                        },
+                        label = { Text("查看示例格式", fontSize = 12.sp) }
                     )
                 }
             }
@@ -2059,7 +2160,8 @@ private fun BackupAndCsvTransferSheet(
                         csvText = it
                         previewResult = null
                     },
-                    label = { Text("微信 / 支付宝 / 钱迹 / iCost CSV 文本内容") },
+                    label = { Text("CSV 内容") },
+                    placeholder = { Text("把导出的 CSV 文本粘贴到这里") },
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 4,
                     maxLines = 7
@@ -2072,10 +2174,16 @@ private fun BackupAndCsvTransferSheet(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("导入流水时同步增减对应账户余额", fontSize = 13.sp, color = ICostTextPrimary)
+                    Text(
+                        "导入时同步调整账户余额",
+                        fontSize = 13.sp,
+                        color = ICostTextPrimary,
+                        modifier = Modifier.weight(1f)
+                    )
                     Switch(
                         checked = applyImportToWalletBalance,
-                        onCheckedChange = { applyImportToWalletBalance = it }
+                        onCheckedChange = { applyImportToWalletBalance = it },
+                        colors = iCostSwitchColors()
                     )
                 }
             }
@@ -2087,12 +2195,13 @@ private fun BackupAndCsvTransferSheet(
                 ) {
                     OutlinedButton(
                         onClick = { previewResult = onPreviewCsv(csvText) },
+                        enabled = csvText.isNotBlank(),
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .weight(1f)
                             .height(46.dp)
                     ) {
-                        Text("1. 解析预览", fontWeight = FontWeight.Bold)
+                        Text("预览", fontWeight = FontWeight.Bold)
                     }
                     Button(
                         onClick = {
@@ -2100,13 +2209,18 @@ private fun BackupAndCsvTransferSheet(
                                 localBanner = msg
                             }
                         },
+                        // 先预览、确认识别结果后才能导入
+                        enabled = previewResult?.parsedTransactions?.isNotEmpty() == true,
                         colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .weight(1f)
                             .height(46.dp)
                     ) {
-                        Text("2. 确认导入并防重入账", fontWeight = FontWeight.Bold)
+                        Text(
+                            previewResult?.parsedTransactions?.size?.takeIf { it > 0 }?.let { "导入 $it 笔" } ?: "导入",
+                            fontWeight = FontWeight.Bold
+                        )
                     }
                 }
             }
@@ -2123,14 +2237,15 @@ private fun BackupAndCsvTransferSheet(
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Text(
-                                text = "解析结果：识别为【${preview.detectedSourceFormat}】，共 ${preview.parsedTransactions.size} 条有效账单（忽略噪声行 ${preview.skippedNonFinancialRows} 条）",
+                                text = "识别为「${preview.detectedSourceFormat}」，共 ${preview.parsedTransactions.size} 笔账单" +
+                                    if (preview.skippedNonFinancialRows > 0) "，跳过 ${preview.skippedNonFinancialRows} 行无关内容" else "",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = ICostBlueAccent
                             )
                             preview.parsedTransactions.take(5).forEach { tx ->
                                 Text(
-                                    text = "• [${tx.type.displayName}] ${tx.category} · ${tx.merchant} · ${formatMoneyCents(tx.amountCnyCents, tx.currency)}",
+                                    text = "${tx.type.displayName} · ${tx.category} · ${tx.merchant} · ${formatMoneyCents(tx.amountCnyCents, tx.currency)}",
                                     fontSize = 12.sp,
                                     color = ICostTextPrimary
                                 )
@@ -2142,7 +2257,7 @@ private fun BackupAndCsvTransferSheet(
         } else if (currentTab == 1) {
             item {
                 Text(
-                    text = "将当前所有账单导出为兼容 iCost / 钱迹 / Excel 的标准 UTF-8 CSV 表格文本：",
+                    text = "导出全部账单为 CSV，可用 Excel、钱迹或 iCost 打开。",
                     fontSize = 12.sp,
                     color = ICostTextSecondary
                 )
@@ -2163,13 +2278,13 @@ private fun BackupAndCsvTransferSheet(
                             .weight(1f)
                             .height(46.dp)
                     ) {
-                        Text("生成 CSV 导出报表", fontWeight = FontWeight.Bold)
+                        Text("生成 CSV", fontWeight = FontWeight.Bold)
                     }
                     OutlinedButton(
                         onClick = {
                             if (exportedCsvText.isNotBlank()) {
                                 clipboard?.setPrimaryClip(ClipData.newPlainText("MoJi_CSV", exportedCsvText))
-                                localBanner = "✅ 已复制 CSV 到系统剪贴板"
+                                localBanner = "已复制到剪贴板"
                             }
                         },
                         enabled = exportedCsvText.isNotBlank(),
@@ -2178,7 +2293,7 @@ private fun BackupAndCsvTransferSheet(
                             .weight(1f)
                             .height(46.dp)
                     ) {
-                        Text("复制 CSV 到剪贴板", fontWeight = FontWeight.Bold)
+                        Text("复制", fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -2187,8 +2302,9 @@ private fun BackupAndCsvTransferSheet(
                 item {
                     OutlinedTextField(
                         value = exportedCsvText,
-                        onValueChange = { exportedCsvText = it },
-                        label = { Text("导出的标准 CSV 内容预览") },
+                        onValueChange = {},
+                        label = { Text("CSV 预览") },
+                        readOnly = true,
                         modifier = Modifier.fillMaxWidth(),
                         minLines = 5,
                         maxLines = 9
@@ -2198,7 +2314,7 @@ private fun BackupAndCsvTransferSheet(
         } else if (currentTab == 2) {
             item {
                 Text(
-                    text = "全量备份包含：资产/负债钱包、全部历史账单、周期记账规则、商户记忆自学习库、多账本与预算设置（内置 BackupSchemaGuard 版本防崩保护）：",
+                    text = "备份包含账户、全部账单、周期账单、商户记忆、账本与预算。生成后会复制到剪贴板，请保存到安全的地方。",
                     fontSize = 12.sp,
                     color = ICostTextSecondary
                 )
@@ -2212,7 +2328,7 @@ private fun BackupAndCsvTransferSheet(
                             val json = onExportFullBackup()
                             backupJsonText = json
                             clipboard?.setPrimaryClip(ClipData.newPlainText("MoJi_Backup", json))
-                            localBanner = "✅ 已生成全量备份快照并复制到剪贴板"
+                            localBanner = "备份已生成并复制到剪贴板"
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
                         shape = RoundedCornerShape(14.dp),
@@ -2220,14 +2336,16 @@ private fun BackupAndCsvTransferSheet(
                             .weight(1f)
                             .height(46.dp)
                     ) {
-                        Text("生成全量备份 JSON", fontWeight = FontWeight.Bold)
+                        Text("生成备份", fontWeight = FontWeight.Bold)
                     }
                     OutlinedButton(
                         onClick = {
                             val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
                             if (!clipText.isNullOrBlank()) {
                                 backupJsonText = clipText
-                                localBanner = "已从剪贴板载入备份 JSON"
+                                localBanner = "已从剪贴板载入备份"
+                            } else {
+                                localBanner = "剪贴板为空"
                             }
                         },
                         shape = RoundedCornerShape(14.dp),
@@ -2235,7 +2353,7 @@ private fun BackupAndCsvTransferSheet(
                             .weight(1f)
                             .height(46.dp)
                     ) {
-                        Text("从剪贴板粘贴备份", fontWeight = FontWeight.Bold)
+                        Text("粘贴备份", fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -2244,7 +2362,7 @@ private fun BackupAndCsvTransferSheet(
                 OutlinedTextField(
                     value = backupJsonText,
                     onValueChange = { backupJsonText = it },
-                    label = { Text(".mojibackup 全量 JSON 快照内容") },
+                    label = { Text("备份内容") },
                     modifier = Modifier.fillMaxWidth(),
                     minLines = 5,
                     maxLines = 8
@@ -2254,9 +2372,7 @@ private fun BackupAndCsvTransferSheet(
             item {
                 Button(
                     onClick = {
-                        onRestoreFullBackup(backupJsonText) { msg ->
-                            localBanner = msg
-                        }
+                        pendingRestoreKind = 1
                     },
                     enabled = backupJsonText.isNotBlank(),
                     colors = ButtonDefaults.buttonColors(containerColor = ICostCoralRed),
@@ -2265,13 +2381,13 @@ private fun BackupAndCsvTransferSheet(
                         .fillMaxWidth()
                         .height(46.dp)
                 ) {
-                    Text("立即从 JSON 快照恢复全量数据", fontWeight = FontWeight.Bold)
+                    Text("从备份恢复", fontWeight = FontWeight.Bold)
                 }
             }
         } else {
             item {
                 Text(
-                    text = "支持坚果云 (https://dav.jianguoyun.com/dav/MoJi/)、Nextcloud、群晖 Synology、Alist 等任意标准 WebDAV 服务自托管云端备份：",
+                    text = "支持坚果云、Nextcloud、群晖、Alist 等标准 WebDAV 服务。坚果云地址示例：https://dav.jianguoyun.com/dav/MoJi/",
                     fontSize = 12.sp,
                     color = ICostTextSecondary
                 )
@@ -2280,15 +2396,16 @@ private fun BackupAndCsvTransferSheet(
                 OutlinedTextField(
                     value = davUrl,
                     onValueChange = { davUrl = it },
-                    label = { Text("WebDAV 目录地址 (URL)") },
+                    label = { Text("服务器地址") },
                     modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                     singleLine = true
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 OutlinedTextField(
                     value = davUser,
                     onValueChange = { davUser = it },
-                    label = { Text("WebDAV 账号 / 邮箱") },
+                    label = { Text("账号") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
@@ -2296,15 +2413,22 @@ private fun BackupAndCsvTransferSheet(
                 OutlinedTextField(
                     value = davPassword,
                     onValueChange = { davPassword = it },
-                    label = { Text("WebDAV 应用专用密码") },
+                    label = { Text("应用密码") },
                     modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
+                    singleLine = true,
+                    visualTransformation = if (showDavPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                    trailingIcon = {
+                        TextButton(onClick = { showDavPassword = !showDavPassword }) {
+                            Text(if (showDavPassword) "隐藏" else "显示", fontSize = 12.sp)
+                        }
+                    }
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 OutlinedTextField(
                     value = davFileName,
                     onValueChange = { davFileName = it },
-                    label = { Text("远端备份文件名") },
+                    label = { Text("备份文件名") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
@@ -2321,9 +2445,11 @@ private fun BackupAndCsvTransferSheet(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    val davReady = davUrl.isNotBlank() && davUser.isNotBlank() && davPassword.isNotBlank()
                     Button(
+                        enabled = davReady,
                         onClick = {
-                            localBanner = "正在上传全量备份至 WebDAV..."
+                            localBanner = "正在上传…"
                             onUploadWebDav(activeCfg) { msg -> localBanner = msg }
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
@@ -2332,19 +2458,19 @@ private fun BackupAndCsvTransferSheet(
                             .weight(1f)
                             .height(46.dp)
                     ) {
-                        Text("上传备份至云端", fontWeight = FontWeight.Bold)
+                        Text("上传备份", fontWeight = FontWeight.Bold)
                     }
                     OutlinedButton(
                         onClick = {
-                            localBanner = "正在从 WebDAV 拉取并恢复备份..."
-                            onRestoreWebDav(activeCfg) { msg -> localBanner = msg }
+                            pendingRestoreKind = 2
                         },
+                        enabled = davReady,
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier
                             .weight(1f)
                             .height(46.dp)
                     ) {
-                        Text("从云端下载恢复", fontWeight = FontWeight.Bold)
+                        Text("从云端恢复", fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -2368,6 +2494,43 @@ private fun BackupAndCsvTransferSheet(
             }
         }
     }
+
+    if (pendingRestoreKind != 0) {
+        val fromCloud = pendingRestoreKind == 2
+        AlertDialog(
+            onDismissRequest = { pendingRestoreKind = 0 },
+            containerColor = ICostCardWhite,
+            title = { Text("覆盖现有数据？", fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Text(
+                    if (fromCloud) "将从云端下载备份并恢复，当前设备上的账户和账单会被备份内容替换。"
+                    else "当前设备上的账户和账单会被备份内容替换。建议先生成一份当前数据的备份。"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingRestoreKind = 0
+                    if (fromCloud) {
+                        localBanner = "正在从云端恢复…"
+                        onRestoreWebDav(
+                            WebDavConfig(
+                                serverUrl = davUrl.trim(),
+                                username = davUser.trim(),
+                                appPassword = davPassword.trim(),
+                                remoteFileName = davFileName.trim().ifBlank { "moji_latest.mojibackup" },
+                                lastSyncTimeMillis = webDavConfig.lastSyncTimeMillis
+                            )
+                        ) { msg -> localBanner = msg }
+                    } else {
+                        onRestoreFullBackup(backupJsonText) { msg -> localBanner = msg }
+                    }
+                }) { Text("恢复", color = ICostCoralRed, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRestoreKind = 0 }) { Text("取消") }
+            }
+        )
+    }
 }
 
 /**
@@ -2377,7 +2540,9 @@ private fun BackupAndCsvTransferSheet(
 private fun RomKeepAliveGuideSheet() {
     val context = LocalContext.current
     var refreshTick by remember { mutableIntStateOf(0) }
-    val diag = remember(refreshTick) { RomKeepAliveGuideHelper.inspectCurrentDevice(context) }
+    // 从系统设置页返回时自动重新检测
+    val resumeTick = rememberResumeTick()
+    val diag = remember(refreshTick, resumeTick) { RomKeepAliveGuideHelper.inspectCurrentDevice(context) }
     var actionFeedback by remember { mutableStateOf<String?>(null) }
 
     LazyColumn(
@@ -2390,17 +2555,16 @@ private fun RomKeepAliveGuideSheet() {
     ) {
         item {
             Text(
-                text = "后台保活与受限设置诊断 (${diag.passedCount}/${diag.totalCoreChecks})",
+                text = "后台保活诊断 · ${diag.passedCount}/${diag.totalCoreChecks} 项通过",
                 fontSize = 20.sp,
                 fontWeight = FontWeight.ExtraBold,
                 color = ICostTextPrimary
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "当前设备：${diag.romDisplayName} · 型号 ${diag.model} (Android SDK ${diag.sdkInt})",
+                text = "${diag.romDisplayName} · ${diag.model} · Android SDK ${diag.sdkInt}",
                 fontSize = 12.sp,
-                color = ICostBlueAccent,
-                fontWeight = FontWeight.Bold
+                color = ICostTextSecondary
             )
         }
 
@@ -2415,17 +2579,17 @@ private fun RomKeepAliveGuideSheet() {
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = if (diag.isNotificationListenerEnabled) "✅ 通知监听服务已开启" else "⚠️ 通知监听服务未开启",
+                                text = if (diag.isNotificationListenerEnabled) "通知使用权已开启" else "通知使用权未开启",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = if (diag.isNotificationListenerEnabled) ICostGreenIncome else ICostAmberGold
                             )
-                            Text("若通知监听被系统断连，可点击右侧「重连服务」", fontSize = 11.sp, color = ICostTextSecondary)
+                            Text("通知不再被识别时，可尝试重连", fontSize = 12.sp, color = ICostTextSecondary)
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             OutlinedButton(onClick = {
                                 val ok = RomKeepAliveGuideHelper.requestNotificationListenerRebind(context)
-                                actionFeedback = if (ok) "✅ 已向系统发起 NotificationListener 重新绑定请求" else "⚠️ 请先开启通知使用权"
+                                actionFeedback = if (ok) "已请求系统重新连接通知服务" else "请先开启通知使用权"
                                 refreshTick++
                             }) {
                                 Text("重连服务", fontSize = 11.sp)
@@ -2451,12 +2615,12 @@ private fun RomKeepAliveGuideSheet() {
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = if (diag.isAccessibilityEnabled) "✅ 无障碍支付页监听已开启" else "⚠️ 无障碍支付页监听未开启",
+                                text = if (diag.isAccessibilityEnabled) "无障碍权限已开启" else "无障碍权限未开启",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = if (diag.isAccessibilityEnabled) ICostGreenIncome else ICostAmberGold
                             )
-                            Text("Android 13+ 侧载安装需先在「应用详情 ➔ ⋮」允许受限设置", fontSize = 11.sp, color = ICostTextSecondary)
+                            Text("无法开启时，先到「应用详情 › 右上角菜单」允许受限设置", fontSize = 12.sp, color = ICostTextSecondary)
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             OutlinedButton(onClick = {
@@ -2483,18 +2647,18 @@ private fun RomKeepAliveGuideSheet() {
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = if (diag.isIgnoringBatteryOptimizations) "✅ 已加入电池后台白名单" else "⚠️ 尚未忽略后台电池优化",
+                                text = if (diag.isIgnoringBatteryOptimizations) "已允许后台运行" else "未关闭电池优化",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = if (diag.isIgnoringBatteryOptimizations) ICostGreenIncome else ICostAmberGold
                             )
-                            Text("防止锁屏后微信/银行通知延迟入账", fontSize = 11.sp, color = ICostTextSecondary)
+                            Text("避免锁屏后漏记或延迟入账", fontSize = 12.sp, color = ICostTextSecondary)
                         }
                         OutlinedButton(onClick = {
                             RomKeepAliveGuideHelper.openBatteryOptimizationSettings(context)
                             refreshTick++
                         }) {
-                            Text(if (diag.isIgnoringBatteryOptimizations) "已白名单" else "去设置", fontSize = 11.sp)
+                            Text(if (diag.isIgnoringBatteryOptimizations) "已允许" else "去设置", fontSize = 12.sp)
                         }
                     }
                 }
@@ -2505,7 +2669,7 @@ private fun RomKeepAliveGuideSheet() {
             Surface(color = ICostBgGray, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text(
-                        text = "${diag.romDisplayName} 专属防杀后台操作步骤：",
+                        text = "${diag.romDisplayName} 设置步骤",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
                         color = ICostTextPrimary
@@ -2519,7 +2683,7 @@ private fun RomKeepAliveGuideSheet() {
 
         if (!actionFeedback.isNullOrBlank()) {
             item {
-                Text(text = actionFeedback!!, fontSize = 12.sp, color = ICostGreenIncome, fontWeight = FontWeight.Bold)
+                Text(text = actionFeedback!!, fontSize = 12.sp, color = ICostTextSecondary)
             }
         }
     }
@@ -2565,22 +2729,22 @@ private fun BatchReimbursementSheet(
     ) {
         item {
             Text(
-                text = "批量报销核销中心",
+                text = "批量报销",
                 fontSize = 20.sp,
                 fontWeight = FontWeight.ExtraBold,
                 color = ICostTextPrimary
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "当前共有 ${pendingList.size} 笔待报销账单，已勾选 ${selectedIds.size} 笔 · 合计待入账 ${formatMoneyCents(selectedTotalCents)}：",
+                text = if (pendingList.isEmpty()) "没有待报销的账单" else "共 ${pendingList.size} 笔待报销，已选 ${selectedIds.size} 笔，合计 ${formatMoneyCents(selectedTotalCents)}",
                 fontSize = 13.sp,
                 color = ICostTextSecondary
             )
         }
 
-        if (assetWallets.isNotEmpty()) {
+        if (assetWallets.isNotEmpty() && pendingList.isNotEmpty()) {
             item {
-                Text("选择报销款入账账户：", fontSize = 12.sp, color = ICostTextSecondary)
+                Text("报销款存入", fontSize = 12.sp, color = ICostTextSecondary)
                 Spacer(modifier = Modifier.height(6.dp))
                 FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -2601,7 +2765,7 @@ private fun BatchReimbursementSheet(
             item {
                 Surface(color = ICostBgGray, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        text = "🎉 当前所有待报销账单均已结清！可在记账面板或通知栏快捷按钮中将差旅/垫付账单标为「待报销」。",
+                        text = "记账时打开「待报销」，或在首页左滑账单点「报销」，账单就会出现在这里。",
                         fontSize = 13.sp,
                         color = ICostTextSecondary,
                         modifier = Modifier.padding(16.dp)
@@ -2611,7 +2775,27 @@ private fun BatchReimbursementSheet(
         } else {
             item {
                 Surface(color = ICostBgGray, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth()) {
-                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Column(modifier = Modifier.padding(vertical = 6.dp)) {
+                        if (pendingList.size > 1) {
+                            val allSelected = selectedIds.size == pendingList.size
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        selectedIds = if (allSelected) emptySet() else pendingList.map { it.id }.toSet()
+                                    }
+                                    .padding(horizontal = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Checkbox(
+                                    checked = allSelected,
+                                    onCheckedChange = null,
+                                    colors = CheckboxDefaults.colors(checkedColor = ICostBlueAccent)
+                                )
+                                Text("全选", fontSize = 14.sp, color = ICostTextPrimary)
+                            }
+                            HorizontalDivider(color = ICostDivider, modifier = Modifier.padding(horizontal = 12.dp))
+                        }
                         pendingList.forEach { tx ->
                             val isChecked = tx.id in selectedIds
                             val netCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
@@ -2621,13 +2805,18 @@ private fun BatchReimbursementSheet(
                                     .clickable {
                                         selectedIds = if (isChecked) selectedIds - tx.id else selectedIds + tx.id
                                     }
-                                    .padding(vertical = 6.dp),
+                                    .padding(start = 6.dp, end = 14.dp, top = 2.dp, bottom = 2.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
+                                Checkbox(
+                                    checked = isChecked,
+                                    onCheckedChange = null,
+                                    colors = CheckboxDefaults.colors(checkedColor = ICostBlueAccent)
+                                )
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text(
-                                        text = "${if (isChecked) "☑️" else "⬜"} ${tx.category} · ${tx.merchant.ifBlank { "日常消费" }}",
+                                        text = "${tx.category} · ${tx.merchant.ifBlank { "日常消费" }}",
                                         fontSize = 14.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = ICostTextPrimary
@@ -2664,7 +2853,7 @@ private fun BatchReimbursementSheet(
                         .height(48.dp)
                 ) {
                     Text(
-                        text = "一键批量报销入账 (${selectedIds.size} 笔 · ${formatMoneyCents(selectedTotalCents)})",
+                        text = if (selectedIds.isEmpty()) "请选择账单" else "确认报销 ${selectedIds.size} 笔 · ${formatMoneyCents(selectedTotalCents)}",
                         fontWeight = FontWeight.Bold
                     )
                 }

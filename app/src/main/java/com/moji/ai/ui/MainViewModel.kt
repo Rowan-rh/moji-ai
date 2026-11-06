@@ -411,7 +411,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (rawText.isBlank()) return
         viewModelScope.launch {
             _isParsing.value = true
-            _sandboxStatus.value = "正在通过 AI 引擎解析语义并联动账户..."
+            _sandboxStatus.value = "正在识别…"
             try {
                 val tx = app.captureCoordinator.processImmediateText(
                     rawText = rawText,
@@ -420,12 +420,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 if (tx != null) {
                     val sym = CurrencyCode.fromCode(tx.currency).symbol
-                    _sandboxStatus.value = "✅ 静默入账成功：[${tx.type.displayName}] ${tx.category} $sym${String.format("%.2f", tx.amountCents / 100.0)} (${tx.merchant})，已同步更新资产余额并推送系统通知！"
+                    _sandboxStatus.value = "已记账：${tx.type.displayName} · ${tx.category} · $sym${String.format("%.2f", tx.amountCents / 100.0)}（${tx.merchant}）"
                 } else {
-                    _sandboxStatus.value = "⚠️ AI 判定该文本不包含有效资金变动（已忽略）"
+                    _sandboxStatus.value = "没有识别到收支信息，未记账"
                 }
             } catch (e: Exception) {
-                _sandboxStatus.value = "❌ 解析异常: ${e.message}"
+                _sandboxStatus.value = "识别失败：${e.message}"
             } finally {
                 _isParsing.value = false
             }
@@ -511,14 +511,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val preview = previewCsvImport(rawCsv)
             if (preview.parsedTransactions.isEmpty()) {
-                onResult("⚠️ 未识别到可导入的有效账单记录（格式：${preview.detectedSourceFormat}）")
+                onResult("没有识别到可导入的账单（格式：${preview.detectedSourceFormat}）")
                 return@launch
             }
             val importedCount = repository.importExternalTransactions(
                 candidates = preview.parsedTransactions,
                 applyToWalletBalance = applyToWalletBalance
             )
-            onResult("✅ 已从【${preview.detectedSourceFormat}】导入 $importedCount 笔账单（自动去重跳过 ${preview.parsedTransactions.size - importedCount} 笔，忽略非金融行 ${preview.skippedNonFinancialRows} 行）")
+            onResult("已导入 $importedCount 笔账单" + (preview.parsedTransactions.size - importedCount).let { if (it > 0) "，跳过 $it 笔重复账单" else "" })
         }
     }
 
@@ -529,7 +529,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val parsed = BackupAndCsvTransferEngine.parseFullBackupJson(rawJson)
             if (parsed == null) {
-                onResult("❌ 备份 JSON 格式无效或已损坏，无法恢复")
+                onResult("备份内容无效或已损坏，无法恢复")
                 return@launch
             }
             val (backupWallets, backupTxs, snapshot) = parsed
@@ -543,7 +543,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _monthlyBudgetCents.value = snapshot.monthlyBudgetCents
                 uiPrefs.edit().putLong("monthly_budget_cents", snapshot.monthlyBudgetCents).apply()
             }
-            onResult("✅ 全量备份恢复成功：恢复账户 ${backupWallets.size} 个、账单 $txCount 笔、商户记忆 ${snapshot.merchantMemories.size} 条")
+            onResult("恢复完成：${backupWallets.size} 个账户、$txCount 笔账单")
         }
     }
 
@@ -586,7 +586,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         viewModelScope.launch {
             val settled = repository.batchSettleReimbursements(expenseIds, receiveWalletId)
-            onResult("✅ 已批量核销 $settled 笔待报销账单，并同步恢复收款账户余额")
+            onResult("已报销 $settled 笔，款项已存入账户")
         }
     }
 
@@ -642,7 +642,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     onResult(msg)
                 },
                 onFailure = { err ->
-                    onResult("❌ WebDAV 上传失败：${err.message}")
+                    onResult("上传失败：${err.message}")
                 }
             )
         }
@@ -660,7 +660,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     restoreFromBackupJson(json, onResult)
                 },
                 onFailure = { err ->
-                    onResult("❌ WebDAV 下载失败：${err.message}")
+                    onResult("下载失败：${err.message}")
                 }
             )
         }
