@@ -106,6 +106,7 @@ import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.ai.AiConfig
@@ -889,12 +890,12 @@ private fun SubpageHeader(title: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun SettingsSectionTitle(text: String, modifier: Modifier = Modifier) {
+private fun SettingsSectionTitle(text: String, modifier: Modifier = Modifier, bottomPadding: Dp = 8.dp) {
     Text(
         text = text,
         fontSize = 13.sp,
         color = ICostTextSecondary,
-        modifier = modifier.padding(start = 6.dp, bottom = 8.dp)
+        modifier = modifier.padding(start = 6.dp, bottom = bottomPadding)
     )
 }
 
@@ -1250,12 +1251,15 @@ private fun ICostSmartBookkeepingFullScreen(
             // 条件规则 When -> Then
             item {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     SettingsSectionTitle(
                         text = if (smartRules.isEmpty()) "分类规则" else "分类规则 · ${smartRules.count { it.enabled }}/${smartRules.size} 启用",
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f),
+                        bottomPadding = 0.dp
                     )
                     TextButton(onClick = { showAddSmartRuleDialog = true }) {
                         Text("新增规则", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = ICostBlueAccent)
@@ -1301,9 +1305,16 @@ private fun ICostSmartBookkeepingFullScreen(
                                         fontWeight = FontWeight.Medium,
                                         color = if (rule.interceptIgnore) ICostCoralRed else ICostBlueAccent
                                     )
-                                }
-                                TextButton(onClick = { pendingDeleteRule = rule }) {
-                                    Text("删除", fontSize = 13.sp, color = ICostCoralRed)
+                                    Text(
+                                        text = "删除",
+                                        fontSize = 13.sp,
+                                        color = ICostCoralRed,
+                                        modifier = Modifier
+                                            .padding(top = 2.dp)
+                                            .clip(RoundedCornerShape(8.dp))
+                                            .clickable { pendingDeleteRule = rule }
+                                            .padding(vertical = 8.dp, horizontal = 2.dp)
+                                    )
                                 }
                                 Switch(
                                     checked = rule.enabled,
@@ -1375,12 +1386,15 @@ private fun ICostSmartBookkeepingFullScreen(
             // 识别日志
             item {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 2.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     SettingsSectionTitle(
                         text = if (observabilityLogs.isEmpty()) "识别日志" else "识别日志 · ${observabilityLogs.size} 条",
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1f),
+                        bottomPadding = 0.dp
                     )
                     if (observabilityLogs.isNotEmpty()) {
                         TextButton(onClick = onClearLogs) {

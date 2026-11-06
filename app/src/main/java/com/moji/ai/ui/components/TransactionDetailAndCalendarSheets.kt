@@ -326,7 +326,7 @@ fun TransactionDetailSheet(
                 leftColor = if (canRefund) ICostBlueAccent else ICostTextSecondary,
                 onLeft = if (canRefund) ({ showRefundDialog = true }) else null,
                 rightAsset = "detail_template.webp",
-                rightLabel = "存为模板",
+                rightLabel = "存模板",
                 rightColor = Color(0xFFF59E0B),
                 onRight = { onSaveAsTemplate(tx) }
             )
@@ -717,6 +717,8 @@ private fun DetailActionPairCard(
                     text = leftLabel,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    softWrap = false,
                     color = leftColor
                 )
             }
@@ -746,6 +748,8 @@ private fun DetailActionPairCard(
                     text = rightLabel,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    softWrap = false,
                     color = rightColor
                 )
             }
