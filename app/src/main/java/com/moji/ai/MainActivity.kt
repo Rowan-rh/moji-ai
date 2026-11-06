@@ -5,6 +5,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,16 +17,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import com.moji.ai.ui.MainViewModel
 import com.moji.ai.ui.MoJiMainScreen
+import com.moji.ai.ui.theme.ICostBgGray
+import com.moji.ai.ui.theme.ICostBlueAccent
 
 private val MoJiColorScheme = lightColorScheme(
-    primary = Color(0xFF2563EB),
+    primary = ICostBlueAccent,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFDBEAFE),
-    onPrimaryContainer = Color(0xFF1E3A8A),
-    secondary = Color(0xFF0F766E),
-    secondaryContainer = Color(0xFFCCFBF1),
-    onSecondaryContainer = Color(0xFF134E4A),
-    background = Color(0xFFF8FAFC),
+    primaryContainer = Color(0xFFE6F0FF),
+    onPrimaryContainer = Color(0xFF003A8C),
+    secondary = Color(0xFFE65540),
+    secondaryContainer = Color(0xFFFFECE8),
+    onSecondaryContainer = Color(0xFF7A1C10),
+    background = ICostBgGray,
     surface = Color.White
 )
 
@@ -39,12 +42,21 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            ),
+            navigationBarStyle = SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            )
+        )
         requestPostNotificationPermissionIfNeeded()
 
         setContent {
             MaterialTheme(colorScheme = MoJiColorScheme) {
-                Surface(color = MaterialTheme.colorScheme.background) {
+                Surface(color = ICostBgGray) {
                     MoJiMainScreen(viewModel = viewModel)
                 }
             }

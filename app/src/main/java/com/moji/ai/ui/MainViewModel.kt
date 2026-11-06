@@ -1,6 +1,7 @@
 package com.moji.ai.ui
 
 import android.app.Application
+import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.moji.ai.MoJiApp
@@ -23,6 +24,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MoJiApp
     private val repository = app.repository
     private val configManager = app.aiConfigManager
+    private val uiPrefs = application.getSharedPreferences("moji_icost_ui_prefs", Context.MODE_PRIVATE)
 
     val wallets: StateFlow<List<WalletEntity>> = repository.walletsFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -33,14 +35,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val recurringRules: StateFlow<List<RecurringRuleEntity>> = repository.recurringRulesFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-    private val _ledgers = MutableStateFlow(listOf("默认账本", "日常家用", "旅行基金"))
+    private val _ledgers = MutableStateFlow(loadSavedLedgers())
     val ledgers: StateFlow<List<String>> = _ledgers.asStateFlow()
 
-    private val _currentLedger = MutableStateFlow("默认账本")
+    private val _currentLedger = MutableStateFlow(
+        uiPrefs.getString("current_ledger", "默认账本") ?: "默认账本"
+    )
     val currentLedger: StateFlow<String> = _currentLedger.asStateFlow()
 
-    private val _hideAssetAmounts = MutableStateFlow(false)
+    private val _hideAssetAmounts = MutableStateFlow(
+        uiPrefs.getBoolean("hide_asset_amounts", false)
+    )
     val hideAssetAmounts: StateFlow<Boolean> = _hideAssetAmounts.asStateFlow()
+
+    private val _monthlyBudgetCents = MutableStateFlow(
+        uiPrefs.getLong("monthly_budget_cents", 300_000L) // 默认月预算 ¥3,000.00
+    )
+    val monthlyBudgetCents: StateFlow<Long> = _monthlyBudgetCents.asStateFlow()
 
     private val _aiConfig = MutableStateFlow(configManager.getConfig())
     val aiConfig: StateFlow<AiConfig> = _aiConfig.asStateFlow()
@@ -51,22 +62,40 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _isParsing = MutableStateFlow(false)
     val isParsing: StateFlow<Boolean> = _isParsing.asStateFlow()
 
+    private fun loadSavedLedgers(): List<String> {
+        val raw = uiPrefs.getString("saved_ledgers", null)
+        if (raw.isNullOrBlank()) return listOf("默认账本", "日常家用", "旅行基金")
+        val parsed = raw.split("||").map { it.trim() }.filter { it.isNotEmpty() }
+        return if (parsed.isEmpty()) listOf("默认账本") else parsed
+    }
+
     fun selectLedger(name: String) {
         _currentLedger.value = name
+        uiPrefs.edit().putString("current_ledger", name).apply()
     }
 
     fun createLedger(name: String) {
         val trimmed = name.trim()
         if (trimmed.isNotEmpty() && trimmed !in _ledgers.value) {
-            _ledgers.value = _ledgers.value + trimmed
+            val updated = _ledgers.value + trimmed
+            _ledgers.value = updated
+            uiPrefs.edit().putString("saved_ledgers", updated.joinToString("||")).apply()
         }
         if (trimmed.isNotEmpty()) {
-            _currentLedger.value = trimmed
+            selectLedger(trimmed)
         }
     }
 
     fun toggleHideAssetAmounts() {
-        _hideAssetAmounts.value = !_hideAssetAmounts.value
+        val next = !_hideAssetAmounts.value
+        _hideAssetAmounts.value = next
+        uiPrefs.edit().putBoolean("hide_asset_amounts", next).apply()
+    }
+
+    fun updateMonthlyBudgetYuan(budgetYuan: Double) {
+        val cents = (budgetYuan * 100.0).roundToLong().coerceAtLeast(0L)
+        _monthlyBudgetCents.value = cents
+        uiPrefs.edit().putLong("monthly_budget_cents", cents).apply()
     }
 
     fun updateAiConfig(newConfig: AiConfig) {

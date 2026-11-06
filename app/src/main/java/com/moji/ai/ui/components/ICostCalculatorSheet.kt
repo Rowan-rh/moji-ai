@@ -2,6 +2,7 @@ package com.moji.ai.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,18 +26,13 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.filled.AccessTime
-import androidx.compose.material.icons.filled.AccountBalanceWallet
-import androidx.compose.material.icons.filled.ArrowForward
-import androidx.compose.material.icons.filled.CardGiftcard
-import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.LocalOffer
-import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -62,18 +58,22 @@ import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
+import com.moji.ai.ui.theme.ICostAssetImage
 import com.moji.ai.ui.theme.ICostBgGray
 import com.moji.ai.ui.theme.ICostBlueAccent
 import com.moji.ai.ui.theme.ICostCardWhite
+import com.moji.ai.ui.theme.ICostCellGray
+import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostSlateIcon
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.WalletBrandAvatar
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
-import com.moji.ai.ui.theme.resolveCategoryIcon
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -84,17 +84,24 @@ import kotlin.math.roundToLong
 fun ICostCalculatorSheet(
     wallets: List<WalletEntity>,
     currentLedger: String,
+    ledgers: List<String> = listOf("默认账本"),
+    onSelectLedger: (String) -> Unit = {},
     editingTransaction: TransactionEntity? = null,
     initialType: TransactionType = TransactionType.EXPENSE,
     initialSourceWalletId: Long? = null,
     initialTargetWalletId: Long? = null,
     onDismiss: () -> Unit,
-    onSaveTransaction: (TransactionEntity, keepOpen: Boolean) -> Unit
+    onSaveTransaction: (TransactionEntity, keepOpen: Boolean) -> Unit,
+    onOpenAiSandbox: () -> Unit = {}
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
+    // 1:1 iCost 顶部三态：支出 | 收入 | 转账（若外部传入 REPAYMENT 则归在转账 tab 并在保存时自动判断目标账户）
     var txType by remember {
-        mutableStateOf(editingTransaction?.type ?: initialType)
+        val raw = editingTransaction?.type ?: initialType
+        mutableStateOf(
+            if (raw == TransactionType.REPAYMENT) TransactionType.TRANSFER else raw
+        )
     }
 
     // 解析初始主分类与子分类
@@ -125,29 +132,32 @@ fun ICostCalculatorSheet(
             } else ""
         )
     }
+    var feeYuanStr by remember {
+        mutableStateOf(
+            if ((editingTransaction?.feeCents ?: 0L) > 0L) {
+                String.format(Locale.US, "%.2f", editingTransaction!!.feeCents / 100.0)
+            } else ""
+        )
+    }
     var tagText by remember { mutableStateOf(editingTransaction?.tags ?: "") }
-
-    val defaultAssetWallet = wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull()
-    val defaultCreditWallet = wallets.firstOrNull { it.type.isLiability } ?: wallets.lastOrNull()
 
     var sourceWalletId by remember {
         mutableStateOf(
-            editingTransaction?.sourceWalletId
-                ?: initialSourceWalletId
-                ?: defaultAssetWallet?.id
+            editingTransaction?.sourceWalletId ?: initialSourceWalletId
         )
     }
     var targetWalletId by remember {
         mutableStateOf(
-            editingTransaction?.targetWalletId
-                ?: initialTargetWalletId
-                ?: if (txType == TransactionType.REPAYMENT) defaultCreditWallet?.id else wallets.lastOrNull { it.id != sourceWalletId }?.id
+            editingTransaction?.targetWalletId ?: initialTargetWalletId
         )
     }
 
     var showWalletPickerForTarget by remember { mutableStateOf<Boolean?>(null) } // false = source, true = target
     var showDiscountDialog by remember { mutableStateOf(false) }
+    var showFeeDialog by remember { mutableStateOf(false) }
     var showTagDialog by remember { mutableStateOf(false) }
+    var showLedgerPicker by remember { mutableStateOf(false) }
+    var showCurrencyPicker by remember { mutableStateOf(false) }
 
     val timeNowStr = remember(editingTransaction) {
         SimpleDateFormat("HH:mm", Locale.getDefault()).format(
@@ -155,27 +165,66 @@ fun ICostCalculatorSheet(
         )
     }
 
-    val hasPendingOperator = expr.drop(1).any { it == '+' || it == '-' }
+    val operators = setOf('+', '-', '×', '÷')
+    val hasPendingOperator = expr.drop(1).any { it in operators }
     val sym = CurrencyCode.fromCode(currency).symbol
 
     fun evaluateExpr(raw: String): Double {
         if (raw.isBlank()) return 0.0
-        var total = 0.0
-        var currentSign = 1.0
-        var token = StringBuilder()
+        val tokens = mutableListOf<String>()
+        val numBuf = StringBuilder()
         for ((idx, ch) in raw.withIndex()) {
-            if ((ch == '+' || ch == '-') && idx > 0) {
-                total += currentSign * (token.toString().toDoubleOrNull() ?: 0.0)
-                token = StringBuilder()
-                currentSign = if (ch == '+') 1.0 else -1.0
+            if (ch in operators && idx > 0) {
+                if (numBuf.isNotEmpty()) {
+                    tokens.add(numBuf.toString())
+                    numBuf.clear()
+                }
+                tokens.add(ch.toString())
             } else {
-                token.append(ch)
+                numBuf.append(ch)
             }
         }
-        if (token.isNotEmpty()) {
-            total += currentSign * (token.toString().toDoubleOrNull() ?: 0.0)
+        if (numBuf.isNotEmpty()) tokens.add(numBuf.toString())
+        if (tokens.isEmpty()) return 0.0
+
+        // 先处理 × ÷
+        val pass1 = mutableListOf<String>()
+        var i = 0
+        while (i < tokens.size) {
+            val tok = tokens[i]
+            if ((tok == "×" || tok == "÷") && pass1.isNotEmpty() && i + 1 < tokens.size) {
+                val left = pass1.removeAt(pass1.lastIndex).toDoubleOrNull() ?: 0.0
+                val right = tokens[i + 1].toDoubleOrNull() ?: 1.0
+                val res = if (tok == "×") left * right else if (right != 0.0) left / right else left
+                pass1.add(res.toString())
+                i += 2
+            } else {
+                pass1.add(tok)
+                i += 1
+            }
+        }
+
+        // 再处理 + -
+        var total = pass1.firstOrNull()?.toDoubleOrNull() ?: 0.0
+        var j = 1
+        while (j + 1 < pass1.size) {
+            val op = pass1[j]
+            val rhs = pass1[j + 1].toDoubleOrNull() ?: 0.0
+            total = if (op == "+") total + rhs else total - rhs
+            j += 2
         }
         return total.coerceAtLeast(0.0)
+    }
+
+    fun appendOperator(primary: Char, alternate: Char) {
+        if (expr.isEmpty()) return
+        val last = expr.last()
+        expr = when {
+            last == primary -> expr.dropLast(1) + alternate
+            last == alternate -> expr.dropLast(1) + primary
+            last in operators -> expr.dropLast(1) + primary
+            else -> expr + primary
+        }
     }
 
     fun buildAndSubmit(keepOpen: Boolean) {
@@ -185,8 +234,25 @@ fun ICostCalculatorSheet(
         val rate = CurrencyCode.fromCode(currency).defaultRateToCny
         val cnyCents = (cents * rate).roundToLong()
         val discountCents = ((discountYuanStr.toDoubleOrNull() ?: 0.0) * 100.0).roundToLong()
+        val feeCents = ((feeYuanStr.toDoubleOrNull() ?: 0.0) * 100.0).roundToLong()
 
-        val finalCategory = when (txType) {
+        val defaultWallet = wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull()
+        val resolvedSourceId = sourceWalletId ?: defaultWallet?.id
+        val resolvedSourceWallet = wallets.firstOrNull { it.id == resolvedSourceId }
+        val resolvedTargetWallet = wallets.firstOrNull { it.id == targetWalletId }
+
+        // 当用户处在「转账」模式且由资产账户转入信用账户时，自动记录为 REPAYMENT
+        val actualType = if (
+            txType == TransactionType.TRANSFER &&
+            resolvedSourceWallet?.type?.isLiability == false &&
+            resolvedTargetWallet?.type?.isLiability == true
+        ) {
+            TransactionType.REPAYMENT
+        } else {
+            txType
+        }
+
+        val finalCategory = when (actualType) {
             TransactionType.TRANSFER -> "内部转账"
             TransactionType.REPAYMENT -> "信用还款"
             TransactionType.LOAN_IN -> "借入"
@@ -198,22 +264,24 @@ fun ICostCalculatorSheet(
         val entity = TransactionEntity(
             id = editingTransaction?.id ?: 0L,
             ledgerName = editingTransaction?.ledgerName ?: currentLedger,
-            type = txType,
+            type = actualType,
             amountCents = cents,
             currency = currency,
             exchangeRateToCny = rate,
             amountCnyCents = cnyCents,
             discountCents = discountCents,
+            feeCents = feeCents,
             category = finalCategory,
             merchant = noteText.trim(),
             note = noteText.trim(),
-            sourceWalletId = if (txType == TransactionType.INCOME) null else sourceWalletId,
-            targetWalletId = when (txType) {
-                TransactionType.INCOME -> sourceWalletId
-                TransactionType.TRANSFER, TransactionType.REPAYMENT -> targetWalletId
+            sourceWalletId = if (actualType == TransactionType.INCOME) null else resolvedSourceId,
+            targetWalletId = when (actualType) {
+                TransactionType.INCOME -> resolvedSourceId
+                TransactionType.TRANSFER, TransactionType.REPAYMENT ->
+                    targetWalletId ?: wallets.lastOrNull { it.id != resolvedSourceId }?.id
                 else -> null
             },
-            reimbursable = if (txType == TransactionType.EXPENSE) reimbursable else false,
+            reimbursable = if (actualType == TransactionType.EXPENSE) reimbursable else false,
             reimbursed = editingTransaction?.reimbursed ?: false,
             tags = tagText.trim(),
             timestamp = editingTransaction?.timestamp ?: System.currentTimeMillis(),
@@ -224,6 +292,7 @@ fun ICostCalculatorSheet(
             expr = ""
             noteText = ""
             discountYuanStr = ""
+            feeYuanStr = ""
         }
     }
 
@@ -232,43 +301,47 @@ fun ICostCalculatorSheet(
         sheetState = sheetState,
         dragHandle = null,
         containerColor = ICostBgGray,
-        shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp)
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
     ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .fillMaxHeight(0.92f)
+                .fillMaxHeight(0.93f)
                 .navigationBarsPadding()
         ) {
-            // 1. 顶部栏：关闭 + [支出 | 收入 | 转账 | 还款] + 币种切换
+            // 1. 顶部栏：左侧 40dp 白色圆形 `✕` + 中间白色胶囊 [支出 | 收入 | 转账] + 右侧蓝色账本名
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 12.dp),
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Default.Close, contentDescription = "关闭", tint = ICostTextPrimary)
+                ICostCircleIconButton(onClick = onDismiss, size = 38.dp) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "关闭",
+                        tint = ICostTextPrimary,
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
 
                 Surface(
-                    shape = RoundedCornerShape(20.dp),
-                    color = Color(0xFFE8E8EA)
+                    shape = RoundedCornerShape(22.dp),
+                    color = ICostCardWhite
                 ) {
                     Row(modifier = Modifier.padding(3.dp)) {
                         val modes = listOf(
                             TransactionType.EXPENSE to "支出",
                             TransactionType.INCOME to "收入",
-                            TransactionType.TRANSFER to "转账",
-                            TransactionType.REPAYMENT to "还款"
+                            TransactionType.TRANSFER to "转账"
                         )
                         modes.forEach { (mode, label) ->
                             val selected = txType == mode
                             Box(
                                 modifier = Modifier
-                                    .clip(RoundedCornerShape(17.dp))
-                                    .background(if (selected) ICostCardWhite else Color.Transparent)
+                                    .clip(RoundedCornerShape(19.dp))
+                                    .background(if (selected) Color(0xFFECECEE) else Color.Transparent)
                                     .clickable {
                                         txType = mode
                                         if (mode == TransactionType.INCOME) {
@@ -277,46 +350,34 @@ fun ICostCalculatorSheet(
                                         } else if (mode == TransactionType.EXPENSE) {
                                             selectedMainCategory = CategoryCatalog.expenseCategories.first().name
                                             selectedSubCategory = ""
-                                        } else if (mode == TransactionType.REPAYMENT) {
-                                            sourceWalletId = defaultAssetWallet?.id
-                                            targetWalletId = defaultCreditWallet?.id
                                         }
                                     }
-                                    .padding(horizontal = 15.dp, vertical = 6.dp),
+                                    .padding(horizontal = 18.dp, vertical = 7.dp),
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
                                     text = label,
                                     fontSize = 14.sp,
                                     fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                    color = if (selected) ICostTextPrimary else ICostTextSecondary
+                                    color = ICostTextPrimary
                                 )
                             }
                         }
                     }
                 }
 
-                // 币种胶囊切换
-                Surface(
-                    onClick = {
-                        val codes = CurrencyCode.entries
-                        val nextIdx = (codes.indexOfFirst { it.name == currency } + 1) % codes.size
-                        currency = codes[nextIdx].name
-                    },
-                    shape = RoundedCornerShape(14.dp),
-                    color = ICostCardWhite
-                ) {
-                    Text(
-                        text = currency,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = ICostTextPrimary,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                    )
-                }
+                Text(
+                    text = currentLedger,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = ICostBlueAccent,
+                    modifier = Modifier
+                        .clickable { showLedgerPicker = true }
+                        .padding(horizontal = 4.dp, vertical = 4.dp)
+                )
             }
 
-            // 2. 中部：分类图标网格（含 iCost 二级子分类展开面板） 或 转账/还款双账户选择器
+            // 2. 中部：5 列分类网格（含右上角 `•••` 子分类角标 + 展开式 5 列二级分类盒） 或 转账双账户卡片
             Box(modifier = Modifier.weight(1f)) {
                 if (txType == TransactionType.EXPENSE || txType == TransactionType.INCOME) {
                     val categories = if (txType == TransactionType.EXPENSE) {
@@ -330,7 +391,7 @@ fun ICostCalculatorSheet(
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         rows.forEach { rowItems ->
                             item {
@@ -344,31 +405,53 @@ fun ICostCalculatorSheet(
                                             Column(
                                                 modifier = Modifier
                                                     .weight(1f)
-                                                    .clickable {
+                                                    .clickable(
+                                                        interactionSource = remember { MutableInteractionSource() },
+                                                        indication = null
+                                                    ) {
                                                         selectedMainCategory = cat.name
                                                         selectedSubCategory = ""
                                                     },
                                                 horizontalAlignment = Alignment.CenterHorizontally
                                             ) {
-                                                Box(
-                                                    modifier = Modifier
-                                                        .size(48.dp)
-                                                        .clip(CircleShape)
-                                                        .background(if (isSelected) activeColor else Color(0xFFECECEE)),
-                                                    contentAlignment = Alignment.Center
-                                                ) {
-                                                    Icon(
-                                                        imageVector = resolveCategoryIcon(cat.name, txType),
-                                                        contentDescription = cat.name,
-                                                        tint = if (isSelected) Color.White else Color(0xFF4A4A4A),
-                                                        modifier = Modifier.size(23.dp)
-                                                    )
+                                                Box(modifier = Modifier.size(52.dp), contentAlignment = Alignment.Center) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(48.dp)
+                                                            .clip(CircleShape)
+                                                            .background(if (isSelected) activeColor else Color(0xFFECECEE)),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        ICostAssetImage(
+                                                            assetFile = cat.assetFile,
+                                                            tint = if (isSelected) Color.White else ICostSlateIcon,
+                                                            modifier = Modifier.size(26.dp)
+                                                        )
+                                                    }
+                                                    // 拥有二级分类的类别在右上角显示 14dp 浅灰 `•••` 小圆角标
+                                                    if (cat.subCategories.isNotEmpty()) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .align(Alignment.TopEnd)
+                                                                .size(15.dp)
+                                                                .clip(CircleShape)
+                                                                .background(if (isSelected) activeColor else Color(0xFFE0E0E4)),
+                                                            contentAlignment = Alignment.Center
+                                                        ) {
+                                                            Icon(
+                                                                imageVector = Icons.Default.MoreHoriz,
+                                                                contentDescription = null,
+                                                                tint = if (isSelected) Color.White else Color(0xFF7A7E87),
+                                                                modifier = Modifier.size(10.dp)
+                                                            )
+                                                        }
+                                                    }
                                                 }
-                                                Spacer(modifier = Modifier.height(5.dp))
+                                                Spacer(modifier = Modifier.height(4.dp))
                                                 Text(
                                                     text = cat.name,
                                                     fontSize = 12.sp,
-                                                    color = if (isSelected) activeColor else ICostTextPrimary,
+                                                    color = ICostTextPrimary,
                                                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                                                     maxLines = 1
                                                 )
@@ -379,48 +462,66 @@ fun ICostCalculatorSheet(
                                         }
                                     }
 
-                                    // 如果本行包含当前选中的主分类，且它有二级子分类，1:1 展开浅灰圆角子分类盒！
-                                    val expandedCat = rowItems.firstOrNull { it.name == selectedMainCategory && it.subCategories.isNotEmpty() }
+                                    // 1:1 展开当前选中主分类的 5 列浅灰圆角二级分类盒（对齐 04_add_record_sheet.png）
+                                    val expandedCat = rowItems.firstOrNull {
+                                        it.name == selectedMainCategory && it.subCategories.isNotEmpty()
+                                    }
                                     if (expandedCat != null) {
                                         Spacer(modifier = Modifier.height(10.dp))
                                         Surface(
                                             shape = RoundedCornerShape(18.dp),
-                                            color = Color(0xFFEEEEF0),
+                                            color = Color(0xFFECECEE),
                                             modifier = Modifier.fillMaxWidth()
                                         ) {
-                                            LazyRow(
-                                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
-                                                horizontalArrangement = Arrangement.spacedBy(16.dp)
+                                            val subRows = expandedCat.subCategories.chunked(5)
+                                            Column(
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
+                                                verticalArrangement = Arrangement.spacedBy(10.dp)
                                             ) {
-                                                items(expandedCat.subCategories) { sub ->
-                                                    val subSelected = selectedSubCategory == sub
-                                                    Column(
-                                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                                        modifier = Modifier.clickable {
-                                                            selectedSubCategory = if (subSelected) "" else sub
-                                                        }
+                                                subRows.forEach { subRow ->
+                                                    Row(
+                                                        modifier = Modifier.fillMaxWidth(),
+                                                        horizontalArrangement = Arrangement.SpaceBetween
                                                     ) {
-                                                        Box(
-                                                            modifier = Modifier
-                                                                .size(38.dp)
-                                                                .clip(CircleShape)
-                                                                .background(if (subSelected) activeColor else Color(0xFFE2E2E5)),
-                                                            contentAlignment = Alignment.Center
-                                                        ) {
-                                                            Icon(
-                                                                imageVector = resolveCategoryIcon(sub, txType),
-                                                                contentDescription = sub,
-                                                                tint = if (subSelected) Color.White else Color(0xFF555555),
-                                                                modifier = Modifier.size(18.dp)
-                                                            )
+                                                        subRow.forEach { sub ->
+                                                            val subSelected = selectedSubCategory == sub.name
+                                                            Column(
+                                                                modifier = Modifier
+                                                                    .weight(1f)
+                                                                    .clickable(
+                                                                        interactionSource = remember { MutableInteractionSource() },
+                                                                        indication = null
+                                                                    ) {
+                                                                        selectedSubCategory = if (subSelected) "" else sub.name
+                                                                    },
+                                                                horizontalAlignment = Alignment.CenterHorizontally
+                                                            ) {
+                                                                Box(
+                                                                    modifier = Modifier
+                                                                        .size(40.dp)
+                                                                        .clip(CircleShape)
+                                                                        .background(if (subSelected) activeColor else Color.Transparent),
+                                                                    contentAlignment = Alignment.Center
+                                                                ) {
+                                                                    ICostAssetImage(
+                                                                        assetFile = sub.assetFile,
+                                                                        tint = if (subSelected) Color.White else ICostSlateIcon,
+                                                                        modifier = Modifier.size(23.dp)
+                                                                    )
+                                                                }
+                                                                Spacer(modifier = Modifier.height(3.dp))
+                                                                Text(
+                                                                    text = sub.name,
+                                                                    fontSize = 11.sp,
+                                                                    color = if (subSelected) activeColor else ICostTextPrimary,
+                                                                    fontWeight = if (subSelected) FontWeight.Bold else FontWeight.Normal,
+                                                                    maxLines = 1
+                                                                )
+                                                            }
                                                         }
-                                                        Spacer(modifier = Modifier.height(4.dp))
-                                                        Text(
-                                                            text = sub,
-                                                            fontSize = 11.sp,
-                                                            color = if (subSelected) activeColor else Color(0xFF555555),
-                                                            fontWeight = if (subSelected) FontWeight.Bold else FontWeight.Normal
-                                                        )
+                                                        repeat(5 - subRow.size) {
+                                                            Spacer(modifier = Modifier.weight(1f))
+                                                        }
                                                     }
                                                 }
                                             }
@@ -431,85 +532,102 @@ fun ICostCalculatorSheet(
                         }
                     }
                 } else {
-                    // 转账 / 信用还款 双账户流转卡片
+                    // 1:1 iCost 转账模式（对齐 12_transfer_mode.png）：两张白卡 + 中间 ⇅ 互换按钮
                     val fromWallet = wallets.firstOrNull { it.id == sourceWalletId }
                     val toWallet = wallets.firstOrNull { it.id == targetWalletId }
 
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(horizontal = 18.dp, vertical = 16.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                            .padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        Text(
-                            text = if (txType == TransactionType.REPAYMENT) "选择还款付款账户与待还信用账户" else "选择转出账户与转入账户",
-                            fontSize = 14.sp,
-                            color = ICostTextSecondary
-                        )
-
                         Surface(
                             onClick = { showWalletPickerForTarget = false },
                             shape = RoundedCornerShape(20.dp),
                             color = ICostCardWhite,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(66.dp)
                         ) {
                             Row(
-                                modifier = Modifier.padding(16.dp),
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 18.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 if (fromWallet != null) {
-                                    WalletBrandAvatar(fromWallet, size = 40.dp)
-                                }
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text("付款 / 转出账户", fontSize = 12.sp, color = ICostTextSecondary)
+                                    WalletBrandAvatar(fromWallet, size = 36.dp)
+                                    Spacer(modifier = Modifier.width(12.dp))
                                     Text(
-                                        text = formatWalletDisplayName(fromWallet, "点击选择账户"),
+                                        text = formatWalletDisplayName(fromWallet),
                                         fontSize = 16.sp,
-                                        fontWeight = FontWeight.Bold
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary,
+                                        modifier = Modifier.weight(1f)
                                     )
-                                }
-                                if (fromWallet != null) {
                                     Text(
                                         text = formatMoneyCents(fromWallet.balanceCents, fromWallet.currency),
                                         fontSize = 14.sp,
                                         color = ICostTextSecondary
                                     )
+                                } else {
+                                    Text(
+                                        text = "请选择转出账户",
+                                        fontSize = 16.sp,
+                                        color = ICostTextPrimary,
+                                        fontWeight = FontWeight.Medium
+                                    )
                                 }
                             }
                         }
 
-                        Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            Icon(Icons.Default.ArrowForward, contentDescription = null, tint = ICostTextSecondary)
+                        Box(
+                            modifier = Modifier.fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .clickable {
+                                        val tmp = sourceWalletId
+                                        sourceWalletId = targetWalletId
+                                        targetWalletId = tmp
+                                    },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                ICostAssetImage(
+                                    assetFile = "transfer_swift.webp",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                         }
 
                         Surface(
                             onClick = { showWalletPickerForTarget = true },
                             shape = RoundedCornerShape(20.dp),
                             color = ICostCardWhite,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(66.dp)
                         ) {
                             Row(
-                                modifier = Modifier.padding(16.dp),
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 18.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 if (toWallet != null) {
-                                    WalletBrandAvatar(toWallet, size = 40.dp)
-                                }
-                                Spacer(modifier = Modifier.width(12.dp))
-                                Column(modifier = Modifier.weight(1f)) {
+                                    WalletBrandAvatar(toWallet, size = 36.dp)
+                                    Spacer(modifier = Modifier.width(12.dp))
                                     Text(
-                                        if (txType == TransactionType.REPAYMENT) "偿还目标信用账户" else "转入目标账户",
-                                        fontSize = 12.sp,
-                                        color = ICostTextSecondary
-                                    )
-                                    Text(
-                                        text = formatWalletDisplayName(toWallet, "点击选择目标账户"),
+                                        text = formatWalletDisplayName(toWallet),
                                         fontSize = 16.sp,
-                                        fontWeight = FontWeight.Bold
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary,
+                                        modifier = Modifier.weight(1f)
                                     )
-                                }
-                                if (toWallet != null) {
                                     Text(
                                         text = if (toWallet.type.isLiability) {
                                             "待还 ${formatMoneyCents(toWallet.balanceCents, toWallet.currency)}"
@@ -519,6 +637,13 @@ fun ICostCalculatorSheet(
                                         fontSize = 14.sp,
                                         color = if (toWallet.type.isLiability) ICostCoralRed else ICostTextSecondary
                                     )
+                                } else {
+                                    Text(
+                                        text = "请选择转入账户",
+                                        fontSize = 16.sp,
+                                        color = ICostTextPrimary,
+                                        fontWeight = FontWeight.Medium
+                                    )
                                 }
                             }
                         }
@@ -526,56 +651,96 @@ fun ICostCalculatorSheet(
                 }
             }
 
-            // 3. 快捷属性胶囊栏（选择账户 | 报销 | 优惠 | 标签）
+            // 3. 快捷属性胶囊栏（1:1 对齐 iCost：选择账户 | 报销 | 优惠 | 图片 | 标签 + 右侧齿轮 opt_setup.webp）
             val currentWallet = wallets.firstOrNull { it.id == sourceWalletId }
-            LazyRow(
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                if (txType == TransactionType.EXPENSE || txType == TransactionType.INCOME) {
+                LazyRow(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (txType == TransactionType.EXPENSE || txType == TransactionType.INCOME) {
+                        item {
+                            ICostOptionPill(
+                                assetFile = "opt_account.webp",
+                                label = currentWallet?.name ?: "选择账户",
+                                active = currentWallet != null,
+                                onClick = { showWalletPickerForTarget = false }
+                            )
+                        }
+                    }
+                    if (txType == TransactionType.EXPENSE) {
+                        item {
+                            ICostOptionPill(
+                                assetFile = if (reimbursable) "opt_claim_selected.webp" else "opt_claim_unselected.webp",
+                                label = if (reimbursable) "待报销" else "报销",
+                                active = reimbursable,
+                                activeBg = ICostBlueAccent,
+                                activeTextColor = Color.White,
+                                onClick = { reimbursable = !reimbursable }
+                            )
+                        }
+                        item {
+                            val hasDisc = (discountYuanStr.toDoubleOrNull() ?: 0.0) > 0.0
+                            ICostOptionPill(
+                                assetFile = "opt_discount.webp",
+                                label = if (hasDisc) "优惠 ¥$discountYuanStr" else "优惠",
+                                active = hasDisc,
+                                onClick = { showDiscountDialog = true }
+                            )
+                        }
+                    }
+                    if (txType == TransactionType.TRANSFER) {
+                        item {
+                            val hasFee = (feeYuanStr.toDoubleOrNull() ?: 0.0) > 0.0
+                            ICostOptionPill(
+                                assetFile = "opt_fee.webp",
+                                label = if (hasFee) "手续费 ¥$feeYuanStr" else "手续费",
+                                active = hasFee,
+                                onClick = { showFeeDialog = true }
+                            )
+                        }
+                    }
                     item {
-                        QuickPillChip(
-                            icon = Icons.Default.AccountBalanceWallet,
-                            iconTint = ICostAmberGold,
-                            label = formatWalletDisplayName(currentWallet, "选择账户"),
-                            active = currentWallet != null,
-                            onClick = { showWalletPickerForTarget = false }
+                        ICostOptionPill(
+                            assetFile = "opt_photo.webp",
+                            label = "图片",
+                            active = false,
+                            onClick = onOpenAiSandbox
+                        )
+                    }
+                    item {
+                        ICostOptionPill(
+                            assetFile = "opt_tag.webp",
+                            label = if (tagText.isNotBlank()) "#$tagText" else "标签",
+                            active = tagText.isNotBlank(),
+                            onClick = { showTagDialog = true }
                         )
                     }
                 }
-                if (txType == TransactionType.EXPENSE) {
-                    item {
-                        QuickPillChip(
-                            icon = if (reimbursable) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
-                            iconTint = if (reimbursable) ICostBlueAccent else ICostTextSecondary,
-                            label = if (reimbursable) "待报销" else "报销",
-                            active = reimbursable,
-                            onClick = { reimbursable = !reimbursable }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                Surface(
+                    onClick = { showCurrencyPicker = true },
+                    shape = CircleShape,
+                    color = ICostCardWhite,
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        ICostAssetImage(
+                            assetFile = "opt_setup.webp",
+                            modifier = Modifier.size(16.dp)
                         )
                     }
-                    item {
-                        val hasDisc = (discountYuanStr.toDoubleOrNull() ?: 0.0) > 0.0
-                        QuickPillChip(
-                            icon = Icons.Default.CardGiftcard,
-                            iconTint = ICostGreenIncome,
-                            label = if (hasDisc) "优惠 ¥$discountYuanStr" else "优惠",
-                            active = hasDisc,
-                            onClick = { showDiscountDialog = true }
-                        )
-                    }
-                }
-                item {
-                    QuickPillChip(
-                        icon = Icons.Default.LocalOffer,
-                        iconTint = ICostBlueAccent,
-                        label = if (tagText.isNotBlank()) "#$tagText" else "标签",
-                        active = tagText.isNotBlank(),
-                        onClick = { showTagDialog = true }
-                    )
                 }
             }
 
-            // 4. 白色大圆角金额与备注输入卡
+            // 4. 白色大圆角金额与备注输入卡（ICDIN 34sp 数字 + 🕒 HH:mm 胶囊 + 点击填写备注 + ^）
             Surface(
                 shape = RoundedCornerShape(20.dp),
                 color = ICostCardWhite,
@@ -587,13 +752,14 @@ fun ICostCalculatorSheet(
                     val amountColor = when (txType) {
                         TransactionType.EXPENSE -> ICostCoralRed
                         TransactionType.INCOME -> ICostGreenIncome
-                        else -> ICostTextPrimary
+                        else -> Color(0xFFF5A623)
                     }
                     val displayExpr = if (expr.isEmpty()) "${sym}0.00" else "$sym$expr"
                     Text(
                         text = displayExpr,
-                        fontSize = 32.sp,
-                        fontWeight = FontWeight.ExtraBold,
+                        fontFamily = ICDinFontFamily,
+                        fontSize = 34.sp,
+                        fontWeight = FontWeight.Bold,
                         color = amountColor,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -608,11 +774,11 @@ fun ICostCalculatorSheet(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = Color(0xFFF5F5F7)
+                            shape = RoundedCornerShape(14.dp),
+                            color = Color(0xFFF3F3F5)
                         ) {
                             Row(
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
@@ -622,7 +788,12 @@ fun ICostCalculatorSheet(
                                     modifier = Modifier.size(14.dp)
                                 )
                                 Spacer(modifier = Modifier.width(4.dp))
-                                Text(timeNowStr, fontSize = 12.sp, color = ICostTextPrimary, fontWeight = FontWeight.Medium)
+                                Text(
+                                    text = timeNowStr,
+                                    fontSize = 12.sp,
+                                    color = ICostTextPrimary,
+                                    fontWeight = FontWeight.Medium
+                                )
                             }
                         }
 
@@ -630,7 +801,7 @@ fun ICostCalculatorSheet(
 
                         Box(modifier = Modifier.weight(1f)) {
                             if (noteText.isEmpty()) {
-                                Text("点击填写备注或商户名", fontSize = 14.sp, color = Color(0xFFB8B8B8))
+                                Text("点击填写备注", fontSize = 14.sp, color = Color(0xFFB8B8B8))
                             }
                             BasicTextField(
                                 value = noteText,
@@ -640,23 +811,30 @@ fun ICostCalculatorSheet(
                                 modifier = Modifier.fillMaxWidth()
                             )
                         }
+
+                        Icon(
+                            imageVector = Icons.Default.KeyboardArrowUp,
+                            contentDescription = null,
+                            tint = Color(0xFFB0B0B0),
+                            modifier = Modifier.size(20.dp)
+                        )
                     }
                 }
             }
 
-            // 5. 4x4 圆角白色数字计算器键盘（1:1 复刻 iCost 手感）
+            // 5. 4x4 圆角白色数字计算器键盘（1:1 复刻 iCost `+ ×` 与 `- ÷` 复合键）
             val keyRows = listOf(
                 listOf("1", "2", "3", "BACK"),
-                listOf("4", "5", "6", "+"),
-                listOf("7", "8", "9", "-"),
+                listOf("4", "5", "6", "+×"),
+                listOf("7", "8", "9", "-÷"),
                 listOf(".", "0", "AGAIN", "DONE")
             )
 
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                    .padding(horizontal = 14.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp)
             ) {
                 keyRows.forEach { row ->
                     Row(
@@ -666,7 +844,11 @@ fun ICostCalculatorSheet(
                         row.forEach { key ->
                             val isDoneKey = key == "DONE"
                             val bgColor = if (isDoneKey) {
-                                if (txType == TransactionType.INCOME) ICostGreenIncome else ICostCoralRed
+                                when (txType) {
+                                    TransactionType.EXPENSE -> ICostCoralRed
+                                    TransactionType.INCOME -> ICostGreenIncome
+                                    else -> Color(0xFFF5A623)
+                                }
                             } else {
                                 ICostCardWhite
                             }
@@ -675,10 +857,10 @@ fun ICostCalculatorSheet(
                                 onClick = {
                                     when (key) {
                                         "BACK" -> if (expr.isNotEmpty()) expr = expr.dropLast(1)
-                                        "+" -> if (expr.isNotEmpty() && expr.last() != '+' && expr.last() != '-') expr += "+"
-                                        "-" -> if (expr.isNotEmpty() && expr.last() != '+' && expr.last() != '-') expr += "-"
+                                        "+×" -> appendOperator('+', '×')
+                                        "-÷" -> appendOperator('-', '÷')
                                         "." -> {
-                                            val lastPart = expr.split('+', '-').lastOrNull() ?: ""
+                                            val lastPart = expr.split('+', '-', '×', '÷').lastOrNull() ?: ""
                                             if (!lastPart.contains('.')) {
                                                 expr = if (lastPart.isEmpty()) "${expr}0." else "$expr."
                                             }
@@ -693,7 +875,7 @@ fun ICostCalculatorSheet(
                                             }
                                         }
                                         else -> {
-                                            val lastPart = expr.split('+', '-').lastOrNull() ?: ""
+                                            val lastPart = expr.split('+', '-', '×', '÷').lastOrNull() ?: ""
                                             val decimals = lastPart.substringAfter('.', missingDelimiterValue = "")
                                             if (!lastPart.contains('.') || decimals.length < 2) {
                                                 expr += key
@@ -705,7 +887,7 @@ fun ICostCalculatorSheet(
                                 color = bgColor,
                                 modifier = Modifier
                                     .weight(1f)
-                                    .height(52.dp)
+                                    .height(48.dp)
                             ) {
                                 Box(contentAlignment = Alignment.Center) {
                                     when (key) {
@@ -713,8 +895,18 @@ fun ICostCalculatorSheet(
                                             Icons.AutoMirrored.Filled.Backspace,
                                             contentDescription = "退格",
                                             tint = ICostTextPrimary,
-                                            modifier = Modifier.size(21.dp)
+                                            modifier = Modifier.size(20.dp)
                                         )
+                                        "+×" -> Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text("+", fontSize = 21.sp, fontWeight = FontWeight.Medium, color = ICostTextPrimary)
+                                            Spacer(modifier = Modifier.width(3.dp))
+                                            Text("×", fontSize = 15.sp, color = ICostTextSecondary)
+                                        }
+                                        "-÷" -> Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text("-", fontSize = 22.sp, fontWeight = FontWeight.Medium, color = ICostTextPrimary)
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("÷", fontSize = 15.sp, color = ICostTextSecondary)
+                                        }
                                         "AGAIN" -> Text(
                                             "保存再记",
                                             fontSize = 14.sp,
@@ -723,7 +915,7 @@ fun ICostCalculatorSheet(
                                         )
                                         "DONE" -> Text(
                                             if (hasPendingOperator) "=" else "完成",
-                                            fontSize = 17.sp,
+                                            fontSize = 16.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = Color.White
                                         )
@@ -749,7 +941,7 @@ fun ICostCalculatorSheet(
         AlertDialog(
             onDismissRequest = { showWalletPickerForTarget = null },
             containerColor = ICostCardWhite,
-            title = { Text(if (pickingTarget) "选择目标账户" else "选择账户", fontWeight = FontWeight.Bold) },
+            title = { Text(if (pickingTarget) "选择转入账户" else "选择账户", fontWeight = FontWeight.Bold) },
             text = {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     items(wallets) { w ->
@@ -786,8 +978,9 @@ fun ICostCalculatorSheet(
                                 } else {
                                     formatMoneyCents(w.balanceCents, w.currency)
                                 },
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold
+                                fontFamily = ICDinFontFamily,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold
                             )
                         }
                     }
@@ -795,6 +988,72 @@ fun ICostCalculatorSheet(
             },
             confirmButton = {
                 TextButton(onClick = { showWalletPickerForTarget = null }) { Text("关闭") }
+            }
+        )
+    }
+
+    if (showLedgerPicker) {
+        AlertDialog(
+            onDismissRequest = { showLedgerPicker = false },
+            containerColor = ICostCardWhite,
+            title = { Text("选择记入账本", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ledgers.forEach { name ->
+                        Surface(
+                            onClick = {
+                                onSelectLedger(name)
+                                showLedgerPicker = false
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (name == currentLedger) Color(0xFFEAF2FF) else ICostCellGray,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = if (name == currentLedger) "✓  $name" else name,
+                                fontWeight = if (name == currentLedger) FontWeight.Bold else FontWeight.Medium,
+                                color = if (name == currentLedger) ICostBlueAccent else ICostTextPrimary,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showLedgerPicker = false }) { Text("关闭") }
+            }
+        )
+    }
+
+    if (showCurrencyPicker) {
+        AlertDialog(
+            onDismissRequest = { showCurrencyPicker = false },
+            containerColor = ICostCardWhite,
+            title = { Text("切换记账币种", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    CurrencyCode.entries.forEach { item ->
+                        Surface(
+                            onClick = {
+                                currency = item.name
+                                showCurrencyPicker = false
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (currency == item.name) Color(0xFFEAF2FF) else ICostCellGray,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "${item.displayName} (${item.symbol})",
+                                fontWeight = if (currency == item.name) FontWeight.Bold else FontWeight.Medium,
+                                color = if (currency == item.name) ICostBlueAccent else ICostTextPrimary,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showCurrencyPicker = false }) { Text("关闭") }
             }
         )
     }
@@ -814,6 +1073,25 @@ fun ICostCalculatorSheet(
             },
             confirmButton = {
                 TextButton(onClick = { showDiscountDialog = false }) { Text("确定") }
+            }
+        )
+    }
+
+    if (showFeeDialog) {
+        AlertDialog(
+            onDismissRequest = { showFeeDialog = false },
+            containerColor = ICostCardWhite,
+            title = { Text("设置转账手续费", fontWeight = FontWeight.Bold) },
+            text = {
+                OutlinedTextField(
+                    value = feeYuanStr,
+                    onValueChange = { feeYuanStr = it },
+                    label = { Text("手续费金额（元），计入统计页「手续费」") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showFeeDialog = false }) { Text("确定") }
             }
         )
     }
@@ -839,29 +1117,33 @@ fun ICostCalculatorSheet(
 }
 
 @Composable
-private fun QuickPillChip(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    iconTint: Color,
+private fun ICostOptionPill(
+    assetFile: String,
     label: String,
     active: Boolean,
+    activeBg: Color = Color(0xFFEAF2FF),
+    activeTextColor: Color = ICostTextPrimary,
     onClick: () -> Unit
 ) {
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(16.dp),
-        color = if (active) Color(0xFFEAF2FF) else ICostCardWhite
+        color = if (active) activeBg else ICostCardWhite
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(16.dp))
+            ICostAssetImage(
+                assetFile = assetFile,
+                modifier = Modifier.size(16.dp)
+            )
             Spacer(modifier = Modifier.width(5.dp))
             Text(
                 text = label,
-                fontSize = 13.sp,
-                color = ICostTextPrimary,
-                fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
+                fontSize = 12.sp,
+                color = if (active) activeTextColor else ICostTextPrimary,
+                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium,
                 maxLines = 1
             )
         }

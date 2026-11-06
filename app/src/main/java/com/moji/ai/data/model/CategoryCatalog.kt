@@ -2,35 +2,137 @@ package com.moji.ai.data.model
 
 data class CategoryDef(
     val name: String,
-    val iconKey: String,
-    val subCategories: List<String> = emptyList()
+    val assetFile: String,
+    val subCategories: List<SubCategoryDef> = emptyList()
+)
+
+data class SubCategoryDef(
+    val name: String,
+    val assetFile: String
 )
 
 object CategoryCatalog {
     val expenseCategories: List<CategoryDef> = listOf(
-        CategoryDef("餐饮", "restaurant", listOf("三餐", "零食", "水果", "蔬菜", "咖啡奶茶", "外卖")),
-        CategoryDef("购物", "shopping", listOf("日用百货", "超市生鲜", "网购", "家居")),
-        CategoryDef("服饰", "clothing", listOf("衣服", "鞋帽", "配饰")),
-        CategoryDef("日用", "daily", listOf("纸品清洁", "洗护", "生活用品")),
-        CategoryDef("数码", "digital", listOf("数码配件", "手机电脑", "Apple礼品卡")),
-        CategoryDef("美妆", "beauty", listOf("彩妆", "美容美甲")),
-        CategoryDef("护肤", "skincare", listOf("护肤品", "个人护理")),
-        CategoryDef("应用软件", "app", listOf("会员订阅", "iCloud", "效率工具", "AI服务")),
-        CategoryDef("住房", "home", listOf("房租", "物业费", "水电燃气", "维修")),
-        CategoryDef("交通", "transport", listOf("地铁公交", "打车", "火车机票", "共享单车")),
-        CategoryDef("娱乐", "entertainment", listOf("电影演出", "游戏", "运动健身", "聚会")),
-        CategoryDef("医疗", "medical", listOf("买药", "门诊挂号", "体检")),
-        CategoryDef("通讯", "phone", listOf("话费流量", "宽带", "快递邮费")),
-        CategoryDef("汽车", "car", listOf("加油充电", "停车过路", "保养保险")),
-        CategoryDef("学习", "study", listOf("书籍", "课程培训", "考试"))
+        CategoryDef(
+            name = "餐饮",
+            assetFile = "cat_dining.webp",
+            subCategories = listOf(
+                SubCategoryDef("三餐", "sub_meals.webp"),
+                SubCategoryDef("零食", "sub_snacks.webp"),
+                SubCategoryDef("水果", "sub_fruit.webp"),
+                SubCategoryDef("蔬菜", "sub_vegetable.webp"),
+                SubCategoryDef("咖啡", "sub_coffee.webp"),
+                SubCategoryDef("奶茶", "sub_milktea.webp")
+            )
+        ),
+        CategoryDef(
+            name = "购物",
+            assetFile = "cat_shopping.webp",
+            subCategories = listOf(
+                SubCategoryDef("淘宝", "sub_taobao.webp"),
+                SubCategoryDef("京东", "sub_jd.webp"),
+                SubCategoryDef("拼多多", "sub_pdd.webp"),
+                SubCategoryDef("超市", "sub_supermarket.webp")
+            )
+        ),
+        CategoryDef("服饰", "cat_dress.webp"),
+        CategoryDef("日用", "cat_daily.webp"),
+        CategoryDef(
+            name = "数码",
+            assetFile = "cat_digital.webp",
+            subCategories = listOf(
+                SubCategoryDef("手机", "sub_phone.webp"),
+                SubCategoryDef("电脑", "sub_laptop.webp"),
+                SubCategoryDef("耳机", "sub_earphone.webp"),
+                SubCategoryDef("配件", "sub_accessories.webp")
+            )
+        ),
+        CategoryDef("美妆", "cat_makeup.webp"),
+        CategoryDef("护肤", "cat_skincare.webp"),
+        CategoryDef("应用软件", "cat_app_software.webp"),
+        CategoryDef(
+            name = "住房",
+            assetFile = "cat_housing.webp",
+            subCategories = listOf(
+                SubCategoryDef("房租", "sub_rent.webp"),
+                SubCategoryDef("维修", "sub_repair.webp"),
+                SubCategoryDef("水电费", "sub_utilities.webp"),
+                SubCategoryDef("物业费", "sub_property_fee.webp")
+            )
+        ),
+        CategoryDef(
+            name = "交通",
+            assetFile = "cat_transit.webp",
+            subCategories = listOf(
+                SubCategoryDef("公交", "sub_bus.webp"),
+                SubCategoryDef("地铁", "sub_subway.webp"),
+                SubCategoryDef("打车", "sub_taxi.webp"),
+                SubCategoryDef("火车", "sub_train.webp"),
+                SubCategoryDef("飞机", "sub_flight.webp")
+            )
+        ),
+        CategoryDef("娱乐", "cat_entertainment.webp"),
+        CategoryDef(
+            name = "医疗",
+            assetFile = "cat_medical.webp",
+            subCategories = listOf(
+                SubCategoryDef("门诊", "sub_outpatient.webp"),
+                SubCategoryDef("买药", "sub_medicine.webp"),
+                SubCategoryDef("住院", "sub_hospital.webp"),
+                SubCategoryDef("体检", "sub_checkup.webp"),
+                SubCategoryDef("牙科", "sub_dental.webp")
+            )
+        ),
+        CategoryDef("通讯", "cat_telecom.webp"),
+        CategoryDef(
+            name = "汽车",
+            assetFile = "cat_car.webp",
+            subCategories = listOf(
+                SubCategoryDef("加油", "sub_fuel.webp"),
+                SubCategoryDef("停车", "sub_parking.webp"),
+                SubCategoryDef("维修", "sub_repair.webp")
+            )
+        ),
+        CategoryDef(
+            name = "学习",
+            assetFile = "cat_study.webp",
+            subCategories = listOf(
+                SubCategoryDef("书籍", "sub_books.webp"),
+                SubCategoryDef("课程", "sub_course.webp"),
+                SubCategoryDef("文具", "sub_stationery.webp"),
+                SubCategoryDef("考试", "sub_exam.webp")
+            )
+        ),
+        CategoryDef("办公", "cat_office.webp"),
+        CategoryDef("运动", "cat_sports.webp"),
+        CategoryDef("社交", "cat_social.webp"),
+        CategoryDef(
+            name = "人情",
+            assetFile = "cat_relationship.webp",
+            subCategories = listOf(
+                SubCategoryDef("红包", "cat_red_packet.webp"),
+                SubCategoryDef("礼物", "cat_gift.webp"),
+                SubCategoryDef("礼金", "cat_cash_gift.webp")
+            )
+        ),
+        CategoryDef("育儿", "cat_baby.webp"),
+        CategoryDef("旅行", "cat_travel.webp"),
+        CategoryDef("宠物", "cat_pet.webp"),
+        CategoryDef("烟酒", "cat_tobacco_alcohol.webp"),
+        CategoryDef("彩票", "cat_lottery.webp"),
+        CategoryDef("其他", "cat_other.webp")
     )
 
     val incomeCategories: List<CategoryDef> = listOf(
-        CategoryDef("工资", "salary", listOf("基本工资", "绩效提成", "年终奖")),
-        CategoryDef("兼职", "parttime", listOf("副业收入", "稿费咨询")),
-        CategoryDef("理财", "invest", listOf("基金股票", "利息分红", "余额宝收益")),
-        CategoryDef("红包", "gift", listOf("微信红包", "人情礼金")),
-        CategoryDef("二手闲置", "secondhand", listOf("闲鱼转卖")),
-        CategoryDef("其他收入", "other_income", emptyList())
+        CategoryDef("工资", "cat_salary.webp"),
+        CategoryDef("奖金", "cat_bonus.webp"),
+        CategoryDef("兼职", "cat_parttime.webp"),
+        CategoryDef("理财", "cat_investment.webp"),
+        CategoryDef("红包", "cat_red_packet.webp"),
+        CategoryDef("报销", "cat_claim.webp"),
+        CategoryDef("礼金", "cat_cash_gift.webp"),
+        CategoryDef("福利", "cat_welfare.webp"),
+        CategoryDef("退款", "cat_refund.webp"),
+        CategoryDef("其他", "cat_other.webp")
     )
 }
