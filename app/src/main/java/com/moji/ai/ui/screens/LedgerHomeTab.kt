@@ -1,8 +1,10 @@
 package com.moji.ai.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,36 +18,37 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,10 +64,15 @@ import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
+import com.moji.ai.ui.theme.ICostAssetImage
+import com.moji.ai.ui.theme.ICostAvatarButton
 import com.moji.ai.ui.theme.ICostBlueAccent
 import com.moji.ai.ui.theme.ICostCardWhite
+import com.moji.ai.ui.theme.ICostCategoryBadge
 import com.moji.ai.ui.theme.ICostCellGray
+import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
 import com.moji.ai.ui.theme.ICostGreenIncome
@@ -73,13 +81,13 @@ import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
-import com.moji.ai.ui.theme.resolveCategoryIcon
-import com.moji.ai.ui.theme.resolveTransactionBadgeColor
+import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ICostLedgerHomeScreen(
     currentLedger: String,
@@ -90,18 +98,23 @@ fun ICostLedgerHomeScreen(
     transactions: List<TransactionEntity>,
     selectedYear: Int,
     selectedMonth: Int,
+    monthlyBudgetCents: Long,
+    onUpdateBudgetYuan: (Double) -> Unit,
     onPrevMonth: () -> Unit,
     onNextMonth: () -> Unit,
     onOpenCalendar: (List<TransactionEntity>) -> Unit,
     onOpenAiSandbox: () -> Unit,
-    onOpenAiSettings: () -> Unit,
+    onOpenSettingsPage: () -> Unit,
     onClickTransaction: (TransactionEntity) -> Unit
 ) {
     val walletMap = remember(wallets) { wallets.associateBy { it.id } }
     var searchQuery by remember { mutableStateOf("") }
-    var summaryCardPage by remember { mutableIntStateOf(0) } // 0: 总支出, 1: 月预算, 2: AI识账概览
-    var monthlyBudgetYuan by remember { mutableIntStateOf(3000) }
     var showLedgerSwitcher by remember { mutableStateOf(false) }
+    var showMoreMenu by remember { mutableStateOf(false) }
+    var showBudgetEditDialog by remember { mutableStateOf(false) }
+
+    val pagerState = rememberPagerState(initialPage = 0, pageCount = { 3 })
+    val scope = rememberCoroutineScope()
 
     val collapsedDays = remember { mutableStateMapOf<String, Boolean>() }
 
@@ -132,6 +145,14 @@ fun ICostLedgerHomeScreen(
 
     val monthBalanceCents = monthIncomeCents - monthExpenseCents
 
+    // 报销统计
+    val pendingReimburseCents = monthTransactions
+        .filter { it.reimbursable && !it.reimbursed }
+        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+    val settledReimburseCents = monthTransactions
+        .filter { it.reimbursable && it.reimbursed }
+        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+
     val groupedByDay = remember(monthTransactions) {
         val dayFmt = SimpleDateFormat("MM/dd EEEE", Locale.CHINA)
         monthTransactions.groupBy { tx -> dayFmt.format(Date(tx.timestamp)) }
@@ -139,64 +160,85 @@ fun ICostLedgerHomeScreen(
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 10.dp, bottom = 120.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 110.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // 1. 顶部操作栏：左账本切换 `⇄` ，右设置 `•••` + AI 快捷图标
+        // 1. 顶部操作栏：左账本切换圆形按钮 `main_page_left_switch.webp` ，右 `•••` + 薄荷绿插画头像
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Surface(
+                ICostCircleIconButton(
                     onClick = { showLedgerSwitcher = true },
-                    shape = CircleShape,
-                    color = ICostCardWhite,
-                    modifier = Modifier.size(44.dp)
+                    size = 42.dp
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Default.SwapHoriz,
-                            contentDescription = "切换账本",
-                            tint = ICostTextPrimary,
-                            modifier = Modifier.size(22.dp)
-                        )
-                    }
+                    ICostAssetImage(
+                        assetFile = "main_page_left_switch.webp",
+                        tint = ICostTextPrimary,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Surface(
-                        onClick = onOpenAiSettings,
-                        shape = CircleShape,
-                        color = ICostCardWhite,
-                        modifier = Modifier.size(44.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box {
+                        ICostCircleIconButton(
+                            onClick = { showMoreMenu = true },
+                            size = 42.dp
+                        ) {
                             Icon(
                                 Icons.Default.MoreHoriz,
-                                contentDescription = "AI与权限设置",
+                                contentDescription = "更多操作",
                                 tint = ICostTextPrimary,
                                 modifier = Modifier.size(22.dp)
                             )
                         }
-                    }
 
-                    Surface(
-                        onClick = onOpenAiSandbox,
-                        shape = CircleShape,
-                        color = Color(0xFFDFF4EA),
-                        modifier = Modifier.size(44.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                Icons.Default.AutoAwesome,
-                                contentDescription = "AI 识账沙盒",
-                                tint = Color(0xFF0F766E),
-                                modifier = Modifier.size(20.dp)
+                        DropdownMenu(
+                            expanded = showMoreMenu,
+                            onDismissRequest = { showMoreMenu = false },
+                            containerColor = ICostCardWhite
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("全部展开/收起", fontSize = 14.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    val anyOpen = groupedByDay.keys.any { collapsedDays[it] != true }
+                                    groupedByDay.keys.forEach { collapsedDays[it] = anyOpen }
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("设置月度预算", fontSize = 14.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    showBudgetEditDialog = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("AI 静默识账测试沙盒", fontSize = 14.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    onOpenAiSandbox()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("打开设置中心", fontSize = 14.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    onOpenSettingsPage()
+                                }
                             )
                         }
                     }
+
+                    ICostAvatarButton(
+                        onClick = onOpenSettingsPage,
+                        size = 42.dp
+                    )
                 }
             }
         }
@@ -209,20 +251,23 @@ fun ICostLedgerHomeScreen(
                 fontWeight = FontWeight.ExtraBold,
                 color = ICostTextPrimary,
                 modifier = Modifier
-                    .clickable { showLedgerSwitcher = true }
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) { showLedgerSwitcher = true }
                     .padding(top = 2.dp)
             )
         }
 
-        // 3. 圆角浅灰搜索框「输入关键词」
+        // 3. 圆角浅灰搜索框「输入关键词」（40dp 紧凑高度，对齐 01_ledger_home.png）
         item {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(44.dp)
-                    .clip(RoundedCornerShape(22.dp))
+                    .height(40.dp)
+                    .clip(RoundedCornerShape(20.dp))
                     .background(ICostSearchBg)
-                    .padding(horizontal = 16.dp),
+                    .padding(horizontal = 14.dp),
                 contentAlignment = Alignment.CenterStart
             ) {
                 Row(
@@ -232,19 +277,19 @@ fun ICostLedgerHomeScreen(
                     Icon(
                         Icons.Default.Search,
                         contentDescription = null,
-                        tint = ICostTextSecondary,
-                        modifier = Modifier.size(20.dp)
+                        tint = Color(0xFF9E9E9E),
+                        modifier = Modifier.size(18.dp)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Box(modifier = Modifier.weight(1f)) {
                         if (searchQuery.isEmpty()) {
-                            Text("输入关键词", color = ICostTextSecondary, fontSize = 15.sp)
+                            Text("输入关键词", color = Color(0xFF9E9E9E), fontSize = 14.sp)
                         }
                         BasicTextField(
                             value = searchQuery,
                             onValueChange = { searchQuery = it },
                             singleLine = true,
-                            textStyle = TextStyle(fontSize = 15.sp, color = ICostTextPrimary),
+                            textStyle = TextStyle(fontSize = 14.sp, color = ICostTextPrimary),
                             modifier = Modifier.fillMaxWidth()
                         )
                     }
@@ -254,7 +299,7 @@ fun ICostLedgerHomeScreen(
                             contentDescription = "清除",
                             tint = ICostTextSecondary,
                             modifier = Modifier
-                                .size(18.dp)
+                                .size(17.dp)
                                 .clickable { searchQuery = "" }
                         )
                     }
@@ -262,10 +307,12 @@ fun ICostLedgerHomeScreen(
             }
         }
 
-        // 4. 年月选择器 + 1:1 真实可用的「收支日历」按钮
+        // 4. 年月选择器 + 1:1「收支日历」胶囊
         item {
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 2.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -313,12 +360,12 @@ fun ICostLedgerHomeScreen(
                 Surface(
                     onClick = { onOpenCalendar(monthTransactions) },
                     shape = RoundedCornerShape(14.dp),
-                    color = Color(0xFFEDEDED)
+                    color = Color(0xFFEBEBEB)
                 ) {
                     Text(
                         text = "收支日历",
-                        fontSize = 13.sp,
-                        color = Color(0xFF595959),
+                        fontSize = 12.sp,
+                        color = Color(0xFF666666),
                         fontWeight = FontWeight.Medium,
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp)
                     )
@@ -326,139 +373,241 @@ fun ICostLedgerHomeScreen(
             }
         }
 
-        // 5. 月度概览三页切换白卡片（点击切换：总支出 ⇄ 月度预算 ⇄ AI 识账统计）
+        // 5. 月度概览三页左右滑动卡片（对齐 01_ledger_home.png / 02_home_card_page2.png / 03_home_card_page3.png）
         item {
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(24.dp))
-                    .clickable { summaryCardPage = (summaryCardPage + 1) % 3 },
-                shape = RoundedCornerShape(24.dp),
+                    .clip(RoundedCornerShape(22.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        scope.launch {
+                            pagerState.animateScrollToPage((pagerState.currentPage + 1) % 3)
+                        }
+                    },
+                shape = RoundedCornerShape(22.dp),
                 colors = CardDefaults.cardColors(containerColor = ICostCardWhite),
                 elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 18.dp)
+                        .padding(horizontal = 18.dp, vertical = 16.dp)
                 ) {
-                    when (summaryCardPage) {
-                        0 -> {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(22.dp)
-                                        .clip(CircleShape)
-                                        .background(ICostCoralRed),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text("¥", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    HorizontalPager(
+                        state = pagerState,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { page ->
+                        when (page) {
+                            // Page 0: 总支出 ⇄ / 总收入 / 月结余
+                            0 -> {
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(20.dp)
+                                                .clip(CircleShape)
+                                                .background(ICostCoralRed),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            ICostAssetImage(
+                                                assetFile = "card_outcome_icon.webp",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(13.dp)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "总支出 ⇄",
+                                            color = ICostCoralRed,
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
+
+                                    Spacer(modifier = Modifier.height(6.dp))
+
+                                    Text(
+                                        text = formatMoneyCents(monthExpenseCents),
+                                        fontFamily = ICDinFontFamily,
+                                        fontSize = 36.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text("总收入 ", fontSize = 13.sp, color = ICostTextSecondary)
+                                            Text(
+                                                text = formatMoneyCents(monthIncomeCents),
+                                                fontSize = 13.sp,
+                                                color = ICostTextSecondary,
+                                                maxLines = 1,
+                                                softWrap = false
+                                            )
+                                        }
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text("月结余 ", fontSize = 13.sp, color = ICostTextSecondary)
+                                            Text(
+                                                text = formatMoneyCents(monthBalanceCents),
+                                                fontSize = 13.sp,
+                                                color = ICostTextSecondary,
+                                                maxLines = 1,
+                                                softWrap = false
+                                            )
+                                        }
+                                    }
                                 }
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "总支出 ⇄",
-                                    color = ICostCoralRed,
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
                             }
 
-                            Spacer(modifier = Modifier.height(6.dp))
+                            // Page 1: 剩余月预算 + 超支徽章 + 总预算 / 剩余日均
+                            1 -> {
+                                val remainCents = monthlyBudgetCents - monthExpenseCents
+                                val isOverspent = remainCents < 0L
+                                val cal = Calendar.getInstance()
+                                val maxDays = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
+                                val today = cal.get(Calendar.DAY_OF_MONTH)
+                                val remainDays = (maxDays - today + 1).coerceAtLeast(1)
+                                val dailyRemainCents = if (remainCents > 0L) remainCents / remainDays else 0L
 
-                            Text(
-                                text = formatMoneyCents(monthExpenseCents),
-                                fontSize = 38.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = ICostTextPrimary,
-                                letterSpacing = (-0.8).sp,
-                                maxLines = 1,
-                                softWrap = false
-                            )
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { showBudgetEditDialog = true }
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(20.dp)
+                                                .clip(CircleShape)
+                                                .background(ICostCoralRed),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            ICostAssetImage(
+                                                assetFile = "card_budget_icon.webp",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(13.dp)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "剩余月预算",
+                                            color = ICostCoralRed,
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                        if (isOverspent) {
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Surface(
+                                                shape = RoundedCornerShape(8.dp),
+                                                color = ICostCoralRed
+                                            ) {
+                                                Text(
+                                                    text = "超支",
+                                                    color = Color.White,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                                                )
+                                            }
+                                        }
+                                    }
 
-                            Spacer(modifier = Modifier.height(10.dp))
+                                    Spacer(modifier = Modifier.height(6.dp))
 
-                            Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                                Text(
-                                    text = "总收入  ${formatMoneyCents(monthIncomeCents)}",
-                                    fontSize = 14.sp,
-                                    color = ICostTextSecondary,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
-                                Text(
-                                    text = "月结余  ${formatMoneyCents(monthBalanceCents)}",
-                                    fontSize = 14.sp,
-                                    color = ICostTextSecondary,
-                                    maxLines = 1,
-                                    softWrap = false
-                                )
+                                    Text(
+                                        text = formatMoneyCents(remainCents),
+                                        fontFamily = ICDinFontFamily,
+                                        fontSize = 36.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                        Text(
+                                            text = "总预算 ${formatMoneyCents(monthlyBudgetCents)}",
+                                            fontSize = 13.sp,
+                                            color = ICostTextSecondary
+                                        )
+                                        Text(
+                                            text = "剩余日均 ${formatMoneyCents(dailyRemainCents)}",
+                                            fontSize = 13.sp,
+                                            color = ICostTextSecondary
+                                        )
+                                    }
+                                }
                             }
-                        }
 
-                        1 -> {
-                            val budgetCents = monthlyBudgetYuan * 100L
-                            val remainCents = budgetCents - monthExpenseCents
-                            val progress = (monthExpenseCents.toFloat() / budgetCents.coerceAtLeast(1L)).coerceIn(0f, 1f)
+                            // Page 2: 待报销 / 已报销 / 报销入账
+                            else -> {
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(20.dp)
+                                                .clip(CircleShape)
+                                                .background(ICostCoralRed),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            ICostAssetImage(
+                                                assetFile = "card_claim_icon.webp",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(13.dp)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text(
+                                            text = "待报销",
+                                            color = ICostCoralRed,
+                                            fontSize = 15.sp,
+                                            fontWeight = FontWeight.Bold
+                                        )
+                                    }
 
-                            Text("本月剩余预算 ⇄", color = ICostBlueAccent, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = formatMoneyCents(remainCents),
-                                fontSize = 36.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = ICostTextPrimary,
-                                maxLines = 1,
-                                softWrap = false
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            LinearProgressIndicator(
-                                progress = { progress },
-                                color = if (remainCents < 0) ICostCoralRed else ICostBlueAccent,
-                                trackColor = ICostCellGray,
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(7.dp)
-                                    .clip(RoundedCornerShape(4.dp))
-                            )
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "月预算 ¥$monthlyBudgetYuan · 已用 ${(progress * 100).toInt()}%",
-                                fontSize = 13.sp,
-                                color = ICostTextSecondary
-                            )
-                        }
+                                    Spacer(modifier = Modifier.height(6.dp))
 
-                        else -> {
-                            val aiCount = monthTransactions.count { it.captureSource.startsWith("AI") }
-                            Text("AI 静默识账概览 ⇄", color = Color(0xFF0F766E), fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                            Spacer(modifier = Modifier.height(6.dp))
-                            Text(
-                                text = "已自动记 $aiCount 笔",
-                                fontSize = 34.sp,
-                                fontWeight = FontWeight.ExtraBold,
-                                color = ICostTextPrimary
-                            )
-                            Spacer(modifier = Modifier.height(8.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Text("点击右上角星星可进入 AI 识账沙盒测试", fontSize = 13.sp, color = ICostTextSecondary)
-                                Text(
-                                    "去测试 >",
-                                    fontSize = 13.sp,
-                                    color = ICostCoralRed,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.clickable { onOpenAiSandbox() }
-                                )
+                                    Text(
+                                        text = formatMoneyCents(pendingReimburseCents),
+                                        fontFamily = ICDinFontFamily,
+                                        fontSize = 36.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary,
+                                        maxLines = 1,
+                                        softWrap = false
+                                    )
+
+                                    Spacer(modifier = Modifier.height(8.dp))
+
+                                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                        Text(
+                                            text = "已报销 ${formatMoneyCents(settledReimburseCents)}",
+                                            fontSize = 13.sp,
+                                            color = ICostTextSecondary
+                                        )
+                                        Text(
+                                            text = "报销入账 ${formatMoneyCents(settledReimburseCents)}",
+                                            fontSize = 13.sp,
+                                            color = ICostTextSecondary
+                                        )
+                                    }
+                                }
                             }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
-                    // 三圆点指示器
+                    // 三圆点指示器（黄点激活 #F5B400，灰点 #E0E0E0）
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.Center,
@@ -469,7 +618,7 @@ fun ICostLedgerHomeScreen(
                                 modifier = Modifier
                                     .size(6.dp)
                                     .clip(CircleShape)
-                                    .background(if (summaryCardPage == idx) ICostAmberGold else Color(0xFFE0E0E0))
+                                    .background(if (pagerState.currentPage == idx) ICostAmberGold else Color(0xFFE0E0E0))
                             )
                             if (idx < 2) Spacer(modifier = Modifier.width(6.dp))
                         }
@@ -478,7 +627,7 @@ fun ICostLedgerHomeScreen(
             }
         }
 
-        // 6. 按日分组展示（点击每日头部可收起/展开该日流水，点击单条流水打开账单详情页！）
+        // 6. 按日分组展示（点击每日头部可收起/展开该日流水，点击单条流水打开全屏账单详情页）
         if (groupedByDay.isEmpty()) {
             item {
                 Card(
@@ -496,7 +645,7 @@ fun ICostLedgerHomeScreen(
                         Text("本月暂无账单记录", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = ICostTextPrimary)
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            "点击右下角「+」可调出 iCost 同款计算器键盘记账，或点击下方体验 AI 静默自动识账：",
+                            "点击右下角「+」调出记账键盘，或打开 AI 静默识账测试沙盒体验自动记账：",
                             fontSize = 13.sp,
                             color = ICostTextSecondary
                         )
@@ -506,8 +655,6 @@ fun ICostLedgerHomeScreen(
                             colors = ButtonDefaults.buttonColors(containerColor = ICostCoralRed),
                             shape = RoundedCornerShape(18.dp)
                         ) {
-                            Icon(Icons.Default.AutoAwesome, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
                             Text("打开 AI 识账沙盒测试")
                         }
                     }
@@ -527,25 +674,25 @@ fun ICostLedgerHomeScreen(
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(8.dp))
                                 .clickable { collapsedDays[dayHeader] = !isCollapsed }
-                                .padding(horizontal = 4.dp, vertical = 6.dp),
+                                .padding(horizontal = 4.dp, vertical = 5.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
                                 text = dayHeader,
                                 fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium,
+                                fontWeight = FontWeight.normalOrMedium(),
                                 color = ICostTextSecondary
                             )
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Text(
                                     text = "支出: ${formatMoneyCents(dayNetExpenseCents)}",
                                     fontSize = 13.sp,
-                                    fontWeight = FontWeight.Medium,
                                     color = ICostTextSecondary,
                                     maxLines = 1,
                                     softWrap = false
                                 )
+                                Spacer(modifier = Modifier.width(2.dp))
                                 Icon(
                                     imageVector = if (isCollapsed) Icons.AutoMirrored.Filled.KeyboardArrowRight else Icons.Default.KeyboardArrowDown,
                                     contentDescription = null,
@@ -571,8 +718,8 @@ fun ICostLedgerHomeScreen(
                                         )
                                         if (index < dayList.lastIndex) {
                                             HorizontalDivider(
-                                                modifier = Modifier.padding(start = 70.dp, end = 16.dp),
-                                                thickness = 0.6.dp,
+                                                modifier = Modifier.padding(start = 68.dp, end = 16.dp),
+                                                thickness = 0.5.dp,
                                                 color = ICostDivider
                                             )
                                         }
@@ -584,6 +731,37 @@ fun ICostLedgerHomeScreen(
                 }
             }
         }
+    }
+
+    // 修改预算弹窗
+    if (showBudgetEditDialog) {
+        var budgetText by remember(monthlyBudgetCents) {
+            mutableStateOf(String.format(Locale.US, "%.0f", monthlyBudgetCents / 100.0))
+        }
+        AlertDialog(
+            onDismissRequest = { showBudgetEditDialog = false },
+            containerColor = ICostCardWhite,
+            title = { Text("设置月预算", fontWeight = FontWeight.Bold) },
+            text = {
+                OutlinedTextField(
+                    value = budgetText,
+                    onValueChange = { budgetText = it },
+                    label = { Text("月度总预算 (元)") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    budgetText.toDoubleOrNull()?.let { onUpdateBudgetYuan(it) }
+                    showBudgetEditDialog = false
+                }) {
+                    Text("保存", fontWeight = FontWeight.Bold, color = ICostBlueAccent)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBudgetEditDialog = false }) { Text("取消") }
+            }
+        )
     }
 
     // 切换/新建账本弹窗
@@ -640,6 +818,8 @@ fun ICostLedgerHomeScreen(
     }
 }
 
+private fun FontWeight.Companion.normalOrMedium(): FontWeight = FontWeight.Normal
+
 @Composable
 private fun ICostLedgerRow(
     tx: TransactionEntity,
@@ -661,13 +841,10 @@ private fun ICostLedgerRow(
         TransactionType.REPAYMENT -> "${sourceWallet?.name ?: "储蓄卡"} ➔ ${targetWallet?.name ?: "信用卡"}"
     }
 
-    val badgeColor = resolveTransactionBadgeColor(tx.type)
-    val iconVector = resolveCategoryIcon(tx.category, tx.type)
-
     val titleText = when (tx.type) {
         TransactionType.REFUND_OFFSET -> "退款入账"
-        TransactionType.REPAYMENT -> "信用还款"
-        TransactionType.TRANSFER -> "内部转账"
+        TransactionType.REPAYMENT -> "转至${targetWallet?.name ?: "信用账户"}"
+        TransactionType.TRANSFER -> "转至${targetWallet?.name ?: "目标账户"}"
         else -> tx.category
     }
 
@@ -690,23 +867,14 @@ private fun ICostLedgerRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick() }
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = 16.dp, vertical = 13.dp),
         verticalAlignment = Alignment.Top
     ) {
-        Box(
-            modifier = Modifier
-                .size(42.dp)
-                .clip(CircleShape)
-                .background(badgeColor),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = iconVector,
-                contentDescription = null,
-                tint = Color.White,
-                modifier = Modifier.size(22.dp)
-            )
-        }
+        ICostCategoryBadge(
+            category = tx.category,
+            type = tx.type,
+            size = 40.dp
+        )
 
         Spacer(modifier = Modifier.width(12.dp))
 
@@ -718,34 +886,34 @@ private fun ICostLedgerRow(
         ) {
             Text(
                 text = titleText,
-                fontSize = 16.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
                 color = ICostTextPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            Spacer(modifier = Modifier.height(3.dp))
+            Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = subtitleText,
-                fontSize = 13.sp,
+                fontSize = 12.sp,
                 color = ICostTextSecondary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
 
             if (isRefundedExpense || tx.reimbursable) {
-                Spacer(modifier = Modifier.height(6.dp))
+                Spacer(modifier = Modifier.height(5.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     if (isRefundedExpense) {
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFFF2F2F2)
+                            color = Color(0xFFF0F0F0)
                         ) {
                             Text(
                                 text = if (isFullRefund) "全额退款" else "已退 ${formatMoneyCents(tx.refundedAmountCents)}",
-                                fontSize = 11.sp,
+                                fontSize = 10.sp,
                                 color = ICostTextSecondary,
-                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
                     }
@@ -756,9 +924,9 @@ private fun ICostLedgerRow(
                         ) {
                             Text(
                                 text = if (tx.reimbursed) "已报销" else "待报销",
-                                fontSize = 11.sp,
+                                fontSize = 10.sp,
                                 color = if (tx.reimbursed) ICostGreenIncome else ICostBlueAccent,
-                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
                     }
@@ -766,13 +934,13 @@ private fun ICostLedgerRow(
             }
         }
 
-        // 右侧金额与账户名（严格 softWrap = false，绝不竖向折行！）
+        // 右侧金额与账户名（严格 softWrap = false，绝不竖向折行）
         Column(horizontalAlignment = Alignment.End) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (isRefundedExpense) {
                     Text(
                         text = String.format(Locale.US, "%s%,.2f", sym, tx.amountCents / 100.0),
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         color = ICostTextSecondary,
                         textDecoration = TextDecoration.LineThrough,
                         maxLines = 1,
@@ -781,7 +949,7 @@ private fun ICostLedgerRow(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = String.format(Locale.US, "-¥%,.2f", netExpenseCents / 100.0),
-                        fontSize = 17.sp,
+                        fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = ICostCoralRed,
                         maxLines = 1,
@@ -806,7 +974,7 @@ private fun ICostLedgerRow(
                     }
                     Text(
                         text = amountText,
-                        fontSize = 17.sp,
+                        fontSize = 16.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = amountColor,
                         maxLines = 1,
@@ -815,10 +983,10 @@ private fun ICostLedgerRow(
                 }
             }
 
-            Spacer(modifier = Modifier.height(3.dp))
+            Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = walletLabel,
-                fontSize = 12.sp,
+                fontSize = 11.sp,
                 color = ICostTextSecondary,
                 maxLines = 1,
                 softWrap = false,

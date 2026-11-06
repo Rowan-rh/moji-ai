@@ -1,13 +1,13 @@
 package com.moji.ai.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -19,33 +19,26 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.ArrowUpward
-import androidx.compose.material.icons.filled.CreditCard
-import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.SwapHoriz
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -53,6 +46,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -61,6 +55,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -70,20 +65,29 @@ import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.WalletType
+import com.moji.ai.ui.theme.AccountBrandOption
+import com.moji.ai.ui.theme.ICDinFontFamily
+import com.moji.ai.ui.theme.ICostAccountBrandCatalog
+import com.moji.ai.ui.theme.ICostAmberGold
+import com.moji.ai.ui.theme.ICostAssetImage
+import com.moji.ai.ui.theme.ICostAvatarButton
 import com.moji.ai.ui.theme.ICostBgGray
 import com.moji.ai.ui.theme.ICostBlueAccent
 import com.moji.ai.ui.theme.ICostCardWhite
+import com.moji.ai.ui.theme.ICostCategoryBadge
+import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostTextMuted
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.WalletBrandAvatar
 import com.moji.ai.ui.theme.daysUntilRepaymentText
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
-import com.moji.ai.ui.theme.resolveTransactionBadgeColor
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToLong
@@ -99,7 +103,9 @@ fun ICostAssetsScreen(
     onDeleteWallet: (WalletEntity) -> Unit,
     onQuickActionWithWallet: (TransactionType, sourceId: Long?, targetId: Long?) -> Unit,
     onSelectTransaction: (TransactionEntity) -> Unit,
-    onTriggerRuleNow: (RecurringRuleEntity) -> Unit
+    onTriggerRuleNow: (RecurringRuleEntity) -> Unit,
+    onOpenSettingsPage: () -> Unit = {},
+    onSubpageActiveChange: (Boolean) -> Unit = {}
 ) {
     val totalAssetsCnyCents = wallets.filter { !it.type.isLiability && it.includeInNetWorth }.sumOf { w ->
         (w.balanceCents * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
@@ -118,176 +124,166 @@ fun ICostAssetsScreen(
     var creditExpanded by remember { mutableStateOf(true) }
     var assetExpanded by remember { mutableStateOf(true) }
     var recurringExpanded by remember { mutableStateOf(false) }
+    var showTopMoreMenu by remember { mutableStateOf(false) }
 
     var inspectingWallet by remember { mutableStateOf<WalletEntity?>(null) }
+    var showSelectTypeFullScreen by remember { mutableStateOf(false) }
+    var selectedPresetForEditor by remember { mutableStateOf<AccountBrandOption?>(null) }
     var editingWallet by remember { mutableStateOf<WalletEntity?>(null) }
-    var showCreateWalletSheet by remember { mutableStateOf(false) }
 
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 120.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        // 1. 顶部标题栏：资产 + 右侧新建账户圆形按钮
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+    val subpageActive = inspectingWallet != null || showSelectTypeFullScreen
+    androidx.compose.runtime.LaunchedEffect(subpageActive) {
+        onSubpageActiveChange(subpageActive)
+    }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { onSubpageActiveChange(false) }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 110.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // 1. 顶部栏：右侧 `+` 白色圆钮 + `•••` 白色圆钮 + 薄荷绿插画头像（对齐 07_assets_tab.png）
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ICostCircleIconButton(
+                        onClick = { showSelectTypeFullScreen = true },
+                        size = 42.dp
+                    ) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = "添加账户",
+                            tint = ICostTextPrimary,
+                            modifier = Modifier.size(21.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Box {
+                        ICostCircleIconButton(
+                            onClick = { showTopMoreMenu = true },
+                            size = 42.dp
+                        ) {
+                            Icon(
+                                Icons.Default.MoreHoriz,
+                                contentDescription = "更多",
+                                tint = ICostTextPrimary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = showTopMoreMenu,
+                            onDismissRequest = { showTopMoreMenu = false },
+                            containerColor = ICostCardWhite
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("添加资产或信用账户", fontSize = 14.sp) },
+                                onClick = {
+                                    showTopMoreMenu = false
+                                    showSelectTypeFullScreen = true
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (hideAmounts) "显示资产金额" else "隐藏资产金额", fontSize = 14.sp) },
+                                onClick = {
+                                    showTopMoreMenu = false
+                                    onToggleHideAmounts()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (recurringExpanded) "隐藏周期账单" else "查看周期账单 (${recurringRules.size})", fontSize = 14.sp) },
+                                onClick = {
+                                    showTopMoreMenu = false
+                                    recurringExpanded = !recurringExpanded
+                                }
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(10.dp))
+                    ICostAvatarButton(
+                        onClick = onOpenSettingsPage,
+                        size = 42.dp
+                    )
+                }
+            }
+
+            // 2. 超大加粗「资产」标题
+            item {
                 Text(
                     text = "资产",
                     fontSize = 30.sp,
                     fontWeight = FontWeight.ExtraBold,
                     color = ICostTextPrimary
                 )
-                Surface(
-                    onClick = { showCreateWalletSheet = true },
-                    shape = CircleShape,
-                    color = ICostCardWhite,
-                    modifier = Modifier.size(42.dp)
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(Icons.Default.Add, contentDescription = "添加账户", tint = ICostTextPrimary, modifier = Modifier.size(22.dp))
-                    }
-                }
             }
-        }
 
-        // 2. 净资产大卡片（带小眼睛隐藏/显示切换）
-        item {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(containerColor = ICostCardWhite),
-                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
-            ) {
-                Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("净资产", fontSize = 15.sp, color = ICostTextSecondary, fontWeight = FontWeight.Medium)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        IconButton(
-                            onClick = onToggleHideAmounts,
-                            modifier = Modifier.size(24.dp)
+            // 3. 净资产大卡片（ICDIN 36sp 金额 + 原生眼睛显隐图标 money_eye_open.webp）
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(22.dp),
+                    colors = CardDefaults.cardColors(containerColor = ICostCardWhite),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = if (hideAmounts) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                                contentDescription = "隐藏或显示金额",
-                                tint = ICostTextSecondary,
-                                modifier = Modifier.size(18.dp)
-                            )
+                            Text("净资产", fontSize = 14.sp, color = ICostTextSecondary)
+                            Box(
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(CircleShape)
+                                    .clickable(
+                                        interactionSource = remember { MutableInteractionSource() },
+                                        indication = null,
+                                        onClick = onToggleHideAmounts
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                ICostAssetImage(
+                                    assetFile = if (hideAmounts) "money_eye_close.webp" else "money_eye_open.webp",
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
                         }
-                    }
 
-                    Spacer(modifier = Modifier.height(4.dp))
+                        Spacer(modifier = Modifier.height(6.dp))
 
-                    Text(
-                        text = formatMoneyCents(netWorthCnyCents, "CNY", hideAmounts),
-                        fontSize = 36.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = ICostTextPrimary,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(20.dp)
-                    ) {
                         Text(
-                            text = "总资产  ${formatMoneyCents(totalAssetsCnyCents, "CNY", hideAmounts)}",
-                            fontSize = 14.sp,
-                            color = ICostTextSecondary,
+                            text = formatMoneyCents(netWorthCnyCents, "CNY", hideAmounts),
+                            fontFamily = ICDinFontFamily,
+                            fontSize = 36.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ICostTextPrimary,
                             maxLines = 1,
                             softWrap = false
                         )
-                        Text(
-                            text = "总负债  ${formatMoneyCents(totalLiabilityCnyCents, "CNY", hideAmounts)}",
-                            fontSize = 14.sp,
-                            color = ICostTextSecondary,
-                            maxLines = 1,
-                            softWrap = false
-                        )
-                    }
-                }
-            }
-        }
 
-        // 3. 1:1 复刻 iCost 并排双卡片：「总借入」与「总借出」
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Surface(
-                    onClick = {
-                        onQuickActionWithWallet(TransactionType.LOAN_IN, assetWallets.firstOrNull()?.id, null)
-                    },
-                    shape = RoundedCornerShape(20.dp),
-                    color = ICostCardWhite,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(34.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color(0xFF52525B)),
-                            contentAlignment = Alignment.Center
+                        Spacer(modifier = Modifier.height(10.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(20.dp)
                         ) {
-                            Icon(Icons.Default.ArrowDownward, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text("总借入", fontSize = 13.sp, color = ICostTextSecondary)
-                            Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                formatMoneyCents(totalLoanInCents, "CNY", hideAmounts),
-                                fontSize = 17.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = ICostTextPrimary,
+                                text = "总资产 ${formatMoneyCents(totalAssetsCnyCents, "CNY", hideAmounts)}",
+                                fontSize = 13.sp,
+                                color = ICostTextSecondary,
                                 maxLines = 1,
                                 softWrap = false
                             )
-                        }
-                    }
-                }
-
-                Surface(
-                    onClick = {
-                        onQuickActionWithWallet(TransactionType.LOAN_OUT, assetWallets.firstOrNull()?.id, null)
-                    },
-                    shape = RoundedCornerShape(20.dp),
-                    color = ICostCardWhite,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(34.dp)
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(Color(0xFF34C759)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(Icons.Default.ArrowUpward, contentDescription = null, tint = Color.White, modifier = Modifier.size(18.dp))
-                        }
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text("总借出", fontSize = 13.sp, color = ICostTextSecondary)
-                            Spacer(modifier = Modifier.height(2.dp))
                             Text(
-                                formatMoneyCents(totalLoanOutCents, "CNY", hideAmounts),
-                                fontSize = 17.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = ICostTextPrimary,
+                                text = "总负债 ${formatMoneyCents(-totalLiabilityCnyCents, "CNY", hideAmounts)}",
+                                fontSize = 13.sp,
+                                color = ICostTextSecondary,
                                 maxLines = 1,
                                 softWrap = false
                             )
@@ -295,22 +291,82 @@ fun ICostAssetsScreen(
                     }
                 }
             }
-        }
 
-        // 4. 可折叠分组一：信用账户 (信用卡 / 花呗 / 京东白条)
-        if (creditWallets.isNotEmpty()) {
+            // 4. 1:1 复刻 iCost 并排双卡片：「总借入」(total_borrowing.webp) 与「总借出」(total_lending.webp)
             item {
-                CollapsibleGroupHeader(
-                    title = "信用账户",
-                    count = creditWallets.size,
-                    rightSummary = "欠款: ${formatMoneyCents(totalLiabilityCnyCents, "CNY", hideAmounts)}",
-                    expanded = creditExpanded,
-                    onToggle = { creditExpanded = !creditExpanded }
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Surface(
+                        onClick = {
+                            onQuickActionWithWallet(TransactionType.LOAN_IN, assetWallets.firstOrNull()?.id, null)
+                        },
+                        shape = RoundedCornerShape(20.dp),
+                        color = ICostCardWhite,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("总借入", fontSize = 13.sp, color = ICostTextSecondary)
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = formatMoneyCents(totalLoanInCents, "CNY", hideAmounts),
+                                    fontFamily = ICDinFontFamily,
+                                    fontSize = 19.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostTextPrimary,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                            ICostAssetImage(
+                                assetFile = "total_borrowing.webp",
+                                modifier = Modifier.size(30.dp)
+                            )
+                        }
+                    }
+
+                    Surface(
+                        onClick = {
+                            onQuickActionWithWallet(TransactionType.LOAN_OUT, assetWallets.firstOrNull()?.id, null)
+                        },
+                        shape = RoundedCornerShape(20.dp),
+                        color = ICostCardWhite,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 15.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("总借出", fontSize = 13.sp, color = ICostTextSecondary)
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = formatMoneyCents(totalLoanOutCents, "CNY", hideAmounts),
+                                    fontFamily = ICDinFontFamily,
+                                    fontSize = 19.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostTextPrimary,
+                                    maxLines = 1,
+                                    softWrap = false
+                                )
+                            }
+                            ICostAssetImage(
+                                assetFile = "total_lending.webp",
+                                modifier = Modifier.size(30.dp)
+                            )
+                        }
+                    }
+                }
             }
 
-            item {
-                AnimatedVisibility(visible = creditExpanded) {
+            // 5. 白色整卡容器：信用账户 (3)   欠款: ¥6,926.90 ⌄（对齐 07_assets_tab.png）
+            if (creditWallets.isNotEmpty()) {
+                item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(22.dp),
@@ -318,40 +374,40 @@ fun ICostAssetsScreen(
                         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                     ) {
                         Column(modifier = Modifier.fillMaxWidth()) {
-                            creditWallets.forEachIndexed { idx, w ->
-                                ICostAccountItemRow(
-                                    wallet = w,
-                                    hideAmounts = hideAmounts,
-                                    onClick = { inspectingWallet = w }
-                                )
-                                if (idx < creditWallets.lastIndex) {
-                                    HorizontalDivider(
-                                        modifier = Modifier.padding(start = 70.dp, end = 16.dp),
-                                        thickness = 0.6.dp,
-                                        color = ICostDivider
-                                    )
+                            CollapsibleGroupHeaderInsideCard(
+                                title = "信用账户",
+                                count = creditWallets.size,
+                                rightSummary = "欠款: ${formatMoneyCents(totalLiabilityCnyCents, "CNY", hideAmounts)}",
+                                expanded = creditExpanded,
+                                onToggle = { creditExpanded = !creditExpanded }
+                            )
+
+                            AnimatedVisibility(visible = creditExpanded) {
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    creditWallets.forEachIndexed { idx, w ->
+                                        ICostAccountItemRow(
+                                            wallet = w,
+                                            hideAmounts = hideAmounts,
+                                            onClick = { inspectingWallet = w }
+                                        )
+                                        if (idx < creditWallets.lastIndex) {
+                                            HorizontalDivider(
+                                                modifier = Modifier.padding(start = 68.dp, end = 16.dp),
+                                                thickness = 0.5.dp,
+                                                color = ICostDivider
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // 5. 可折叠分组二：资金账户 (微信零钱 / 支付宝余额宝 / 储蓄卡)
-        if (assetWallets.isNotEmpty()) {
-            item {
-                CollapsibleGroupHeader(
-                    title = "资金账户",
-                    count = assetWallets.size,
-                    rightSummary = "余额: ${formatMoneyCents(totalAssetsCnyCents, "CNY", hideAmounts)}",
-                    expanded = assetExpanded,
-                    onToggle = { assetExpanded = !assetExpanded }
-                )
-            }
-
-            item {
-                AnimatedVisibility(visible = assetExpanded) {
+            // 6. 白色整卡容器：资金账户   余额: ¥7,069.22 ⌄
+            if (assetWallets.isNotEmpty()) {
+                item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(22.dp),
@@ -359,40 +415,40 @@ fun ICostAssetsScreen(
                         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                     ) {
                         Column(modifier = Modifier.fillMaxWidth()) {
-                            assetWallets.forEachIndexed { idx, w ->
-                                ICostAccountItemRow(
-                                    wallet = w,
-                                    hideAmounts = hideAmounts,
-                                    onClick = { inspectingWallet = w }
-                                )
-                                if (idx < assetWallets.lastIndex) {
-                                    HorizontalDivider(
-                                        modifier = Modifier.padding(start = 70.dp, end = 16.dp),
-                                        thickness = 0.6.dp,
-                                        color = ICostDivider
-                                    )
+                            CollapsibleGroupHeaderInsideCard(
+                                title = "资金账户",
+                                count = assetWallets.size,
+                                rightSummary = "余额: ${formatMoneyCents(totalAssetsCnyCents, "CNY", hideAmounts)}",
+                                expanded = assetExpanded,
+                                onToggle = { assetExpanded = !assetExpanded }
+                            )
+
+                            AnimatedVisibility(visible = assetExpanded) {
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    assetWallets.forEachIndexed { idx, w ->
+                                        ICostAccountItemRow(
+                                            wallet = w,
+                                            hideAmounts = hideAmounts,
+                                            onClick = { inspectingWallet = w }
+                                        )
+                                        if (idx < assetWallets.lastIndex) {
+                                            HorizontalDivider(
+                                                modifier = Modifier.padding(start = 68.dp, end = 16.dp),
+                                                thickness = 0.5.dp,
+                                                color = ICostDivider
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // 6. 可折叠分组三：周期性自动入账（房租/订阅）
-        if (recurringRules.isNotEmpty()) {
-            item {
-                CollapsibleGroupHeader(
-                    title = "周期账单",
-                    count = recurringRules.size,
-                    rightSummary = if (recurringExpanded) "收起" else "展开",
-                    expanded = recurringExpanded,
-                    onToggle = { recurringExpanded = !recurringExpanded }
-                )
-            }
-
-            item {
-                AnimatedVisibility(visible = recurringExpanded) {
+            // 7. 周期账单折叠卡片
+            if (recurringExpanded && recurringRules.isNotEmpty()) {
+                item {
                     Card(
                         modifier = Modifier.fillMaxWidth(),
                         shape = RoundedCornerShape(22.dp),
@@ -400,11 +456,18 @@ fun ICostAssetsScreen(
                         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
                     ) {
                         Column(modifier = Modifier.fillMaxWidth()) {
+                            CollapsibleGroupHeaderInsideCard(
+                                title = "周期账单",
+                                count = recurringRules.size,
+                                rightSummary = "收起",
+                                expanded = true,
+                                onToggle = { recurringExpanded = false }
+                            )
                             recurringRules.forEach { rule ->
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 16.dp, vertical = 14.dp),
+                                        .padding(horizontal = 16.dp, vertical = 12.dp),
                                     horizontalArrangement = Arrangement.SpaceBetween,
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
@@ -432,58 +495,67 @@ fun ICostAssetsScreen(
                 }
             }
         }
+
+        // 全屏二级页面：账户详情（对齐 10_asset_detail_real.png）
+        val currentInspecting = inspectingWallet?.let { target -> wallets.firstOrNull { it.id == target.id } ?: target }
+        if (currentInspecting != null) {
+            ICostWalletDetailFullScreen(
+                wallet = currentInspecting,
+                allWallets = wallets,
+                walletTransactions = transactions.filter {
+                    it.sourceWalletId == currentInspecting.id || it.targetWalletId == currentInspecting.id
+                },
+                onBack = { inspectingWallet = null },
+                onEditWallet = {
+                    editingWallet = currentInspecting
+                },
+                onRepayOrTransfer = {
+                    val wid = currentInspecting.id
+                    if (currentInspecting.type.isLiability) {
+                        onQuickActionWithWallet(TransactionType.REPAYMENT, assetWallets.firstOrNull()?.id, wid)
+                    } else {
+                        onQuickActionWithWallet(
+                            TransactionType.TRANSFER,
+                            wid,
+                            assetWallets.firstOrNull { it.id != wid }?.id
+                        )
+                    }
+                },
+                onAddRecordWithWallet = {
+                    onQuickActionWithWallet(TransactionType.EXPENSE, currentInspecting.id, null)
+                },
+                onDeleteWallet = {
+                    onDeleteWallet(currentInspecting)
+                    inspectingWallet = null
+                },
+                onClickTransaction = onSelectTransaction
+            )
+        }
+
+        // 全屏二级页面：选择类型（对齐 11_add_asset_real.png）
+        if (showSelectTypeFullScreen) {
+            ICostSelectAccountTypeFullScreen(
+                onBack = { showSelectTypeFullScreen = false },
+                onSelectPreset = { option ->
+                    showSelectTypeFullScreen = false
+                    selectedPresetForEditor = option
+                }
+            )
+        }
     }
 
-    // 账户详情与流水管理弹窗（点击任意账户行弹出）
-    val currentInspecting = inspectingWallet?.let { target -> wallets.firstOrNull { it.id == target.id } ?: target }
-    if (currentInspecting != null) {
-        WalletDetailBottomSheet(
-            wallet = currentInspecting,
-            walletTransactions = transactions.filter {
-                it.sourceWalletId == currentInspecting.id || it.targetWalletId == currentInspecting.id
-            },
-            onDismiss = { inspectingWallet = null },
-            onEditWallet = {
-                inspectingWallet = null
-                editingWallet = currentInspecting
-            },
-            onRepayCredit = {
-                val creditId = currentInspecting.id
-                inspectingWallet = null
-                onQuickActionWithWallet(TransactionType.REPAYMENT, assetWallets.firstOrNull()?.id, creditId)
-            },
-            onTransferFrom = {
-                val fromId = currentInspecting.id
-                inspectingWallet = null
-                onQuickActionWithWallet(TransactionType.TRANSFER, fromId, assetWallets.firstOrNull { it.id != fromId }?.id)
-            },
-            onAddExpenseWithWallet = {
-                val wid = currentInspecting.id
-                inspectingWallet = null
-                onQuickActionWithWallet(TransactionType.EXPENSE, wid, null)
-            },
-            onDeleteWallet = {
-                onDeleteWallet(currentInspecting)
-                inspectingWallet = null
-            },
-            onClickTransaction = { tx ->
-                inspectingWallet = null
-                onSelectTransaction(tx)
-            }
-        )
-    }
-
-    // 新建或编辑账户弹窗
-    if (showCreateWalletSheet || editingWallet != null) {
+    // 账户信息表单弹窗（新建或编辑）
+    if (selectedPresetForEditor != null || editingWallet != null) {
         WalletEditorSheet(
             existing = editingWallet,
+            preset = selectedPresetForEditor,
             onDismiss = {
-                showCreateWalletSheet = false
+                selectedPresetForEditor = null
                 editingWallet = null
             },
             onConfirm = { saved ->
                 onSaveWallet(saved)
-                showCreateWalletSheet = false
+                selectedPresetForEditor = null
                 editingWallet = null
             }
         )
@@ -491,7 +563,7 @@ fun ICostAssetsScreen(
 }
 
 @Composable
-private fun CollapsibleGroupHeader(
+private fun CollapsibleGroupHeaderInsideCard(
     title: String,
     count: Int,
     rightSummary: String,
@@ -501,23 +573,22 @@ private fun CollapsibleGroupHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
             .clickable { onToggle() }
-            .padding(horizontal = 4.dp, vertical = 6.dp),
+            .padding(horizontal = 16.dp, vertical = 13.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = title,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                color = ICostTextPrimary
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                color = ICostTextSecondary
             )
-            Spacer(modifier = Modifier.width(6.dp))
+            Spacer(modifier = Modifier.width(4.dp))
             Text(
                 text = "($count)",
-                fontSize = 14.sp,
+                fontSize = 13.sp,
                 color = ICostTextSecondary
             )
         }
@@ -535,31 +606,25 @@ private fun CollapsibleGroupHeader(
                 imageVector = if (expanded) Icons.Default.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
                 contentDescription = null,
                 tint = ICostTextSecondary,
-                modifier = Modifier.size(18.dp)
+                modifier = Modifier.size(16.dp)
             )
         }
     }
 }
 
-/**
- * 1:1 复刻 iCost 的账户行布局（彻底杜绝文字竖排折叠换行 Bug！）
- */
 @Composable
 private fun ICostAccountItemRow(
     wallet: WalletEntity,
     hideAmounts: Boolean,
     onClick: () -> Unit
 ) {
-    val fullTitle = remember(wallet.name, wallet.cardLast4) {
-        formatWalletDisplayName(wallet)
-    }
+    val fullTitle = wallet.name
 
     val leftSubtitle = remember(wallet) {
-        val tag = wallet.subTypeLabel.ifBlank { wallet.type.shortTag }
         if (wallet.type.isLiability) {
-            "[$tag] ${daysUntilRepaymentText(wallet.repaymentDay)}"
+            daysUntilRepaymentText(wallet.repaymentDay)
         } else {
-            "[$tag] ${if (wallet.includeInNetWorth) "计入净资产" else "不计入净资产"}"
+            wallet.subTypeLabel.ifBlank { wallet.type.displayName }
         }
     }
 
@@ -567,14 +632,13 @@ private fun ICostAccountItemRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { onClick() }
-            .padding(horizontal = 16.dp, vertical = 15.dp),
+            .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        WalletBrandAvatar(wallet = wallet, size = 42.dp)
+        WalletBrandAvatar(wallet = wallet, size = 40.dp)
 
         Spacer(modifier = Modifier.width(12.dp))
 
-        // 左侧标题与副标题：严格单行省略，绝不挤压右侧金额！
         Column(
             modifier = Modifier
                 .weight(1f)
@@ -582,13 +646,13 @@ private fun ICostAccountItemRow(
         ) {
             Text(
                 text = fullTitle,
-                fontSize = 16.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
                 color = ICostTextPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            Spacer(modifier = Modifier.height(3.dp))
+            Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = leftSubtitle,
                 fontSize = 12.sp,
@@ -598,7 +662,6 @@ private fun ICostAccountItemRow(
             )
         }
 
-        // 右侧金额与可用额度：严格 softWrap = false，绝不竖向折行！
         Column(horizontalAlignment = Alignment.End) {
             val primaryRightText = if (wallet.type.isLiability) {
                 if (wallet.balanceCents > 0L) {
@@ -612,7 +675,7 @@ private fun ICostAccountItemRow(
 
             Text(
                 text = primaryRightText,
-                fontSize = 17.sp,
+                fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = ICostTextPrimary,
                 maxLines = 1,
@@ -620,25 +683,549 @@ private fun ICostAccountItemRow(
             )
 
             if (wallet.type.isLiability && wallet.creditLimitCents != null) {
-                Spacer(modifier = Modifier.height(3.dp))
+                Spacer(modifier = Modifier.height(2.dp))
                 val availableCents = (wallet.creditLimitCents - wallet.balanceCents).coerceAtLeast(0L)
                 Text(
                     text = "可用额度: ${formatMoneyCents(availableCents, wallet.currency, hideAmounts)}",
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
                     color = ICostTextSecondary,
                     maxLines = 1,
                     softWrap = false
                 )
             } else if (wallet.currency != "CNY") {
-                Spacer(modifier = Modifier.height(3.dp))
+                Spacer(modifier = Modifier.height(2.dp))
                 val cnyCents = (wallet.balanceCents * CurrencyCode.fromCode(wallet.currency).defaultRateToCny).roundToLong()
                 Text(
                     text = "约 ${formatMoneyCents(cnyCents, "CNY", hideAmounts)}",
-                    fontSize = 12.sp,
+                    fontSize = 11.sp,
                     color = ICostTextSecondary,
                     maxLines = 1,
                     softWrap = false
                 )
+            }
+        }
+    }
+}
+
+/**
+ * 1:1 iCost 全屏「账户详情」页面（对齐 10_asset_detail_real.png）
+ */
+@Composable
+private fun ICostWalletDetailFullScreen(
+    wallet: WalletEntity,
+    allWallets: List<WalletEntity>,
+    walletTransactions: List<TransactionEntity>,
+    onBack: () -> Unit,
+    onEditWallet: () -> Unit,
+    onRepayOrTransfer: () -> Unit,
+    onAddRecordWithWallet: () -> Unit,
+    onDeleteWallet: () -> Unit,
+    onClickTransaction: (TransactionEntity) -> Unit
+) {
+    BackHandler(onBack = onBack)
+
+    val walletMap = remember(allWallets) { allWallets.associateBy { it.id } }
+    val nowCal = remember { Calendar.getInstance() }
+    var selectedYear by remember { mutableIntStateOf(nowCal.get(Calendar.YEAR)) }
+    var selectedMonth by remember { mutableIntStateOf(nowCal.get(Calendar.MONTH) + 1) }
+    var showMoreMenu by remember { mutableStateOf(false) }
+
+    val monthList = remember(walletTransactions, selectedYear, selectedMonth) {
+        val c = Calendar.getInstance()
+        walletTransactions.filter { tx ->
+            c.timeInMillis = tx.timestamp
+            c.get(Calendar.YEAR) == selectedYear && (c.get(Calendar.MONTH) + 1) == selectedMonth
+        }
+    }
+
+    val groupedByDay = remember(monthList) {
+        val fmt = SimpleDateFormat("MM/dd EEEE", Locale.CHINA)
+        monthList.groupBy { fmt.format(Date(it.timestamp)) }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ICostBgGray)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = {}
+            )
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 18.dp),
+            contentPadding = PaddingValues(top = 8.dp, bottom = 110.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // 顶部栏：`<` 返回 + 居中「账户详情」 + 右侧 `•••`
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ICostCircleIconButton(onClick = onBack, size = 42.dp) {
+                        ICostAssetImage(
+                            assetFile = "record_back_icon.webp",
+                            tint = ICostTextPrimary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    Text(
+                        text = "账户详情",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextPrimary
+                    )
+                    Box {
+                        ICostCircleIconButton(onClick = { showMoreMenu = true }, size = 42.dp) {
+                            Icon(Icons.Default.MoreHoriz, contentDescription = "更多", tint = ICostTextPrimary)
+                        }
+                        DropdownMenu(
+                            expanded = showMoreMenu,
+                            onDismissRequest = { showMoreMenu = false },
+                            containerColor = ICostCardWhite
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("编辑账户信息", fontSize = 14.sp) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    onEditWallet()
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("删除该账户", fontSize = 14.sp, color = ICostCoralRed) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    onDeleteWallet()
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 主账户白卡（含右下方淡银联水印 asset_bill_bank.webp）
+            item {
+                Surface(
+                    shape = RoundedCornerShape(22.dp),
+                    color = ICostCardWhite,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        ICostAssetImage(
+                            assetFile = "asset_bill_bank.webp",
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .padding(end = 12.dp, bottom = 8.dp)
+                                .size(76.dp)
+                        )
+
+                        Column(modifier = Modifier.padding(20.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    WalletBrandAvatar(wallet, size = 34.dp)
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        text = formatWalletDisplayName(wallet),
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary
+                                    )
+                                }
+                                if (wallet.type.isLiability) {
+                                    Text(
+                                        text = daysUntilRepaymentText(wallet.repaymentDay),
+                                        fontSize = 12.sp,
+                                        color = ICostTextSecondary
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            Text(
+                                text = if (wallet.type.isLiability) "当前欠款" else "账户余额",
+                                fontSize = 12.sp,
+                                color = ICostTextSecondary
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = formatMoneyCents(wallet.balanceCents, wallet.currency),
+                                fontFamily = ICDinFontFamily,
+                                fontSize = 34.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostTextPrimary
+                            )
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            if (wallet.type.isLiability && wallet.creditLimitCents != null) {
+                                val avail = (wallet.creditLimitCents - wallet.balanceCents).coerceAtLeast(0L)
+                                Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                                    Text(
+                                        text = "总额度 ${formatMoneyCents(wallet.creditLimitCents, wallet.currency)}",
+                                        fontSize = 13.sp,
+                                        color = ICostTextSecondary
+                                    )
+                                    Text(
+                                        text = "可用额度 ${formatMoneyCents(avail, wallet.currency)}",
+                                        fontSize = 13.sp,
+                                        color = ICostTextSecondary
+                                    )
+                                }
+                            } else {
+                                Text(
+                                    text = if (wallet.includeInNetWorth) "计入净资产统计 · ${wallet.currency}" else "不计入净资产 · ${wallet.currency}",
+                                    fontSize = 13.sp,
+                                    color = ICostTextSecondary
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 年月选择栏
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "${selectedYear}年${selectedMonth}月",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextPrimary
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Surface(
+                        onClick = {
+                            if (selectedMonth == 1) { selectedMonth = 12; selectedYear -= 1 } else selectedMonth -= 1
+                        },
+                        shape = CircleShape,
+                        color = ICostCardWhite,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowLeft, contentDescription = null, tint = ICostTextSecondary, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Surface(
+                        onClick = {
+                            if (selectedMonth == 12) { selectedMonth = 1; selectedYear += 1 } else selectedMonth += 1
+                        },
+                        shape = CircleShape,
+                        color = ICostCardWhite,
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = ICostTextSecondary, modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+            }
+
+            // 按日分组流水列表
+            if (groupedByDay.isEmpty()) {
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = ICostCardWhite,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "当月暂无该账户的交易流水",
+                            fontSize = 14.sp,
+                            color = ICostTextSecondary,
+                            modifier = Modifier.padding(24.dp)
+                        )
+                    }
+                }
+            } else {
+                groupedByDay.forEach { (dayLabel, dayItems) ->
+                    val dayExp = dayItems
+                        .filter { it.type == TransactionType.EXPENSE }
+                        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+                    item {
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(dayLabel, fontSize = 12.sp, color = ICostTextSecondary)
+                                Text("支出: ${formatMoneyCents(dayExp)}", fontSize = 12.sp, color = ICostTextSecondary)
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(20.dp),
+                                color = ICostCardWhite,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column {
+                                    dayItems.forEachIndexed { idx, tx ->
+                                        val timeStr = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(tx.timestamp))
+                                        val isRefunded = tx.type == TransactionType.EXPENSE && tx.refundedAmountCents > 0L
+                                        val netExp = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
+                                        val otherWallet = if (tx.sourceWalletId == wallet.id) {
+                                            tx.targetWalletId?.let { walletMap[it] }
+                                        } else {
+                                            tx.sourceWalletId?.let { walletMap[it] }
+                                        }
+
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable { onClickTransaction(tx) }
+                                                .padding(horizontal = 16.dp, vertical = 13.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            ICostCategoryBadge(
+                                                category = tx.category,
+                                                type = tx.type,
+                                                size = 38.dp
+                                            )
+                                            Spacer(modifier = Modifier.width(12.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                val rowTitle = when (tx.type) {
+                                                    TransactionType.REPAYMENT, TransactionType.TRANSFER ->
+                                                        if (tx.targetWalletId == wallet.id) "从${otherWallet?.name ?: "外部账户"}转入"
+                                                        else "转至${otherWallet?.name ?: "目标账户"}"
+                                                    TransactionType.REFUND_OFFSET -> "退款入账"
+                                                    else -> tx.category
+                                                }
+                                                Text(rowTitle, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = ICostTextPrimary)
+                                                Text(
+                                                    text = if (tx.merchant.isNotBlank()) "$timeStr · ${tx.merchant}" else timeStr,
+                                                    fontSize = 12.sp,
+                                                    color = ICostTextSecondary,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+
+                                            if (isRefunded) {
+                                                Text(
+                                                    text = formatMoneyCents(tx.amountCents, tx.currency),
+                                                    fontSize = 12.sp,
+                                                    color = ICostTextSecondary,
+                                                    textDecoration = TextDecoration.LineThrough
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text(
+                                                    text = "-${formatMoneyCents(netExp)}",
+                                                    fontSize = 15.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = ICostCoralRed
+                                                )
+                                            } else {
+                                                val sign = when (tx.type) {
+                                                    TransactionType.EXPENSE, TransactionType.LOAN_OUT -> "-"
+                                                    TransactionType.INCOME -> "+"
+                                                    else -> ""
+                                                }
+                                                val col = when (tx.type) {
+                                                    TransactionType.EXPENSE, TransactionType.LOAN_OUT -> ICostCoralRed
+                                                    TransactionType.INCOME -> ICostGreenIncome
+                                                    TransactionType.REFUND_OFFSET -> ICostAmberGold
+                                                    else -> ICostTextPrimary
+                                                }
+                                                Text(
+                                                    text = "$sign${formatMoneyCents(tx.amountCents, tx.currency)}",
+                                                    fontSize = 15.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = col
+                                                )
+                                            }
+                                        }
+                                        if (idx < dayItems.lastIndex) {
+                                            HorizontalDivider(
+                                                modifier = Modifier.padding(start = 66.dp, end = 16.dp),
+                                                thickness = 0.5.dp,
+                                                color = ICostDivider
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 1:1 底部悬浮操作胶囊（对齐 10_asset_detail_real.png：「还款 / 记一笔」或「转账 / 记一笔」）
+        Surface(
+            shape = RoundedCornerShape(26.dp),
+            color = ICostCardWhite,
+            shadowElevation = 8.dp,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(horizontal = 24.dp, vertical = 14.dp)
+                .fillMaxWidth()
+                .height(52.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxSize(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxSize()
+                        .clickable { onRepayOrTransfer() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (wallet.type.isLiability) "还款" else "转账",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostBlueAccent
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .width(0.8.dp)
+                        .height(22.dp)
+                        .background(ICostDivider)
+                )
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxSize()
+                        .clickable { onAddRecordWithWallet() },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "记一笔",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostBlueAccent
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 1:1 iCost 全屏「选择类型」页面（对齐 11_add_asset_real.png）
+ */
+@Composable
+private fun ICostSelectAccountTypeFullScreen(
+    onBack: () -> Unit,
+    onSelectPreset: (AccountBrandOption) -> Unit
+) {
+    BackHandler(onBack = onBack)
+
+    val sections = remember {
+        listOf(
+            "资金账户" to ICostAccountBrandCatalog.filter {
+                it.code in setOf("CASH", "DEBIT_CARD", "ALIPAY", "YUEBAO", "WECHAT", "WECHAT_LQT", "UNIONPAY", "DOUYIN", "MEITUAN", "QQ")
+            },
+            "信用账户" to ICostAccountBrandCatalog.filter {
+                it.defaultType == WalletType.CREDIT
+            },
+            "热门银行" to ICostAccountBrandCatalog.filter {
+                it.assetFile.startsWith("bank_")
+            },
+            "理财与卡券账户" to ICostAccountBrandCatalog.filter {
+                it.code in setOf("SAVING", "FUND", "STOCK", "PROVIDENT", "MEDICAL_CARD", "TRANSIT_CARD", "MEAL_CARD", "MEMBER_CARD")
+            }
+        )
+    }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ICostBgGray)
+            .padding(horizontal = 18.dp),
+        contentPadding = PaddingValues(top = 8.dp, bottom = 48.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            ICostCircleIconButton(onClick = onBack, size = 42.dp) {
+                ICostAssetImage(
+                    assetFile = "record_back_icon.webp",
+                    tint = ICostTextPrimary,
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+
+        item {
+            Text(
+                text = "选择类型",
+                fontSize = 30.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = ICostTextPrimary
+            )
+        }
+
+        sections.forEach { (sectionTitle, options) ->
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = sectionTitle,
+                        fontSize = 13.sp,
+                        color = ICostTextSecondary,
+                        modifier = Modifier.padding(horizontal = 4.dp)
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = ICostCardWhite,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                            options.forEachIndexed { idx, opt ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable { onSelectPreset(opt) }
+                                        .padding(vertical = 13.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    ICostAssetImage(
+                                        assetFile = opt.assetFile,
+                                        modifier = Modifier
+                                            .size(32.dp)
+                                            .clip(CircleShape)
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Text(
+                                        text = opt.label,
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = ICostTextPrimary,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Icon(
+                                        imageVector = Icons.Default.ChevronRight,
+                                        contentDescription = null,
+                                        tint = ICostTextMuted,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                if (idx < options.lastIndex) {
+                                    HorizontalDivider(color = ICostDivider)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -646,204 +1233,18 @@ private fun ICostAccountItemRow(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun WalletDetailBottomSheet(
-    wallet: WalletEntity,
-    walletTransactions: List<TransactionEntity>,
-    onDismiss: () -> Unit,
-    onEditWallet: () -> Unit,
-    onRepayCredit: () -> Unit,
-    onTransferFrom: () -> Unit,
-    onAddExpenseWithWallet: () -> Unit,
-    onDeleteWallet: () -> Unit,
-    onClickTransaction: (TransactionEntity) -> Unit
-) {
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = ICostBgGray,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 18.dp)
-                .navigationBarsPadding(),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            // 账户信息头卡
-            Surface(
-                shape = RoundedCornerShape(22.dp),
-                color = ICostCardWhite,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(20.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            WalletBrandAvatar(wallet, size = 40.dp)
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                Text(formatWalletDisplayName(wallet), fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                                Text(
-                                    wallet.subTypeLabel.ifBlank { wallet.type.displayName },
-                                    fontSize = 12.sp,
-                                    color = ICostTextSecondary
-                                )
-                            }
-                        }
-                        IconButton(onClick = onEditWallet) {
-                            Icon(Icons.Default.Edit, contentDescription = "编辑账户", tint = ICostTextPrimary)
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Text(
-                        text = if (wallet.type.isLiability) "当前待还欠款" else "当前账户余额",
-                        fontSize = 13.sp,
-                        color = ICostTextSecondary
-                    )
-                    Text(
-                        text = if (wallet.type.isLiability && wallet.balanceCents > 0L) {
-                            formatMoneyCents(-wallet.balanceCents, wallet.currency)
-                        } else {
-                            formatMoneyCents(wallet.balanceCents, wallet.currency)
-                        },
-                        fontSize = 32.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = ICostTextPrimary
-                    )
-
-                    if (wallet.type.isLiability && wallet.creditLimitCents != null) {
-                        val avail = (wallet.creditLimitCents - wallet.balanceCents).coerceAtLeast(0L)
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "总额度 ${formatMoneyCents(wallet.creditLimitCents, wallet.currency)}  ·  可用额度 ${formatMoneyCents(avail, wallet.currency)}",
-                            fontSize = 13.sp,
-                            color = ICostTextSecondary
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // 快捷操作按钮行
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        if (wallet.type.isLiability) {
-                            Button(
-                                onClick = onRepayCredit,
-                                colors = ButtonDefaults.buttonColors(containerColor = ICostCoralRed),
-                                shape = RoundedCornerShape(14.dp),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(Icons.Default.CreditCard, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("立即还款", fontWeight = FontWeight.Bold)
-                            }
-                        } else {
-                            OutlinedButton(
-                                onClick = onTransferFrom,
-                                shape = RoundedCornerShape(14.dp),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(Icons.Default.SwapHoriz, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("转账/提现", fontWeight = FontWeight.Bold)
-                            }
-                        }
-
-                        Button(
-                            onClick = onAddExpenseWithWallet,
-                            colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("记一笔", fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
-
-            // 该账户关联流水
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("账户收支明细 (${walletTransactions.size}笔)", fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                TextButton(onClick = onDeleteWallet) {
-                    Icon(Icons.Default.DeleteOutline, contentDescription = null, tint = ICostCoralRed, modifier = Modifier.size(16.dp))
-                    Text("删除账户", color = ICostCoralRed, fontSize = 12.sp)
-                }
-            }
-
-            LazyColumn(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(230.dp),
-                contentPadding = PaddingValues(bottom = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (walletTransactions.isEmpty()) {
-                    item {
-                        Surface(shape = RoundedCornerShape(16.dp), color = ICostCardWhite, modifier = Modifier.fillMaxWidth()) {
-                            Text("暂无该账户的交易记录", fontSize = 13.sp, color = ICostTextSecondary, modifier = Modifier.padding(18.dp))
-                        }
-                    }
-                } else {
-                    items(walletTransactions) { tx ->
-                        val dateStr = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()).format(Date(tx.timestamp))
-                        Surface(
-                            onClick = { onClickTransaction(tx) },
-                            shape = RoundedCornerShape(16.dp),
-                            color = ICostCardWhite,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(14.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(tx.category, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                    Text(
-                                        "$dateStr${if (tx.merchant.isNotBlank()) " · ${tx.merchant}" else ""}",
-                                        fontSize = 12.sp,
-                                        color = ICostTextSecondary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                Text(
-                                    text = formatMoneyCents(tx.amountCents, tx.currency),
-                                    fontWeight = FontWeight.Bold,
-                                    color = resolveTransactionBadgeColor(tx.type)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
-@Composable
 private fun WalletEditorSheet(
     existing: WalletEntity?,
+    preset: AccountBrandOption?,
     onDismiss: () -> Unit,
     onConfirm: (WalletEntity) -> Unit
 ) {
-    var name by remember { mutableStateOf(existing?.name ?: "") }
-    var type by remember { mutableStateOf(existing?.type ?: WalletType.CREDIT) }
-    var subTypeLabel by remember { mutableStateOf(existing?.subTypeLabel ?: "信用卡") }
-    var brandCode by remember { mutableStateOf(existing?.brandCode ?: "CMB") }
+    var name by remember { mutableStateOf(existing?.name ?: preset?.label?.substringBefore(" / ") ?: "") }
+    var isCreditAccount by remember {
+        mutableStateOf((existing?.type ?: preset?.defaultType ?: WalletType.DEBIT_BANK).isLiability)
+    }
+    var subTypeLabel by remember { mutableStateOf(existing?.subTypeLabel ?: preset?.subTypeLabel ?: "储蓄卡") }
+    val brandCode = existing?.brandCode ?: preset?.code ?: "ALIPAY"
     var currency by remember { mutableStateOf(existing?.currency ?: "CNY") }
     var balanceStr by remember {
         mutableStateOf(existing?.let { String.format(Locale.US, "%.2f", it.balanceCents / 100.0) } ?: "0.00")
@@ -867,40 +1268,31 @@ private fun WalletEditorSheet(
                 .padding(horizontal = 20.dp)
                 .navigationBarsPadding(),
             contentPadding = PaddingValues(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             item {
                 Text(
-                    if (existing == null) "添加资产或信用账户" else "编辑账户信息",
+                    text = if (existing == null) "新建账户" else "编辑账户",
                     fontSize = 20.sp,
-                    fontWeight = FontWeight.ExtraBold
+                    fontWeight = FontWeight.ExtraBold,
+                    color = ICostTextPrimary
                 )
             }
 
-            item {
-                Text("账户类型：", fontSize = 13.sp, color = ICostTextSecondary)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val presets = listOf(
-                        Triple(WalletType.CREDIT, "信用卡", "CMB"),
-                        Triple(WalletType.CREDIT, "蚂蚁花呗", "HUABEI"),
-                        Triple(WalletType.CREDIT, "京东白条", "JD"),
-                        Triple(WalletType.DIGITAL_WALLET, "微信支付", "WECHAT"),
-                        Triple(WalletType.DIGITAL_WALLET, "支付宝", "ALIPAY"),
-                        Triple(WalletType.DEBIT_BANK, "储蓄卡", "CMB"),
-                        Triple(WalletType.CASH_OTHER, "现金/外币", "DEFAULT")
-                    )
-                    presets.forEach { (wt, label, brand) ->
-                        FilterChip(
-                            selected = subTypeLabel == label,
-                            onClick = {
-                                type = wt
-                                subTypeLabel = label
-                                brandCode = brand
-                                if (existing == null && name.isBlank()) {
-                                    name = label
-                                }
-                            },
-                            label = { Text(label) }
+            if (preset?.assetFile?.startsWith("bank_") == true) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("设为信用卡账户（勾选为信用卡，关闭为储蓄卡）", fontSize = 13.sp, color = ICostTextSecondary)
+                        Switch(
+                            checked = isCreditAccount,
+                            onCheckedChange = {
+                                isCreditAccount = it
+                                subTypeLabel = if (it) "信用卡" else "储蓄卡"
+                            }
                         )
                     }
                 }
@@ -910,7 +1302,7 @@ private fun WalletEditorSheet(
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("账户名称 (如：招商银行信用卡 / 微粒贷)") },
+                    label = { Text("账户名称") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
@@ -921,7 +1313,7 @@ private fun WalletEditorSheet(
                     OutlinedTextField(
                         value = balanceStr,
                         onValueChange = { balanceStr = it },
-                        label = { Text(if (type.isLiability) "当前待还欠款 (元)" else "当前可用余额 (元)") },
+                        label = { Text(if (isCreditAccount) "当前待还欠款 (元)" else "当前余额 (元)") },
                         modifier = Modifier.weight(1f),
                         singleLine = true
                     )
@@ -935,7 +1327,7 @@ private fun WalletEditorSheet(
                 }
             }
 
-            if (type.isLiability) {
+            if (isCreditAccount) {
                 item {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         OutlinedTextField(
@@ -961,7 +1353,7 @@ private fun WalletEditorSheet(
                     OutlinedTextField(
                         value = last4,
                         onValueChange = { last4 = it },
-                        label = { Text("银行卡后四位 (选填)") },
+                        label = { Text("卡号后四位 (选填)") },
                         modifier = Modifier.weight(1f),
                         singleLine = true
                     )
@@ -990,13 +1382,18 @@ private fun WalletEditorSheet(
                 Button(
                     onClick = {
                         if (name.isBlank()) return@Button
+                        val finalType = if (isCreditAccount) {
+                            WalletType.CREDIT
+                        } else {
+                            preset?.defaultType ?: existing?.type ?: WalletType.DEBIT_BANK
+                        }
                         val balCents = ((balanceStr.toDoubleOrNull() ?: 0.0) * 100.0).roundToLong()
-                        val limCents = if (type.isLiability) ((limitStr.toDoubleOrNull() ?: 0.0) * 100.0).roundToLong() else null
+                        val limCents = if (isCreditAccount) ((limitStr.toDoubleOrNull() ?: 0.0) * 100.0).roundToLong() else null
                         onConfirm(
                             WalletEntity(
                                 id = existing?.id ?: 0L,
                                 name = name.trim(),
-                                type = type,
+                                type = finalType,
                                 subTypeLabel = subTypeLabel,
                                 brandCode = brandCode,
                                 currency = currency.trim().ifEmpty { "CNY" },
