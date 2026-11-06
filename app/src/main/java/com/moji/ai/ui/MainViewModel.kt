@@ -18,7 +18,43 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import kotlin.math.roundToLong
+
+@Serializable
+data class QuickBookkeepingTemplate(
+    val id: Long,
+    val title: String,
+    val typeName: String = "EXPENSE",
+    val category: String,
+    val amountCents: Long,
+    val currency: String = "CNY",
+    val walletId: Long? = 4L,
+    val note: String = ""
+)
+
+@Serializable
+data class SavingPlanItem(
+    val id: Long,
+    val title: String,
+    val targetCents: Long,
+    val savedCents: Long,
+    val deadlineLabel: String = "2026-12-31"
+)
+
+@Serializable
+data class InstallmentPlanItem(
+    val id: Long,
+    val title: String,
+    val walletId: Long = 1L,
+    val totalCents: Long,
+    val feePerPeriodCents: Long = 0L,
+    val totalPeriods: Int = 12,
+    val paidPeriods: Int = 3,
+    val category: String = "数码"
+)
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as MoJiApp
@@ -59,8 +95,231 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _sandboxStatus = MutableStateFlow<String?>(null)
     val sandboxStatus: StateFlow<String?> = _sandboxStatus.asStateFlow()
 
+    private val jsonCodec = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+
     private val _isParsing = MutableStateFlow(false)
     val isParsing: StateFlow<Boolean> = _isParsing.asStateFlow()
+
+    private val _templates = MutableStateFlow(loadSavedTemplates())
+    val templates: StateFlow<List<QuickBookkeepingTemplate>> = _templates.asStateFlow()
+
+    private val _savingPlans = MutableStateFlow(loadSavedSavingPlans())
+    val savingPlans: StateFlow<List<SavingPlanItem>> = _savingPlans.asStateFlow()
+
+    private val _installmentPlans = MutableStateFlow(loadSavedInstallments())
+    val installmentPlans: StateFlow<List<InstallmentPlanItem>> = _installmentPlans.asStateFlow()
+
+    private fun loadSavedTemplates(): List<QuickBookkeepingTemplate> {
+        val raw = uiPrefs.getString("saved_templates_json", null)
+        if (!raw.isNullOrBlank()) {
+            runCatching { return jsonCodec.decodeFromString<List<QuickBookkeepingTemplate>>(raw) }
+        }
+        return listOf(
+            QuickBookkeepingTemplate(1L, "瑞幸冰美式", "EXPENSE", "餐饮-咖啡", 990L, "CNY", 5L, "瑞幸咖啡"),
+            QuickBookkeepingTemplate(2L, "通勤地铁", "EXPENSE", "交通-地铁", 400L, "CNY", 4L, "地铁出行"),
+            QuickBookkeepingTemplate(3L, "工作简餐", "EXPENSE", "餐饮-三餐", 2600L, "CNY", 5L, "工作日午餐"),
+            QuickBookkeepingTemplate(4L, "月度话费", "EXPENSE", "通讯", 5900L, "CNY", 4L, "手机话费充值")
+        )
+    }
+
+    private fun loadSavedSavingPlans(): List<SavingPlanItem> {
+        val raw = uiPrefs.getString("saved_saving_plans_json", null)
+        if (!raw.isNullOrBlank()) {
+            runCatching { return jsonCodec.decodeFromString<List<SavingPlanItem>>(raw) }
+        }
+        return listOf(
+            SavingPlanItem(1L, "年度旅行基金", 1_500_000L, 680_000L, "2026-12-31"),
+            SavingPlanItem(2L, "应急备用金", 3_000_000L, 1_850_000L, "2027-06-30"),
+            SavingPlanItem(3L, "数码装备换新", 800_000L, 520_000L, "2026-11-30")
+        )
+    }
+
+    private fun loadSavedInstallments(): List<InstallmentPlanItem> {
+        val raw = uiPrefs.getString("saved_installments_json", null)
+        if (!raw.isNullOrBlank()) {
+            runCatching { return jsonCodec.decodeFromString<List<InstallmentPlanItem>>(raw) }
+        }
+        return listOf(
+            InstallmentPlanItem(1L, "MacBook Pro 12期免息", 1L, 1_499_900L, 0L, 12, 4, "数码-电脑"),
+            InstallmentPlanItem(2L, "年度健身私教卡 6期", 3L, 360_000L, 1200L, 6, 2, "运动")
+        )
+    }
+
+    fun saveTemplateFromTransaction(tx: TransactionEntity) {
+        val title = tx.merchant.ifBlank { tx.note.ifBlank { tx.category } }
+        val newItem = QuickBookkeepingTemplate(
+            id = System.currentTimeMillis(),
+            title = title,
+            typeName = tx.type.name,
+            category = tx.category,
+            amountCents = tx.amountCents,
+            currency = tx.currency,
+            walletId = tx.sourceWalletId ?: tx.targetWalletId,
+            note = tx.merchant.ifBlank { tx.note }
+        )
+        val updated = listOf(newItem) + _templates.value
+        _templates.value = updated
+        uiPrefs.edit().putString("saved_templates_json", jsonCodec.encodeToString(updated)).apply()
+    }
+
+    fun addCustomTemplate(title: String, category: String, amountYuan: Double, walletId: Long?) {
+        val cents = (amountYuan * 100.0).roundToLong().coerceAtLeast(1L)
+        val item = QuickBookkeepingTemplate(
+            id = System.currentTimeMillis(),
+            title = title.trim().ifEmpty { category },
+            typeName = "EXPENSE",
+            category = category,
+            amountCents = cents,
+            currency = "CNY",
+            walletId = walletId,
+            note = title.trim()
+        )
+        val updated = listOf(item) + _templates.value
+        _templates.value = updated
+        uiPrefs.edit().putString("saved_templates_json", jsonCodec.encodeToString(updated)).apply()
+    }
+
+    fun deleteTemplate(id: Long) {
+        val updated = _templates.value.filterNot { it.id == id }
+        _templates.value = updated
+        uiPrefs.edit().putString("saved_templates_json", jsonCodec.encodeToString(updated)).apply()
+    }
+
+    fun applyQuickTemplateNow(tpl: QuickBookkeepingTemplate) {
+        viewModelScope.launch {
+            val type = runCatching { TransactionType.valueOf(tpl.typeName) }.getOrDefault(TransactionType.EXPENSE)
+            val rate = CurrencyCode.fromCode(tpl.currency).defaultRateToCny
+            val cnyCents = (tpl.amountCents * rate).roundToLong()
+            val tx = TransactionEntity(
+                ledgerName = _currentLedger.value,
+                type = type,
+                amountCents = tpl.amountCents,
+                currency = tpl.currency,
+                exchangeRateToCny = rate,
+                amountCnyCents = cnyCents,
+                category = tpl.category,
+                merchant = tpl.title,
+                note = tpl.note,
+                sourceWalletId = if (type == TransactionType.INCOME) null else tpl.walletId,
+                targetWalletId = if (type == TransactionType.INCOME) tpl.walletId else null,
+                captureSource = "TEMPLATE"
+            )
+            repository.recordTransaction(tx)
+        }
+    }
+
+    fun duplicateTransactionNow(tx: TransactionEntity) {
+        viewModelScope.launch {
+            val copyTx = tx.copy(
+                id = 0L,
+                refundedAmountCents = 0L,
+                reimbursed = false,
+                timestamp = System.currentTimeMillis(),
+                captureSource = "MANUAL_COPY"
+            )
+            repository.recordTransaction(copyTx)
+        }
+    }
+
+    fun toggleOrSettleReimbursement(tx: TransactionEntity) {
+        viewModelScope.launch {
+            if (!tx.reimbursable) {
+                repository.updateExistingTransaction(tx.copy(reimbursable = true))
+            } else if (!tx.reimbursed) {
+                repository.settleReimbursement(tx.id, tx.sourceWalletId)
+            }
+        }
+    }
+
+    fun addSavingPlan(title: String, targetYuan: Double, savedYuan: Double, deadlineLabel: String) {
+        val item = SavingPlanItem(
+            id = System.currentTimeMillis(),
+            title = title.trim().ifEmpty { "存钱计划" },
+            targetCents = (targetYuan * 100.0).roundToLong().coerceAtLeast(100L),
+            savedCents = (savedYuan * 100.0).roundToLong().coerceAtLeast(0L),
+            deadlineLabel = deadlineLabel.ifBlank { "2026-12-31" }
+        )
+        val updated = listOf(item) + _savingPlans.value
+        _savingPlans.value = updated
+        uiPrefs.edit().putString("saved_saving_plans_json", jsonCodec.encodeToString(updated)).apply()
+    }
+
+    fun depositToSavingPlan(planId: Long, depositYuan: Double) {
+        val addCents = (depositYuan * 100.0).roundToLong().coerceAtLeast(0L)
+        if (addCents <= 0L) return
+        val updated = _savingPlans.value.map {
+            if (it.id == planId) it.copy(savedCents = it.savedCents + addCents) else it
+        }
+        _savingPlans.value = updated
+        uiPrefs.edit().putString("saved_saving_plans_json", jsonCodec.encodeToString(updated)).apply()
+    }
+
+    fun deleteSavingPlan(planId: Long) {
+        val updated = _savingPlans.value.filterNot { it.id == planId }
+        _savingPlans.value = updated
+        uiPrefs.edit().putString("saved_saving_plans_json", jsonCodec.encodeToString(updated)).apply()
+    }
+
+    fun addInstallmentPlan(
+        title: String,
+        walletId: Long,
+        totalYuan: Double,
+        feePerPeriodYuan: Double,
+        totalPeriods: Int,
+        category: String = "数码"
+    ) {
+        val item = InstallmentPlanItem(
+            id = System.currentTimeMillis(),
+            title = title.trim().ifEmpty { "分期账单" },
+            walletId = walletId,
+            totalCents = (totalYuan * 100.0).roundToLong().coerceAtLeast(100L),
+            feePerPeriodCents = (feePerPeriodYuan * 100.0).roundToLong().coerceAtLeast(0L),
+            totalPeriods = totalPeriods.coerceIn(2, 60),
+            paidPeriods = 0,
+            category = category
+        )
+        val updated = listOf(item) + _installmentPlans.value
+        _installmentPlans.value = updated
+        uiPrefs.edit().putString("saved_installments_json", jsonCodec.encodeToString(updated)).apply()
+    }
+
+    fun payNextInstallmentPeriod(plan: InstallmentPlanItem) {
+        if (plan.paidPeriods >= plan.totalPeriods) return
+        val nextPeriod = plan.paidPeriods + 1
+        val principalPerPeriod = plan.totalCents / plan.totalPeriods.coerceAtLeast(1)
+        val totalPeriodCents = principalPerPeriod + plan.feePerPeriodCents
+
+        val updated = _installmentPlans.value.map {
+            if (it.id == plan.id) it.copy(paidPeriods = nextPeriod) else it
+        }
+        _installmentPlans.value = updated
+        uiPrefs.edit().putString("saved_installments_json", jsonCodec.encodeToString(updated)).apply()
+
+        viewModelScope.launch {
+            val tx = TransactionEntity(
+                ledgerName = _currentLedger.value,
+                type = TransactionType.EXPENSE,
+                amountCents = totalPeriodCents,
+                currency = "CNY",
+                exchangeRateToCny = 1.0,
+                amountCnyCents = totalPeriodCents,
+                feeCents = plan.feePerPeriodCents,
+                category = plan.category,
+                merchant = "${plan.title} (${nextPeriod}/${plan.totalPeriods}期)",
+                note = "分期第${nextPeriod}期入账",
+                sourceWalletId = plan.walletId,
+                tags = "分期",
+                captureSource = "INSTALLMENT"
+            )
+            repository.recordTransaction(tx)
+        }
+    }
+
+    fun deleteInstallmentPlan(planId: Long) {
+        val updated = _installmentPlans.value.filterNot { it.id == planId }
+        _installmentPlans.value = updated
+        uiPrefs.edit().putString("saved_installments_json", jsonCodec.encodeToString(updated)).apply()
+    }
 
     private fun loadSavedLedgers(): List<String> {
         val raw = uiPrefs.getString("saved_ledgers", null)

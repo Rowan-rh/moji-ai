@@ -1,6 +1,7 @@
 package com.moji.ai.ui.theme
 
 import android.graphics.BitmapFactory
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
@@ -11,16 +12,31 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
@@ -38,13 +54,16 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -54,10 +73,12 @@ import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.WalletType
+import kotlinx.coroutines.launch
 import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 // 1:1 iCost 字体家族（ICDIN-Bold 用于所有核心金额数字，Quicksand 用于英文几何辅助）
 val ICDinFontFamily = FontFamily(
@@ -226,6 +247,214 @@ fun AnimatedMoneyText(
         softWrap = false,
         modifier = modifier
     )
+}
+
+/**
+ * 水平滑动手势触发修饰符（支持模块右滑/左滑快捷切换或展开扩展面板）
+ */
+fun Modifier.iCostHorizontalSwipeTrigger(
+    thresholdDp: Dp = 42.dp,
+    onSwipeRight: (() -> Unit)? = null,
+    onSwipeLeft: (() -> Unit)? = null
+): Modifier = composed {
+    val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
+    val thresholdPx = with(density) { thresholdDp.toPx() }
+    var dragAccumulator by remember { mutableFloatStateOf(0f) }
+
+    this.pointerInput(onSwipeRight, onSwipeLeft) {
+        detectHorizontalDragGestures(
+            onDragStart = { dragAccumulator = 0f },
+            onDragEnd = {
+                when {
+                    dragAccumulator >= thresholdPx && onSwipeRight != null -> {
+                        runCatching { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+                        onSwipeRight()
+                    }
+                    dragAccumulator <= -thresholdPx && onSwipeLeft != null -> {
+                        runCatching { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+                        onSwipeLeft()
+                    }
+                }
+                dragAccumulator = 0f
+            },
+            onDragCancel = { dragAccumulator = 0f },
+            onHorizontalDrag = { change, dragAmount ->
+                change.consume()
+                dragAccumulator += dragAmount
+            }
+        )
+    }
+}
+
+/**
+ * 模块双向侧滑（右滑 `→` 或左滑 `←`）呼出的扩展功能按钮定义
+ */
+data class SwipeActionItem(
+    val label: String,
+    val iconAsset: String? = null,
+    val backgroundColor: Color,
+    val contentColor: Color = Color.White,
+    val onClick: () -> Unit
+)
+
+/**
+ * 1:1 iCost 模块侧滑扩展功能容器（同时支持「右滑展开左侧扩展按钮」与「左滑展开右侧扩展按钮」，内置弹簧吸附与触觉反馈）
+ */
+@Composable
+fun ICostSwipeActionRow(
+    actions: List<SwipeActionItem>,
+    modifier: Modifier = Modifier,
+    actionWidth: Dp = 56.dp,
+    actionHeight: Dp = 46.dp,
+    content: @Composable () -> Unit
+) {
+    if (actions.isEmpty()) {
+        Box(modifier = modifier) { content() }
+        return
+    }
+
+    val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
+    val scope = rememberCoroutineScope()
+    val offsetX = remember { Animatable(0f) }
+    var hapticTriggeredInDrag by remember { mutableStateOf(false) }
+
+    val totalRevealWidthDp = (actionWidth * actions.size) + (6.dp * (actions.size - 1).coerceAtLeast(0)) + 16.dp
+    val maxRevealPx = with(density) { totalRevealWidthDp.toPx() }
+    val snapThresholdPx = maxRevealPx * 0.30f
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+    ) {
+        // 背景扩展功能胶囊组：右滑（offsetX > 0）时在左侧呼出，左滑（offsetX < 0）时在右侧呼出
+        val currentOffset = offsetX.value
+        if (abs(currentOffset) > 2f) {
+            val revealProgress = (abs(currentOffset) / maxRevealPx).coerceIn(0f, 1f)
+            val isRightSwipe = currentOffset > 0f
+            Row(
+                modifier = Modifier
+                    .align(if (isRightSwipe) Alignment.CenterStart else Alignment.CenterEnd)
+                    .padding(horizontal = 8.dp)
+                    .graphicsLayer {
+                        alpha = (revealProgress * 1.25f).coerceIn(0f, 1f)
+                        scaleX = 0.82f + 0.18f * revealProgress
+                        scaleY = 0.82f + 0.18f * revealProgress
+                    },
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                actions.forEach { action ->
+                    Surface(
+                        shape = RoundedCornerShape(13.dp),
+                        color = action.backgroundColor,
+                        modifier = Modifier
+                            .width(actionWidth)
+                            .height(actionHeight)
+                            .iCostPressScale(pressedScale = 0.90f) {
+                                scope.launch {
+                                    offsetX.animateTo(
+                                        targetValue = 0f,
+                                        animationSpec = spring(
+                                            dampingRatio = 0.78f,
+                                            stiffness = Spring.StiffnessMedium
+                                        )
+                                    )
+                                }
+                                action.onClick()
+                            }
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp)
+                        ) {
+                            if (action.iconAsset != null) {
+                                ICostAssetImage(
+                                    assetFile = action.iconAsset,
+                                    tint = action.contentColor,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                            }
+                            Text(
+                                text = action.label,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = action.contentColor,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 前景可滑动模块主体
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .offset { IntOffset(offsetX.value.roundToInt(), 0) }
+                .background(ICostCardWhite)
+                .pointerInput(actions.size, maxRevealPx) {
+                    detectHorizontalDragGestures(
+                        onDragStart = {
+                            hapticTriggeredInDrag = false
+                        },
+                        onDragEnd = {
+                            val cur = offsetX.value
+                            val target = when {
+                                cur >= snapThresholdPx -> maxRevealPx
+                                cur <= -snapThresholdPx -> -maxRevealPx
+                                else -> 0f
+                            }
+                            scope.launch {
+                                offsetX.animateTo(
+                                    targetValue = target,
+                                    animationSpec = spring(
+                                        dampingRatio = 0.72f,
+                                        stiffness = Spring.StiffnessMedium
+                                    )
+                                )
+                            }
+                        },
+                        onDragCancel = {
+                            scope.launch {
+                                offsetX.animateTo(
+                                    targetValue = 0f,
+                                    animationSpec = spring(
+                                        dampingRatio = 0.78f,
+                                        stiffness = Spring.StiffnessMedium
+                                    )
+                                )
+                            }
+                        },
+                        onHorizontalDrag = { change, dragAmount ->
+                            change.consume()
+                            val rawNext = offsetX.value + dragAmount
+                            // 超出最大展开宽度时提供阻尼橡皮筋手感
+                            val clamped = when {
+                                rawNext > maxRevealPx -> maxRevealPx + (rawNext - maxRevealPx) * 0.22f
+                                rawNext < -maxRevealPx -> -maxRevealPx + (rawNext + maxRevealPx) * 0.22f
+                                else -> rawNext
+                            }
+                            if (!hapticTriggeredInDrag && abs(clamped) >= snapThresholdPx) {
+                                hapticTriggeredInDrag = true
+                                runCatching { haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove) }
+                            }
+                            scope.launch {
+                                offsetX.snapTo(clamped)
+                            }
+                        }
+                    )
+                }
+        ) {
+            content()
+        }
+    }
 }
 
 /**

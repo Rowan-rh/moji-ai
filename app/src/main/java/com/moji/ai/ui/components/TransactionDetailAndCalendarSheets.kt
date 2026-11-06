@@ -67,6 +67,7 @@ import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
+import com.moji.ai.ui.theme.iCostHorizontalSwipeTrigger
 import com.moji.ai.ui.theme.iCostPressScale
 import com.moji.ai.ui.theme.resolveTransactionBadgeColor
 import java.text.SimpleDateFormat
@@ -85,7 +86,8 @@ fun TransactionDetailSheet(
     onEdit: (TransactionEntity) -> Unit,
     onRefund: (expenseId: Long, refundYuan: Double, receiveWalletId: Long?, note: String) -> Unit,
     onSettleReimburse: (expenseId: Long, receiveWalletId: Long?) -> Unit,
-    onDelete: (Long) -> Unit
+    onDelete: (Long) -> Unit,
+    onSaveAsTemplate: (TransactionEntity) -> Unit = {}
 ) {
     BackHandler(onBack = onDismiss)
 
@@ -356,7 +358,10 @@ fun TransactionDetailSheet(
                     Row(
                         modifier = Modifier
                             .weight(1f)
-                            .iCostPressScale(pressedScale = 0.92f) { templateSavedBanner = true }
+                            .iCostPressScale(pressedScale = 0.92f) {
+                                onSaveAsTemplate(tx)
+                                templateSavedBanner = true
+                            }
                             .padding(vertical = 12.dp),
                         horizontalArrangement = Arrangement.Center,
                         verticalAlignment = Alignment.CenterVertically
@@ -617,12 +622,21 @@ fun MonthlyCalendarSheet(
             }
         }
 
-        // 1:1 iCost 星期表头 + 7 列圆角格子日历（支出天粉红底 #FDECE9，无支出天浅灰底 #F7F7F8，选中天 1.5dp 珊瑚红描边）
+        // 1:1 iCost 星期表头 + 7 列圆角格子日历（支持右滑切上月 / 左滑切下月）
         item {
             Surface(
                 shape = RoundedCornerShape(22.dp),
                 color = ICostCardWhite,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .iCostHorizontalSwipeTrigger(
+                        onSwipeRight = {
+                            if (displayMonth == 1) { displayMonth = 12; displayYear -= 1 } else displayMonth -= 1
+                        },
+                        onSwipeLeft = {
+                            if (displayMonth == 12) { displayMonth = 1; displayYear += 1 } else displayMonth += 1
+                        }
+                    )
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
                     Row(modifier = Modifier.fillMaxWidth()) {

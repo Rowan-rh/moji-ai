@@ -28,6 +28,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -75,6 +77,7 @@ import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.ui.QuickBookkeepingTemplate
 import com.moji.ai.ui.theme.AnimatedMoneyText
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
@@ -89,10 +92,13 @@ import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
 import com.moji.ai.ui.theme.ICostGreenIncome
 import com.moji.ai.ui.theme.ICostSearchBg
+import com.moji.ai.ui.theme.ICostSwipeActionRow
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
+import com.moji.ai.ui.theme.SwipeActionItem
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
+import com.moji.ai.ui.theme.iCostHorizontalSwipeTrigger
 import com.moji.ai.ui.theme.iCostPressScale
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -118,13 +124,22 @@ fun ICostLedgerHomeScreen(
     onOpenCalendar: (List<TransactionEntity>) -> Unit,
     onOpenAiSandbox: () -> Unit,
     onOpenSettingsPage: () -> Unit,
-    onClickTransaction: (TransactionEntity) -> Unit
+    onClickTransaction: (TransactionEntity) -> Unit,
+    templates: List<QuickBookkeepingTemplate> = emptyList(),
+    onApplyTemplate: (QuickBookkeepingTemplate) -> Unit = {},
+    onEditTransaction: (TransactionEntity) -> Unit = {},
+    onDuplicateTransaction: (TransactionEntity) -> Unit = {},
+    onToggleReimburse: (TransactionEntity) -> Unit = {},
+    onQuickRefund: (TransactionEntity) -> Unit = {},
+    onDeleteTransaction: (Long) -> Unit = {}
 ) {
     val walletMap = remember(wallets) { wallets.associateBy { it.id } }
     var searchQuery by remember { mutableStateOf("") }
     var showLedgerSwitcher by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
     var showBudgetEditDialog by remember { mutableStateOf(false) }
+    var showQuickTemplatesBar by remember { mutableStateOf(false) }
+    var refundingTx by remember { mutableStateOf<TransactionEntity?>(null) }
 
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 3 })
     val scope = rememberCoroutineScope()
@@ -256,20 +271,132 @@ fun ICostLedgerHomeScreen(
             }
         }
 
-        // 2. 超大加粗账本标题（点击也可切换账本）
+        // 2. 超大加粗账本标题（点击可切换账本，右滑可展开快捷模板抽屉）
         item {
-            Text(
-                text = currentLedger,
-                fontSize = 30.sp,
-                fontWeight = FontWeight.ExtraBold,
-                color = ICostTextPrimary,
+            Row(
                 modifier = Modifier
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null
-                    ) { showLedgerSwitcher = true }
-                    .padding(top = 2.dp)
-            )
+                    .fillMaxWidth()
+                    .iCostHorizontalSwipeTrigger(
+                        onSwipeRight = { showQuickTemplatesBar = true },
+                        onSwipeLeft = { showQuickTemplatesBar = false }
+                    ),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = currentLedger,
+                    fontSize = 30.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = ICostTextPrimary,
+                    modifier = Modifier
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { showLedgerSwitcher = true }
+                        .padding(top = 2.dp)
+                )
+
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = if (showQuickTemplatesBar) Color(0xFFFFF3E0) else Color(0xFFEBEBEB),
+                    modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
+                        showQuickTemplatesBar = !showQuickTemplatesBar
+                    }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ICostAssetImage(
+                            assetFile = "detail_template.webp",
+                            tint = if (showQuickTemplatesBar) Color(0xFFF59E0B) else Color(0xFF666666),
+                            modifier = Modifier.size(13.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (showQuickTemplatesBar) "收起模板" else "快捷模板 (${templates.size})",
+                            fontSize = 12.sp,
+                            color = if (showQuickTemplatesBar) Color(0xFFD97706) else Color(0xFF666666),
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                }
+            }
+        }
+
+        // 2.5 右滑或点击呼出的「快捷记账模板」横向滑动模块（点击即刻入账）
+        item {
+            AnimatedVisibility(
+                visible = showQuickTemplatesBar && templates.isNotEmpty(),
+                enter = expandVertically(
+                    animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+                ) + fadeIn(tween(180)),
+                exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = ICostCardWhite,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "快捷秒记模板（点击一键入账）",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostTextSecondary
+                            )
+                            Text(
+                                text = "账单行右滑/左滑可呼出扩展操作 ⇄",
+                                fontSize = 11.sp,
+                                color = ICostBlueAccent
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            items(templates, key = { it.id }) { tpl ->
+                                Surface(
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = ICostCellGray,
+                                    modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
+                                        onApplyTemplate(tpl)
+                                    }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        ICostCategoryBadge(
+                                            category = tpl.category,
+                                            type = TransactionType.EXPENSE,
+                                            size = 28.dp
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Column {
+                                            Text(
+                                                text = tpl.title,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = ICostTextPrimary
+                                            )
+                                            Text(
+                                                text = "-${formatMoneyCents(tpl.amountCents, tpl.currency)}",
+                                                fontFamily = ICDinFontFamily,
+                                                fontSize = 12.sp,
+                                                color = ICostCoralRed
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // 3. 圆角浅灰搜索框「输入关键词」（40dp 紧凑高度，对齐 01_ledger_home.png）
@@ -320,12 +447,16 @@ fun ICostLedgerHomeScreen(
             }
         }
 
-        // 4. 年月选择器 + 1:1「收支日历」胶囊
+        // 4. 年月选择器（支持右滑切上月 / 左滑切下月） + 1:1「收支日历」胶囊
         item {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 2.dp),
+                    .padding(top = 2.dp)
+                    .iCostHorizontalSwipeTrigger(
+                        onSwipeRight = onPrevMonth,
+                        onSwipeLeft = onNextMonth
+                    ),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -744,11 +875,66 @@ fun ICostLedgerHomeScreen(
                             ) {
                                 Column(modifier = Modifier.fillMaxWidth()) {
                                     dayList.forEachIndexed { index, tx ->
-                                        ICostLedgerRow(
-                                            tx = tx,
-                                            walletMap = walletMap,
-                                            onClick = { onClickTransaction(tx) }
-                                        )
+                                        val canRefund = tx.type == TransactionType.EXPENSE &&
+                                            (tx.amountCnyCents - tx.refundedAmountCents) > 0L
+                                        val swipeActions = buildList {
+                                            add(
+                                                SwipeActionItem(
+                                                    label = "编辑",
+                                                    iconAsset = "detail_edit.webp",
+                                                    backgroundColor = ICostBlueAccent,
+                                                    onClick = { onEditTransaction(tx) }
+                                                )
+                                            )
+                                            add(
+                                                SwipeActionItem(
+                                                    label = "复制",
+                                                    iconAsset = "detail_template.webp",
+                                                    backgroundColor = Color(0xFFF59E0B),
+                                                    onClick = { onDuplicateTransaction(tx) }
+                                                )
+                                            )
+                                            if (tx.type == TransactionType.EXPENSE && !tx.reimbursed) {
+                                                add(
+                                                    SwipeActionItem(
+                                                        label = if (tx.reimbursable) "结报销" else "设报销",
+                                                        iconAsset = "detail_claim.webp",
+                                                        backgroundColor = ICostGreenIncome,
+                                                        onClick = { onToggleReimburse(tx) }
+                                                    )
+                                                )
+                                            }
+                                            if (canRefund) {
+                                                add(
+                                                    SwipeActionItem(
+                                                        label = "退款",
+                                                        iconAsset = "detail_refund.webp",
+                                                        backgroundColor = Color(0xFF8B5CF6),
+                                                        onClick = { refundingTx = tx }
+                                                    )
+                                                )
+                                            }
+                                            add(
+                                                SwipeActionItem(
+                                                    label = "删除",
+                                                    iconAsset = "detail_delete.webp",
+                                                    backgroundColor = ICostCoralRed,
+                                                    onClick = { onDeleteTransaction(tx.id) }
+                                                )
+                                            )
+                                        }
+
+                                        ICostSwipeActionRow(
+                                            actions = swipeActions,
+                                            actionWidth = 50.dp,
+                                            actionHeight = 46.dp
+                                        ) {
+                                            ICostLedgerRow(
+                                                tx = tx,
+                                                walletMap = walletMap,
+                                                onClick = { onClickTransaction(tx) }
+                                            )
+                                        }
                                         if (index < dayList.lastIndex) {
                                             HorizontalDivider(
                                                 modifier = Modifier.padding(start = 68.dp, end = 16.dp),
@@ -764,6 +950,34 @@ fun ICostLedgerHomeScreen(
                 }
             }
         }
+    }
+
+    // 侧滑快捷全额退款确认弹窗
+    refundingTx?.let { targetTx ->
+        val remainCents = (targetTx.amountCnyCents - targetTx.refundedAmountCents).coerceAtLeast(0L)
+        AlertDialog(
+            onDismissRequest = { refundingTx = null },
+            containerColor = ICostCardWhite,
+            title = { Text("快捷全额退款", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "确认将「${targetTx.merchant.ifBlank { targetTx.category }}」的可退金额 ${formatMoneyCents(remainCents)} 全额退回原账户并冲销净支出吗？",
+                    fontSize = 14.sp,
+                    color = ICostTextSecondary
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onQuickRefund(targetTx)
+                    refundingTx = null
+                }) {
+                    Text("确认全额退款", fontWeight = FontWeight.Bold, color = ICostCoralRed)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { refundingTx = null }) { Text("取消") }
+            }
+        )
     }
 
     // 修改预算弹窗

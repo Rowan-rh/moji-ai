@@ -89,6 +89,7 @@ import com.moji.ai.ui.theme.ICostTextMuted
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.formatMoneyCents
+import com.moji.ai.ui.theme.iCostHorizontalSwipeTrigger
 import com.moji.ai.ui.theme.iCostPressScale
 import java.util.Calendar
 import java.util.Locale
@@ -412,13 +413,35 @@ fun ICostStatisticsScreen(
             }
         }
 
-        // 4. 1:1 复刻蓝色左右圆按钮时间选择器（chart_date_left.webp / chart_date_right.webp）
+        // 4. 1:1 复刻蓝色左右圆按钮时间选择器（支持右滑切上一周期 / 左滑切下一周期）
         if (rangeMode != StatsRangeMode.ALL) {
             item {
+                val goPrevPeriod = {
+                    when (rangeMode) {
+                        StatsRangeMode.MONTH, StatsRangeMode.CUSTOM ->
+                            if (month == 1) { month = 12; year -= 1 } else month -= 1
+                        StatsRangeMode.YEAR -> year -= 1
+                        StatsRangeMode.WEEK -> weekOffset -= 1
+                        StatsRangeMode.ALL -> {}
+                    }
+                }
+                val goNextPeriod = {
+                    when (rangeMode) {
+                        StatsRangeMode.MONTH, StatsRangeMode.CUSTOM ->
+                            if (month == 12) { month = 1; year += 1 } else month += 1
+                        StatsRangeMode.YEAR -> year += 1
+                        StatsRangeMode.WEEK -> weekOffset += 1
+                        StatsRangeMode.ALL -> {}
+                    }
+                }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 4.dp, vertical = 2.dp),
+                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                        .iCostHorizontalSwipeTrigger(
+                            onSwipeRight = goPrevPeriod,
+                            onSwipeLeft = goNextPeriod
+                        ),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -426,15 +449,7 @@ fun ICostStatisticsScreen(
                         modifier = Modifier
                             .size(30.dp)
                             .clip(CircleShape)
-                            .iCostPressScale(pressedScale = 0.85f) {
-                                when (rangeMode) {
-                                    StatsRangeMode.MONTH, StatsRangeMode.CUSTOM ->
-                                        if (month == 1) { month = 12; year -= 1 } else month -= 1
-                                    StatsRangeMode.YEAR -> year -= 1
-                                    StatsRangeMode.WEEK -> weekOffset -= 1
-                                    StatsRangeMode.ALL -> {}
-                                }
-                            },
+                            .iCostPressScale(pressedScale = 0.85f, onClick = goPrevPeriod),
                         contentAlignment = Alignment.Center
                     ) {
                         ICostAssetImage(
@@ -454,15 +469,7 @@ fun ICostStatisticsScreen(
                         modifier = Modifier
                             .size(30.dp)
                             .clip(CircleShape)
-                            .iCostPressScale(pressedScale = 0.85f) {
-                                when (rangeMode) {
-                                    StatsRangeMode.MONTH, StatsRangeMode.CUSTOM ->
-                                        if (month == 12) { month = 1; year += 1 } else month += 1
-                                    StatsRangeMode.YEAR -> year += 1
-                                    StatsRangeMode.WEEK -> weekOffset += 1
-                                    StatsRangeMode.ALL -> {}
-                                }
-                            },
+                            .iCostPressScale(pressedScale = 0.85f, onClick = goNextPeriod),
                         contentAlignment = Alignment.Center
                     ) {
                         ICostAssetImage(
@@ -528,10 +535,15 @@ fun ICostStatisticsScreen(
             )
         }
 
-        // 8. 卡片四：支出统计图（1:1 对齐 08_stats_mid.png：30 日柱状图 + 平均值虚线 + 顶部峰值气泡 + 支出|收入|结余 胶囊）
+        // 8. 卡片四：支出统计图（支持模块右滑/左滑切换 支出 ⇄ 收入 ⇄ 结余）
         item {
             Card(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .iCostHorizontalSwipeTrigger(
+                        onSwipeRight = { barChartMetric = (barChartMetric + 2) % 3 },
+                        onSwipeLeft = { barChartMetric = (barChartMetric + 1) % 3 }
+                    ),
                 shape = RoundedCornerShape(22.dp),
                 colors = CardDefaults.cardColors(containerColor = ICostCardWhite),
                 elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
@@ -540,9 +552,9 @@ fun ICostStatisticsScreen(
                     StatsCardHeader(
                         badgeAsset = "chart_money_red.webp",
                         title = when (barChartMetric) {
-                            0 -> "支出统计图"
-                            1 -> "收入统计图"
-                            else -> "结余统计图"
+                            0 -> "支出统计图 ⇄"
+                            1 -> "收入统计图 ⇄"
+                            else -> "结余统计图 ⇄"
                         },
                         expanded = barChartExpanded,
                         onToggle = { barChartExpanded = !barChartExpanded }
@@ -660,10 +672,15 @@ fun ICostStatisticsScreen(
             }
         }
 
-        // 9. 卡片五：净资产趋势图（1:1 对齐 08_stats_bottom.png：平滑琥珀金曲线 + 渐变面积填充 + 净资产|总资产|总负债）
+        // 9. 卡片五：净资产趋势图（支持模块右滑/左滑切换 净资产 ⇄ 总资产 ⇄ 总负债）
         item {
             Card(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .iCostHorizontalSwipeTrigger(
+                        onSwipeRight = { trendMetric = (trendMetric + 2) % 3 },
+                        onSwipeLeft = { trendMetric = (trendMetric + 1) % 3 }
+                    ),
                 shape = RoundedCornerShape(22.dp),
                 colors = CardDefaults.cardColors(containerColor = ICostCardWhite),
                 elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
@@ -672,9 +689,9 @@ fun ICostStatisticsScreen(
                     StatsCardHeader(
                         badgeAsset = "chart_trend.webp",
                         title = when (trendMetric) {
-                            0 -> "净资产趋势图"
-                            1 -> "总资产趋势图"
-                            else -> "总负债趋势图"
+                            0 -> "净资产趋势图 ⇄"
+                            1 -> "总资产趋势图 ⇄"
+                            else -> "总负债趋势图 ⇄"
                         },
                         expanded = trendChartExpanded,
                         onToggle = { trendChartExpanded = !trendChartExpanded }
@@ -819,10 +836,15 @@ fun ICostStatisticsScreen(
             }
         }
 
-        // 10. 卡片六：支出分类详情（1:1 对齐 08_stats_bottom.png：多彩环形图 + 外引折线百分比 + 居中总额 + 进度排行）
+        // 10. 卡片六：支出分类详情（支持模块右滑/左滑切换 支出分类 ⇄ 收入分类）
         item {
             Card(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .iCostHorizontalSwipeTrigger(
+                        onSwipeRight = { donutMetric = (donutMetric + 1) % 2 },
+                        onSwipeLeft = { donutMetric = (donutMetric + 1) % 2 }
+                    ),
                 shape = RoundedCornerShape(22.dp),
                 colors = CardDefaults.cardColors(containerColor = ICostCardWhite),
                 elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
@@ -830,7 +852,7 @@ fun ICostStatisticsScreen(
                 Column(modifier = Modifier.padding(16.dp)) {
                     StatsCardHeader(
                         badgeAsset = "chart_classification.webp",
-                        title = if (donutMetric == 0) "支出分类详情" else "收入分类详情",
+                        title = if (donutMetric == 0) "支出分类详情 ⇄" else "收入分类详情 ⇄",
                         expanded = donutChartExpanded,
                         onToggle = { donutChartExpanded = !donutChartExpanded }
                     )

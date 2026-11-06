@@ -12,12 +12,12 @@
    - [`CapturePipelineCoordinator`](app/src/main/java/com/moji/ai/service/CapturePipelineCoordinator.kt)：1.1 秒滑动聚合窗口，将同一笔交易的“页面商户文本”与“银行卡扣款通知”合并后统一交给 AI 解析，杜绝重复入账。
 2. **通用大模型兼容 + 离线高智商语义兜底**：
    - [`AiAccountingEngine`](app/src/main/java/com/moji/ai/ai/AiAccountingEngine.kt)：支持任意 OpenAI 兼容接口（DeepSeek、通义千问、硅基流动、OpenAI、本地 Ollama）及 Google Gemini 官方接口，未填 Key 或离线时自动启用本地语义引擎兜底。
-3. **1:1 iCost 级视觉、丝滑弹簧动效与触觉交互体系**：
-   - **原生字体、图标与弹簧按压反馈**（[`ICostTheme.kt`](app/src/main/java/com/moji/ai/ui/theme/ICostTheme.kt)）：内置 `ICDIN-Bold` 凝缩数字字体与 200 枚线性分类/银行品牌圆形图标，全端搭载 `iCostPressScale` 弹簧按压回弹 + 轻触觉震动反馈（`LocalHapticFeedback`）与 `AnimatedMoneyText` 数字滚动过渡。
-   - **账本首页**（[`LedgerHomeTab.kt`](app/src/main/java/com/moji/ai/ui/screens/LedgerHomeTab.kt)）：多账本切换、关键词实时搜索、`HorizontalPager` 三页左右滑动月度概览卡片（带动态胶囊指示器）、全屏收支日历页、按日弹簧收折卡片组（带箭头旋转与列表项位移过渡）、全额/部分退款划线冲销展示与全屏账单详情页。
-   - **记账计算器面板**（[`ICostCalculatorSheet.kt`](app/src/main/java/com/moji/ai/ui/components/ICostCalculatorSheet.kt)）：支出/收入/转账三态平滑过渡、5 列线性分类网格（选中弹簧放大 + 二级子分类盒平滑展开）、转账账户 `180°` 旋转互换动效、支持 `+ - × ÷` 连续运算的 `4×4` 触觉圆角键盘。
-   - **全能资产管理**（[`AssetsTab.kt`](app/src/main/java/com/moji/ai/ui/screens/AssetsTab.kt)）：净资产动态滚动与一键显隐、总借入/总借出双卡、弹簧收折式信用账户与资金账户、全屏水平推入式账户详情页及账户类型选择页。
-   - **多维统计与设置中心**（[`StatisticsTab.kt`](app/src/main/java/com/moji/ai/ui/screens/StatisticsTab.kt)、[`MoJiMainScreen.kt`](app/src/main/java/com/moji/ai/ui/MoJiMainScreen.kt)）：周/月/年/全部/范围五段切换，收支/报销/流转三大可收折 Bento 宫格卡片，外加带渐进生长/铺展动效的每日收支柱状图、净资产平滑趋势图、多彩分类环形图，以及底部主 Tab 方向感知滑动切换与全屏二级页水平推入动效。
+3. **1:1 iCost 级视觉、模块侧滑扩展功能与丝滑弹簧动效体系**：
+   - **原生字体、图标、弹簧按压与模块侧滑扩展容器**（[`ICostTheme.kt`](app/src/main/java/com/moji/ai/ui/theme/ICostTheme.kt)）：内置 `ICDIN-Bold` 凝缩数字字体与 200 枚线性分类/银行品牌圆形图标，全端搭载 `iCostPressScale` 弹簧按压回弹 + 轻触觉震动反馈（`LocalHapticFeedback`）、`AnimatedMoneyText` 数字滚动过渡，以及 `ICostSwipeActionRow` 双向阻尼侧滑扩展功能容器与 `iCostHorizontalSwipeTrigger` 手势切换修饰符。
+   - **账本首页**（[`LedgerHomeTab.kt`](app/src/main/java/com/moji/ai/ui/screens/LedgerHomeTab.kt)）：多账本切换、标题栏右滑/点击展开 **快捷记账模板抽屉**（点击模板一键秒记）、关键词实时搜索、`HorizontalPager` 三页左右滑动月度概览卡片、年月栏左右滑动切月、全屏收支日历页、按日弹簧收折卡片组，以及 **单笔账单行右滑/左滑呼出「编辑 / 复制 / 报销 / 退款 / 删除」扩展胶囊**。
+   - **记账计算器面板**（[`ICostCalculatorSheet.kt`](app/src/main/java/com/moji/ai/ui/components/ICostCalculatorSheet.kt)）：支出/收入/转账三态手势滑动与点击平滑过渡、5 列线性分类网格（选中弹簧放大 + 二级子分类盒平滑展开）、转账账户 `180°` 旋转互换动效、支持 `+ - × ÷` 连续运算的 `4×4` 触觉圆角键盘。
+   - **全能资产管理**（[`AssetsTab.kt`](app/src/main/java/com/moji/ai/ui/screens/AssetsTab.kt)）：净资产双页可滑动大卡（第 1 页净资产/总资产/总负债，右滑/左滑切换第 2 页 **存钱计划进度与信用卡分期管理概览**）、总借入/总借出双卡、**单个信用/资金账户行右滑/左滑呼出「还款(转账) / 记一笔 / 调平 / 删除」扩展胶囊**、全屏账户详情页及账户类型选择页。
+   - **多维统计与设置中心**（[`StatisticsTab.kt`](app/src/main/java/com/moji/ai/ui/screens/StatisticsTab.kt)、[`MoJiMainScreen.kt`](app/src/main/java/com/moji/ai/ui/MoJiMainScreen.kt)）：周/月/年/全部/范围五段切换，收支/报销/流转三大可收折 Bento 宫格卡片，外加 **支持模块右滑/左滑直接切换维度** 且带渐进生长/铺展动效的每日收支柱状图、净资产平滑趋势图、多彩分类环形图。
 4. **纯后台静默入账 + 通知栏一键撤销**：
    - [`SilentBookkeepingNotifier`](app/src/main/java/com/moji/ai/notification/SilentBookkeepingNotifier.kt)：后台自动入账后推送系统通知，点击通知栏上的 **「撤销入账」** 即可原子化回滚账单、账户余额与退款冲销额度。
 

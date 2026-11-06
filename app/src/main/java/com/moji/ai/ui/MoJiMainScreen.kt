@@ -109,6 +109,7 @@ import com.moji.ai.ui.theme.ICostTextMuted
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.formatMoneyCents
+import com.moji.ai.ui.theme.iCostHorizontalSwipeTrigger
 import com.moji.ai.ui.theme.iCostPressScale
 import java.util.Calendar
 
@@ -125,6 +126,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val aiConfig by viewModel.aiConfig.collectAsState()
     val sandboxStatus by viewModel.sandboxStatus.collectAsState()
     val isParsing by viewModel.isParsing.collectAsState()
+    val templates by viewModel.templates.collectAsState()
+    val savingPlans by viewModel.savingPlans.collectAsState()
+    val installmentPlans by viewModel.installmentPlans.collectAsState()
 
     var selectedTab by remember { mutableIntStateOf(0) } // 0: 账本, 1: 资产, 2: 统计
 
@@ -210,7 +214,22 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onOpenCalendar = { list -> calendarMonthTxs = list },
                     onOpenAiSandbox = { showAiSandboxSheet = true },
                     onOpenSettingsPage = { showSettingsPage = true },
-                    onClickTransaction = { tx -> inspectingTx = tx }
+                    onClickTransaction = { tx -> inspectingTx = tx },
+                    templates = templates,
+                    onApplyTemplate = { tpl -> viewModel.applyQuickTemplateNow(tpl) },
+                    onEditTransaction = { toEdit ->
+                        editingTx = toEdit
+                        showCalculatorSheet = true
+                    },
+                    onDuplicateTransaction = { tx -> viewModel.duplicateTransactionNow(tx) },
+                    onToggleReimburse = { tx -> viewModel.toggleOrSettleReimbursement(tx) },
+                    onQuickRefund = { tx ->
+                        val remainYuan = ((tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)) / 100.0
+                        if (remainYuan > 0.0) {
+                            viewModel.refundExpense(tx.id, remainYuan, tx.sourceWalletId, "侧滑快捷全额退款")
+                        }
+                    },
+                    onDeleteTransaction = { txId -> viewModel.deleteTransaction(txId) }
                 )
 
                 1 -> ICostAssetsScreen(
@@ -230,6 +249,11 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     },
                     onSelectTransaction = { tx -> inspectingTx = tx },
                     onTriggerRuleNow = { viewModel.triggerRecurringRuleNow(it) },
+                    onDeleteRecurringRule = { viewModel.deleteRecurringRule(it) },
+                    savingPlans = savingPlans,
+                    installmentPlans = installmentPlans,
+                    onDepositSavingPlan = { planId, yuan -> viewModel.depositToSavingPlan(planId, yuan) },
+                    onPayInstallmentPeriod = { inst -> viewModel.payNextInstallmentPeriod(inst) },
                     onOpenSettingsPage = { showSettingsPage = true },
                     onSubpageActiveChange = { isAssetSubpageOpen = it }
                 )
@@ -327,6 +351,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onDelete = { txId ->
                         viewModel.deleteTransaction(txId)
                         inspectingTx = null
+                    },
+                    onSaveAsTemplate = { tplTx ->
+                        viewModel.saveTemplateFromTransaction(tplTx)
                     }
                 )
             }
@@ -483,6 +510,11 @@ private fun ICostFloatingBottomBar(
             modifier = Modifier
                 .weight(1f)
                 .height(58.dp)
+                .iCostHorizontalSwipeTrigger(
+                    thresholdDp = 36.dp,
+                    onSwipeRight = { onSelectTab((selectedTab + 1) % 3) },
+                    onSwipeLeft = { onSelectTab((selectedTab + 2) % 3) }
+                )
                 .shadow(
                     elevation = 10.dp,
                     shape = RoundedCornerShape(29.dp),
