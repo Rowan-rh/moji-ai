@@ -560,14 +560,6 @@ fun ICostAssetsScreen(
                                                 }
                                             ),
                                             SwipeActionItem(
-                                                label = "记一笔",
-                                                iconAsset = "tab_add.webp",
-                                                backgroundColor = Color(0xFFF59E0B),
-                                                onClick = {
-                                                    onQuickActionWithWallet(TransactionType.EXPENSE, w.id, null)
-                                                }
-                                            ),
-                                            SwipeActionItem(
                                                 label = "调平",
                                                 iconAsset = "asset_pen.webp",
                                                 backgroundColor = ICostGreenIncome,
@@ -582,8 +574,8 @@ fun ICostAssetsScreen(
                                         )
                                         ICostSwipeActionRow(
                                             actions = creditSwipeActions,
-                                            actionWidth = 52.dp,
-                                            actionHeight = 46.dp
+                                            actionWidth = 44.dp,
+                                            actionHeight = 42.dp
                                         ) {
                                             ICostAccountItemRow(
                                                 wallet = w,
@@ -647,14 +639,6 @@ fun ICostAssetsScreen(
                                                 }
                                             ),
                                             SwipeActionItem(
-                                                label = "记一笔",
-                                                iconAsset = "tab_add.webp",
-                                                backgroundColor = Color(0xFFF59E0B),
-                                                onClick = {
-                                                    onQuickActionWithWallet(TransactionType.EXPENSE, w.id, null)
-                                                }
-                                            ),
-                                            SwipeActionItem(
                                                 label = "调平",
                                                 iconAsset = "asset_pen.webp",
                                                 backgroundColor = ICostGreenIncome,
@@ -669,8 +653,8 @@ fun ICostAssetsScreen(
                                         )
                                         ICostSwipeActionRow(
                                             actions = assetSwipeActions,
-                                            actionWidth = 52.dp,
-                                            actionHeight = 46.dp
+                                            actionWidth = 44.dp,
+                                            actionHeight = 42.dp
                                         ) {
                                             ICostAccountItemRow(
                                                 wallet = w,
