@@ -145,9 +145,12 @@ class CapturePipelineCoordinator(
                 }
             }
 
-            // 2. 先从 capture_evidences 恢复曾因异步截图覆盖而丢失的订单号/交易时间，并重算旧版拼多多异常记录
+            // 2. 先从 capture_evidences 恢复曾因异步截图覆盖而丢失的订单号/交易时间，并重算旧版拼多多/京东异常记录
             val afterStep1 = repository.getAllTransactions()
             for (tx in afterStep1) {
+                if (tx.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR")) {
+                    continue
+                }
                 val evidences = repository.getEvidencesForTransaction(tx.id)
                 val fullSourceText = (evidences.map { it.rawText } + listOf(tx.rawCapturedText))
                     .filter { it.isNotBlank() }
@@ -766,7 +769,12 @@ class CapturePipelineCoordinator(
                 // 等 5 秒流体云胶囊缩回后再静默截屏归档（或立即截屏归档）
                 val accessibilityCaptured = captureCurrentBillScreenSilently()
                 if (accessibilityCaptured != null) {
-                    val latestTx = repository.getTransactionById(savedTx.id) ?: savedTx
+                    val latestTx = repository.getTransactionById(savedTx.id)
+                    if (latestTx == null) {
+                        // 若用户在截屏期间已点击流体云「撤销」删除了该笔账单，立即清理刚生成的截图文件并退出
+                        BillScreenshotStorage.deleteIfExists(accessibilityCaptured.absolutePath)
+                        return@launch
+                    }
                     val withShot = latestTx.copy(
                         screenshotPath = accessibilityCaptured.absolutePath,
                         screenshotSha256 = accessibilityCaptured.sha256,

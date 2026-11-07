@@ -117,6 +117,56 @@ class AiAccountingEngine(
             "yyyy/MM/dd HH:mm:ss",
             "yyyy/MM/dd HH:mm"
         )
+
+        private val ecommerceFooterMarkers = listOf(
+            "| 精选好货",
+            "| 猜你喜欢",
+            "| 相似商品",
+            "| 相似推荐",
+            "| 为你推荐",
+            "| 相关推荐",
+            "| 大家都在买",
+            "| 你可能还喜欢",
+            "| 500x9999%3E",
+            "立即评价 | 再次拼单",
+            "确认收货 | 查看物流 | 再次拼单",
+            "再次拼单 | 查看物流 | 更多",
+            "再次拼单 | 更多"
+        )
+
+        /**
+         * 截断电商订单详情页底部的「精选好货 / 猜你喜欢 / 相似推荐」商品瀑布流，
+         * 防止底部推荐商品的价格（如 ¥75、¥19.1、¥259.9）和标签（立减112元、先用后付）污染当前订单。
+         */
+        fun stripEcommerceRecommendationFooter(rawText: String): String {
+            val segments = rawText.split(Regex("""(?=\[AI_[A-Z_]+\s*\|)""")).filter { it.isNotBlank() }
+            if (segments.size > 1) {
+                return segments.joinToString(" | ") { stripEcommerceRecommendationFooterSingle(it) }
+            }
+            return stripEcommerceRecommendationFooterSingle(rawText)
+        }
+
+        private fun stripEcommerceRecommendationFooterSingle(rawText: String): String {
+            val minCutIndex = listOf(
+                rawText.indexOf("订单编号"),
+                rawText.indexOf("交易单号"),
+                rawText.indexOf("实付款"),
+                rawText.indexOf("实付"),
+                rawText.indexOf("应付款"),
+                rawText.indexOf("应付金额"),
+                rawText.indexOf("商品总额"),
+                rawText.indexOf("下单时间")
+            ).filter { it >= 0 }.maxOrNull() ?: 0
+
+            var cutPos = rawText.length
+            for (marker in ecommerceFooterMarkers) {
+                val idx = rawText.indexOf(marker, startIndex = minCutIndex)
+                if (idx in 1 until cutPos) {
+                    cutPos = idx
+                }
+            }
+            return if (cutPos < rawText.length) rawText.substring(0, cutPos).trim() else rawText
+        }
     }
 
     suspend fun parseCapturedText(
@@ -612,55 +662,6 @@ $recentDesc
             .removeSuffix("```")
             .trim()
         return runCatching { json.decodeFromString<AiParsedTransactionResult>(cleaned) }.getOrNull()
-    }
-
-    /**
-     * 截断电商订单详情页底部的「精选好货 / 猜你喜欢 / 相似推荐」商品瀑布流，
-     * 防止底部推荐商品的价格（如 ¥75、¥19.1、¥259.9）和标签（立减112元、先用后付）污染当前订单。
-     */
-    private fun stripEcommerceRecommendationFooter(rawText: String): String {
-        val segments = rawText.split(Regex("""(?=\[AI_[A-Z_]+\s*\|)""")).filter { it.isNotBlank() }
-        if (segments.size > 1) {
-            return segments.joinToString(" | ") { stripEcommerceRecommendationFooterSingle(it) }
-        }
-        return stripEcommerceRecommendationFooterSingle(rawText)
-    }
-
-    private fun stripEcommerceRecommendationFooterSingle(rawText: String): String {
-        val footerMarkers = listOf(
-            "| 精选好货",
-            "| 猜你喜欢",
-            "| 相似商品",
-            "| 相似推荐",
-            "| 为你推荐",
-            "| 相关推荐",
-            "| 大家都在买",
-            "| 你可能还喜欢",
-            "| 500x9999%3E",
-            "立即评价 | 再次拼单",
-            "确认收货 | 查看物流 | 再次拼单",
-            "再次拼单 | 查看物流 | 更多",
-            "再次拼单 | 更多"
-        )
-        val minCutIndex = listOf(
-            rawText.indexOf("订单编号"),
-            rawText.indexOf("交易单号"),
-            rawText.indexOf("实付款"),
-            rawText.indexOf("实付"),
-            rawText.indexOf("应付款"),
-            rawText.indexOf("应付金额"),
-            rawText.indexOf("商品总额"),
-            rawText.indexOf("下单时间")
-        ).filter { it >= 0 }.maxOrNull() ?: 0
-
-        var cutPos = rawText.length
-        for (marker in footerMarkers) {
-            val idx = rawText.indexOf(marker, startIndex = minCutIndex)
-            if (idx in 1 until cutPos) {
-                cutPos = idx
-            }
-        }
-        return if (cutPos < rawText.length) rawText.substring(0, cutPos).trim() else rawText
     }
 
     /**

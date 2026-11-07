@@ -51,13 +51,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -174,16 +178,18 @@ fun TransactionDetailSheet(
             null
         }
     }
-    val screenshotBitmap = remember(tx.screenshotPath) {
-        if (tx.screenshotPath.isNotBlank()) {
-            runCatching {
-                val f = File(tx.screenshotPath)
-                if (f.exists()) BitmapFactory.decodeFile(f.absolutePath)?.asImageBitmap() else null
-            }.getOrNull()
+    val screenshotBitmap = produceState<ImageBitmap?>(initialValue = null, key1 = tx.screenshotPath) {
+        value = if (tx.screenshotPath.isNotBlank()) {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val f = File(tx.screenshotPath)
+                    if (f.exists()) BitmapFactory.decodeFile(f.absolutePath)?.asImageBitmap() else null
+                }.getOrNull()
+            }
         } else {
             null
         }
-    }
+    }.value
 
     val remainingRefundableCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
     val canRefund = tx.type == TransactionType.EXPENSE && remainingRefundableCents > 0L

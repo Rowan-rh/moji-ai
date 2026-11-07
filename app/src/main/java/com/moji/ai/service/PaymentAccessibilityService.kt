@@ -467,47 +467,8 @@ open class PaymentAccessibilityService : AccessibilityService() {
         return true
     }
 
-    /**
-     * 截断拼多多、京东、淘宝、抖音订单详情页底部的「精选好货 / 猜你喜欢 / 相似推荐」商品瀑布流，
-     * 防止底部广告商品的价格（如 ¥75、¥19.1、¥259.9）和促销标签（如 立减112元、先用后付）污染当前订单数据或导致滚动时反复触发！
-     */
-    private fun stripEcommerceRecommendationFooter(rawText: String): String {
-        val footerMarkers = listOf(
-            "| 精选好货",
-            "| 猜你喜欢",
-            "| 相似商品",
-            "| 相似推荐",
-            "| 为你推荐",
-            "| 相关推荐",
-            "| 大家都在买",
-            "| 你可能还喜欢",
-            "| 500x9999%3E",
-            "立即评价 | 再次拼单",
-            "确认收货 | 查看物流 | 再次拼单",
-            "再次拼单 | 查看物流 | 更多",
-            "再次拼单 | 更多"
-        )
-        // 仅在订单最后一个核心锚点（实付/应付款/商品总额/订单编号/下单时间）之后截断底部推荐流，防止京东订单编号在实付款上方时把实付款截掉
-        val minCutIndex = listOf(
-            rawText.indexOf("订单编号"),
-            rawText.indexOf("交易单号"),
-            rawText.indexOf("实付款"),
-            rawText.indexOf("实付"),
-            rawText.indexOf("应付款"),
-            rawText.indexOf("应付金额"),
-            rawText.indexOf("商品总额"),
-            rawText.indexOf("下单时间")
-        ).filter { it >= 0 }.maxOrNull() ?: 0
-
-        var cutPos = rawText.length
-        for (marker in footerMarkers) {
-            val idx = rawText.indexOf(marker, startIndex = minCutIndex)
-            if (idx in 1 until cutPos) {
-                cutPos = idx
-            }
-        }
-        return if (cutPos < rawText.length) rawText.substring(0, cutPos).trim() else rawText
-    }
+    private fun stripEcommerceRecommendationFooter(rawText: String): String =
+        com.moji.ai.ai.AiAccountingEngine.stripEcommerceRecommendationFooter(rawText)
 
     /**
      * 严格判定当前窗口是否为「真实的单笔账单详情页」或「已完成的支付结果页」：
@@ -1011,7 +972,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
             """(?:支付时间|付款时间|下单时间|拼单时间|创建时间|转账时间|收款时间)\s*(?:[:：,，\s]|\|)*\s*(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?\s+\d{1,2}[:时]\d{2}(?:[:分]\d{2}秒?)?)"""
         ).find(cleanText)?.groupValues?.getOrNull(1).orEmpty()
         val amtMatch = Regex(
-            """(?:实付款|实付金额|合计实付|实扣|实付|应付总额|支出|收入|付款|收款)\s*(?:[:：,，\s]|\|)*\s*(?:¥|￥)?\s*\d{1,7}(?:\.\d{1,2})?\s*元?|[-+−]?\d{1,7}\.\d{1,2}"""
+            """(?:实付款|实付金额|合计实付|实扣|实付|应付总额|应付金额|应付款|需付款|合计|到手价|到手|支出|收入|付款|收款)\s*(?:[:：,，\s]|\|)*\s*(?:¥|￥)?\s*\d{1,7}(?:\.\d{1,2})?\s*[元)）]?|[-+−]?\d{1,7}\.\d{1,2}"""
         ).find(cleanText)?.value.orEmpty()
         val detailFlags = buildString {
             if (cleanText.contains("交易单号") || cleanText.contains("订单号") || cleanText.contains("订单编号") || cleanText.contains("转账单号")) append("O")
@@ -1019,6 +980,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
             if (cleanText.contains("支付方式") || cleanText.contains("付款方式") || cleanText.contains("收款方式")) append("P")
             if (cleanText.contains("商品说明") || cleanText.contains("商户全称") || cleanText.contains("收款方全称")) append("G")
             if (cleanText.contains("下单时间") || cleanText.contains("拼单时间") || cleanText.contains("支付时间")) append("T")
+            if (cleanText.contains("合计") || cleanText.contains("到手") || cleanText.contains("共减")) append("D")
         }
         return if (orders.isNotBlank() || timeMatch.isNotBlank() || amtMatch.isNotBlank()) {
             "$pkg|orders:$orders|time:$timeMatch|amt:$amtMatch|flags:$detailFlags"
