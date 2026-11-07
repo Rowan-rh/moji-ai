@@ -599,13 +599,34 @@ class LedgerRepository(private val db: AppDatabase) {
     }
 
     private suspend fun findBestMatchingExpenseForRefund(refundTx: TransactionEntity): TransactionEntity? {
-        val candidates = db.transactionDao().getRecentRefundableExpenses(15)
-        return candidates.firstOrNull {
-            val remaining = it.amountCnyCents - it.refundedAmountCents
-            remaining >= refundTx.amountCnyCents &&
-                (it.category == refundTx.category ||
-                    (refundTx.merchant.isNotBlank() && it.merchant.contains(refundTx.merchant, ignoreCase = true)))
-        } ?: candidates.firstOrNull { (it.amountCnyCents - it.refundedAmountCents) >= refundTx.amountCnyCents }
+        val candidates = db.transactionDao().getRecentRefundableExpenses(30)
+        val refundKeys = listOf(refundTx.orderKey, refundTx.transactionNo, refundTx.merchantOrderNo)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        // 1. 优先匹配相同订单号/交易单号/商户单号的原消费账单
+        if (refundKeys.isNotEmpty()) {
+            candidates.firstOrNull { exp ->
+                val expKeys = listOf(exp.orderKey, exp.transactionNo, exp.merchantOrderNo)
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                (exp.amountCnyCents - exp.refundedAmountCents) >= refundTx.amountCnyCents &&
+                    refundKeys.any { it in expKeys }
+            }?.let { return it }
+        }
+        // 2. 无单号匹配时，仅匹配消费时间不晚于退款时间（允许同日误差）、金额完全一致且商户或商品名一致的原账单
+        val refundGoods = refundTx.note.substringAfter("| ", "").substringBefore(" · ").trim()
+        return candidates.firstOrNull { exp ->
+            val expGoods = exp.note.substringAfter("| ", "").substringBefore(" · ").trim()
+            val sameMerchant = refundTx.merchant.isNotBlank() && exp.merchant.isNotBlank() &&
+                (exp.merchant.contains(refundTx.merchant, ignoreCase = true) ||
+                    refundTx.merchant.contains(exp.merchant, ignoreCase = true))
+            val sameGoods = refundGoods.length >= 4 && expGoods.length >= 4 &&
+                (expGoods.startsWith(refundGoods.take(8)) || refundGoods.startsWith(expGoods.take(8)))
+            exp.refundedAmountCents == 0L &&
+                exp.amountCnyCents == refundTx.amountCnyCents &&
+                exp.timestamp <= refundTx.timestamp + 86_400_000L &&
+                (sameMerchant || sameGoods)
+        }
     }
 
     private fun convertCentsBetweenCurrencies(

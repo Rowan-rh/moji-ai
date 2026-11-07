@@ -61,9 +61,9 @@ class MoJiApp : Application() {
         // 启动时检查一次性历史电商记录校准（仅按版本号执行一次，避免每次冷启动全表扫描）及到期的周期性固定收支
         appScope.launch {
             val prefs = getSharedPreferences("moji_maintenance_prefs", MODE_PRIVATE)
-            if (!prefs.getBoolean("repaired_legacy_ecommerce_v20261107_2", false)) {
+            if (!prefs.getBoolean("repaired_legacy_ecommerce_v20261108_1", false)) {
                 captureCoordinator.repairLegacyEcommerceRecordsIfNeeded()
-                prefs.edit().putBoolean("repaired_legacy_ecommerce_v20261107_2", true).apply()
+                prefs.edit().putBoolean("repaired_legacy_ecommerce_v20261108_1", true).apply()
             }
             val createdList = repository.processDueRecurringRules()
             if (createdList.isNotEmpty()) {

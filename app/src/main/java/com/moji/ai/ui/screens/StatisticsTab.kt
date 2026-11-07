@@ -39,7 +39,6 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -1149,8 +1148,8 @@ fun ICostStatisticsScreen(
                                                 style = Stroke(width = strokePx, cap = StrokeCap.Butt)
                                             )
 
-                                            // 绘制引出短指示线与外圆点
-                                            if (donutFrac > 0.65f) {
+                                            // 仅当扇区角度足够宽（>= 15°）时绘制引出短指示线与外圆点，防止极小占比扇区在顶部重叠碰撞
+                                            if (donutFrac > 0.65f && sweep >= 15f) {
                                                 val midRad = Math.toRadians((startDeg + sweep / 2f).toDouble())
                                                 val outerR = diameter / 2f + strokePx / 2f + 4.dp.toPx()
                                                 val tipR = outerR + 10.dp.toPx()
@@ -1280,15 +1279,24 @@ fun ICostStatisticsScreen(
                                                 }
                                             }
                                             Spacer(modifier = Modifier.height(6.dp))
-                                            LinearProgressIndicator(
-                                                progress = { (ratio * donutProgress.value).coerceIn(0f, 1f) },
-                                                color = itemColor,
-                                                trackColor = ICostCellGray,
+                                            val barFrac = (ratio * donutProgress.value).coerceIn(0f, 1f)
+                                            Box(
                                                 modifier = Modifier
                                                     .fillMaxWidth()
                                                     .height(5.dp)
                                                     .clip(RoundedCornerShape(3.dp))
-                                            )
+                                                    .background(ICostCellGray)
+                                            ) {
+                                                if (barFrac > 0f) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .fillMaxWidth(barFrac.coerceIn(0.025f, 1f))
+                                                            .height(5.dp)
+                                                            .clip(RoundedCornerShape(3.dp))
+                                                            .background(itemColor)
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }

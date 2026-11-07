@@ -59,7 +59,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -431,15 +430,23 @@ fun ICostAssetsScreen(
                                     )
 
                                     Spacer(modifier = Modifier.height(6.dp))
-                                    LinearProgressIndicator(
-                                        progress = { savePct },
-                                        color = ICostAmberGold,
-                                        trackColor = ICostCellGray,
+                                    Box(
                                         modifier = Modifier
                                             .fillMaxWidth()
                                             .height(6.dp)
                                             .clip(RoundedCornerShape(3.dp))
-                                    )
+                                            .background(ICostCellGray)
+                                    ) {
+                                        if (savePct > 0f) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth(savePct.coerceIn(0.02f, 1f))
+                                                    .height(6.dp)
+                                                    .clip(RoundedCornerShape(3.dp))
+                                                    .background(ICostAmberGold)
+                                            )
+                                        }
+                                    }
 
                                     Spacer(modifier = Modifier.height(8.dp))
                                     Row(
@@ -824,15 +831,23 @@ fun ICostAssetsScreen(
                                                 )
                                                 Spacer(modifier = Modifier.height(5.dp))
                                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                                    LinearProgressIndicator(
-                                                        progress = { pct },
-                                                        color = ICostAmberGold,
-                                                        trackColor = ICostCellGray,
+                                                    Box(
                                                         modifier = Modifier
                                                             .weight(1f)
                                                             .height(4.dp)
                                                             .clip(RoundedCornerShape(2.dp))
-                                                    )
+                                                            .background(ICostCellGray)
+                                                    ) {
+                                                        if (pct > 0f) {
+                                                            Box(
+                                                                modifier = Modifier
+                                                                    .fillMaxWidth(pct.coerceIn(0.02f, 1f))
+                                                                    .height(4.dp)
+                                                                    .clip(RoundedCornerShape(2.dp))
+                                                                    .background(ICostAmberGold)
+                                                            )
+                                                        }
+                                                    }
                                                     Spacer(modifier = Modifier.width(8.dp))
                                                     Text(
                                                         text = "${(pct * 100).toInt()}%",

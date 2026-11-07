@@ -283,6 +283,30 @@ class CapturePipelineCoordinator(
                     }
                 }
             }
+
+            // 4. 清理旧版宽松退款匹配误挂到无关消费（如将 10 月小米/安踏退款挂到 11 月 5000 元转账账单）的错误冲销关联
+            val afterMergeTxs = repository.getAllTransactions()
+            val txById = afterMergeTxs.associateBy { it.id }
+            for (tx in afterMergeTxs) {
+                if (tx.type == TransactionType.REFUND_OFFSET && tx.relatedTransactionId != null) {
+                    val parent = txById[tx.relatedTransactionId]
+                    val isGenuineMatch = parent != null && (
+                        (tx.orderKey.isNotBlank() && tx.orderKey == parent.orderKey) ||
+                            (parent.amountCnyCents == tx.amountCnyCents &&
+                                parent.timestamp <= tx.timestamp + 86_400_000L &&
+                                (parent.merchant.contains(tx.merchant, ignoreCase = true) ||
+                                    tx.merchant.contains(parent.merchant, ignoreCase = true)))
+                        )
+                    if (!isGenuineMatch) {
+                        repository.updateExistingTransaction(
+                            tx.copy(
+                                relatedTransactionId = null,
+                                updatedAtMillis = System.currentTimeMillis()
+                            )
+                        )
+                    }
+                }
+            }
         }
     }
 

@@ -168,12 +168,12 @@ fun TransactionDetailSheet(
 
     val fullTimeStr = remember(tx.timestamp) {
         val cal = Calendar.getInstance().apply { timeInMillis = tx.timestamp }
-        val pattern = if (cal.get(Calendar.SECOND) != 0) "yyyy年MM月dd日 HH:mm:ss" else "yyyy年MM月dd日 HH:mm"
+        val pattern = if (cal.get(Calendar.SECOND) != 0) "yyyy-MM-dd HH:mm:ss" else "yyyy-MM-dd HH:mm"
         SimpleDateFormat(pattern, Locale.CHINA).format(Date(tx.timestamp))
     }
     val capturedTimeStr = remember(tx.capturedAtMillis, tx.timestamp, tx.captureSource) {
         if (tx.captureSource != "MANUAL" && tx.capturedAtMillis > 0L) {
-            SimpleDateFormat("yyyy年MM月dd日 HH:mm:ss", Locale.CHINA).format(Date(tx.capturedAtMillis))
+            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date(tx.capturedAtMillis))
         } else {
             null
         }
@@ -285,18 +285,21 @@ fun TransactionDetailSheet(
                     color = amountColor
                 )
 
-                if (tx.type == TransactionType.EXPENSE) {
+                if (tx.type == TransactionType.EXPENSE && tx.discountCents > 0L) {
                     val origCents = tx.amountCents + tx.discountCents
                     Spacer(modifier = Modifier.height(6.dp))
                     Surface(
                         shape = RoundedCornerShape(10.dp),
-                        color = if (tx.discountCents > 0L) Color(0xFFFFF4EC) else ICostCellGray
+                        color = Color(0xFFFFF4EC)
                     ) {
                         Text(
                             text = "原价 ${formatMoneyCents(origCents, tx.currency)}  ·  优惠 ${formatMoneyCents(tx.discountCents, tx.currency)}  ·  实扣 ${formatMoneyCents(tx.amountCents, tx.currency)}",
                             fontSize = 12.sp,
-                            color = if (tx.discountCents > 0L) Color(0xFFD96B27) else ICostTextSecondary,
+                            color = Color(0xFFD96B27),
                             fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                         )
                     }
@@ -339,25 +342,22 @@ fun TransactionDetailSheet(
                     }
                 }
 
-                if (tx.type == TransactionType.EXPENSE) {
+                if (tx.type == TransactionType.EXPENSE && tx.discountCents > 0L) {
                     val origCents = tx.amountCents + tx.discountCents
-                    DetailKeyValueRow("商品原价", formatMoneyCents(origCents, tx.currency))
-                    DetailKeyValueRow(
-                        "优惠立减",
-                        if (tx.discountCents > 0L) "-${formatMoneyCents(tx.discountCents, tx.currency)}" else formatMoneyCents(0L, tx.currency)
-                    )
-                    DetailKeyValueRow("实扣金额", formatMoneyCents(tx.amountCents, tx.currency))
+                    DetailKeyValueRow("商品原价", formatMoneyCents(origCents, tx.currency), singleLine = true)
+                    DetailKeyValueRow("优惠立减", "-${formatMoneyCents(tx.discountCents, tx.currency)}", singleLine = true)
+                    DetailKeyValueRow("实扣金额", formatMoneyCents(tx.amountCents, tx.currency), singleLine = true)
                 }
-                DetailKeyValueRow("实际购物时间", fullTimeStr)
+                DetailKeyValueRow("实际购物时间", fullTimeStr, singleLine = true)
                 if (capturedTimeStr != null && abs(tx.capturedAtMillis - tx.timestamp) >= 1_000L) {
-                    DetailKeyValueRow("截图/识账时间", capturedTimeStr)
+                    DetailKeyValueRow("截图/识账时间", capturedTimeStr, singleLine = true)
                 }
-                DetailKeyValueRow("商品数量", tx.quantityDesc.ifBlank { "${tx.itemQuantity}件" })
+                DetailKeyValueRow("商品数量", tx.quantityDesc.ifBlank { "${tx.itemQuantity}件" }, singleLine = true)
                 val effectiveOrderKey = tx.orderKey.ifBlank { tx.transactionNo }.ifBlank { tx.merchantOrderNo }
                 if (effectiveOrderKey.isNotBlank()) {
-                    DetailKeyValueRow("订单唯一Key", effectiveOrderKey)
+                    DetailKeyValueRow("订单唯一Key", effectiveOrderKey, singleLine = true, compactFont = true)
                 }
-                DetailKeyValueRow("账本", tx.ledgerName)
+                DetailKeyValueRow("账本", tx.ledgerName, singleLine = true)
                 DetailKeyValueRow(
                     "资金账户",
                     when (tx.type) {
@@ -366,36 +366,45 @@ fun TransactionDetailSheet(
                         TransactionType.INCOME, TransactionType.REFUND_OFFSET ->
                             formatWalletDisplayName(targetWallet ?: sourceWallet)
                         else -> formatWalletDisplayName(sourceWallet)
-                    }
+                    },
+                    singleLine = true
                 )
                 if (tx.paymentMethodRaw.isNotBlank()) {
-                    DetailKeyValueRow("账单支付方式", tx.paymentMethodRaw)
+                    DetailKeyValueRow("账单支付方式", tx.paymentMethodRaw, singleLine = true)
                 }
                 if (tx.transactionNo.isNotBlank() && tx.transactionNo != effectiveOrderKey) {
-                    DetailKeyValueRow("交易流水号", tx.transactionNo)
+                    DetailKeyValueRow("交易流水号", tx.transactionNo, singleLine = true, compactFont = true)
                 }
                 if (tx.merchantOrderNo.isNotBlank() && tx.merchantOrderNo != effectiveOrderKey) {
-                    DetailKeyValueRow("商户单号", tx.merchantOrderNo)
+                    DetailKeyValueRow("商户单号", tx.merchantOrderNo, singleLine = true, compactFont = true)
                 }
                 if (tx.type != TransactionType.EXPENSE && tx.discountCents > 0L) {
-                    DetailKeyValueRow("优惠金额", formatMoneyCents(tx.discountCents))
+                    DetailKeyValueRow("优惠金额", formatMoneyCents(tx.discountCents), singleLine = true)
                 }
                 if (tx.feeCents > 0L) {
-                    DetailKeyValueRow("手续费", formatMoneyCents(tx.feeCents))
+                    DetailKeyValueRow("手续费", formatMoneyCents(tx.feeCents), singleLine = true)
                 }
                 if (tx.reimbursable) {
-                    DetailKeyValueRow("报销状态", if (tx.reimbursed) "已报销" else "待报销")
+                    DetailKeyValueRow("报销状态", if (tx.reimbursed) "已报销" else "待报销", singleLine = true)
                 }
                 if (tx.tags.isNotBlank()) {
-                    DetailKeyValueRow("标签", "#${tx.tags}")
+                    DetailKeyValueRow("标签", "#${tx.tags}", singleLine = true)
                 }
                 val merchant = tx.merchant.trim()
-                val note = tx.note.trim()
-                if (merchant.isNotEmpty() && note.isNotEmpty() && merchant != note) {
+                val cleanedNote = tx.note
+                    .let { n -> if (n.startsWith("原价¥") && n.contains("| ")) n.substringAfter("| ").trim() else if (n.startsWith("原价¥")) "" else n.trim() }
+                    .let { n ->
+                        if (tx.paymentMethodRaw.isNotBlank() && n.endsWith(" · ${tx.paymentMethodRaw}")) {
+                            n.removeSuffix(" · ${tx.paymentMethodRaw}").trim()
+                        } else {
+                            n.replace(Regex("""\s*·\s*(?:账户余额|微信零钱|零钱|支付宝|微信支付|花呗|京东白条|[^·]*(?:信用卡|储蓄卡|银行卡))(?:\([^)]*\))?\s*$"""), "").trim()
+                        }
+                    }
+                if (merchant.isNotEmpty()) {
                     DetailKeyValueRow("商户", merchant)
-                    DetailKeyValueRow("备注", note)
-                } else if (merchant.isNotEmpty() || note.isNotEmpty()) {
-                    DetailKeyValueRow("备注", merchant.ifEmpty { note })
+                }
+                if (cleanedNote.isNotEmpty() && cleanedNote != merchant) {
+                    DetailKeyValueRow("商品/备注", cleanedNote)
                 }
                 if (tx.captureSource != "MANUAL") {
                     val sourceLabel = when (tx.captureSource) {
@@ -405,7 +414,7 @@ fun TransactionDetailSheet(
                         "AI_FUSED", "AI_MERGED" -> "多通道证据融合识账"
                         else -> tx.captureSource
                     }
-                    DetailKeyValueRow("识账来源", sourceLabel)
+                    DetailKeyValueRow("识账来源", sourceLabel, singleLine = true)
                 }
             }
         }
@@ -441,12 +450,14 @@ fun TransactionDetailSheet(
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = if (tx.transactionNo.isNotBlank()) {
-                            "包含订单流水号 (${tx.transactionNo.takeLast(8)}) 与金额，已绑定防重复录入校验"
+                            "已绑定订单流水号 (${tx.transactionNo.takeLast(8)}) 与金额防重校验"
                         } else {
-                            "已绑定图像 SHA-256 指纹 (${tx.screenshotSha256.take(8)})，防止重复录入"
+                            "已绑定图像 SHA-256 指纹 (${tx.screenshotSha256.take(8)}) 防重校验"
                         },
                         fontSize = 11.sp,
-                        color = ICostTextSecondary
+                        color = ICostTextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                     Spacer(modifier = Modifier.height(10.dp))
                     Image(
@@ -982,7 +993,12 @@ private fun DetailWideActionButton(
 }
 
 @Composable
-private fun DetailKeyValueRow(label: String, value: String) {
+private fun DetailKeyValueRow(
+    label: String,
+    value: String,
+    singleLine: Boolean = false,
+    compactFont: Boolean = false
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -990,14 +1006,23 @@ private fun DetailKeyValueRow(label: String, value: String) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, fontSize = 14.sp, color = ICostTextSecondary)
-        Spacer(modifier = Modifier.width(16.dp))
         Text(
-            value,
+            text = label,
             fontSize = 14.sp,
+            color = ICostTextSecondary,
+            maxLines = 1,
+            softWrap = false
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = value,
+            fontSize = if (compactFont) 12.sp else 14.sp,
             color = ICostTextPrimary,
             fontWeight = FontWeight.Medium,
             textAlign = TextAlign.End,
+            maxLines = if (singleLine) 1 else 3,
+            softWrap = !singleLine,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
     }
@@ -1362,7 +1387,16 @@ fun MonthlyCalendarSheet(
                             val sym = CurrencyCode.fromCode(item.currency).symbol
                             val isRefunded = item.type == TransactionType.EXPENSE && item.refundedAmountCents > 0L
                             val netExp = (item.amountCnyCents - item.refundedAmountCents).coerceAtLeast(0L)
-                            val subtitleExtra = item.merchant.ifBlank { item.note }
+                            val cleanedNote = item.note
+                                .let { n -> if (n.startsWith("原价¥") && n.contains("| ")) n.substringAfter("| ").trim() else if (n.startsWith("原价¥")) "" else n.trim() }
+                                .let { n ->
+                                    if (item.paymentMethodRaw.isNotBlank() && n.endsWith(" · ${item.paymentMethodRaw}")) {
+                                        n.removeSuffix(" · ${item.paymentMethodRaw}").trim()
+                                    } else {
+                                        n.replace(Regex("""\s*·\s*(?:账户余额|微信零钱|零钱|支付宝|微信支付|花呗|京东白条|[^·]*(?:信用卡|储蓄卡|银行卡))(?:\([^)]*\))?\s*$"""), "").trim()
+                                    }
+                                }
+                            val subtitleExtra = item.merchant.ifBlank { cleanedNote }
 
                             Row(
                                 modifier = Modifier
