@@ -87,6 +87,7 @@ import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
+import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
@@ -674,20 +675,24 @@ fun TransactionDetailSheet(
                         fontSize = 13.sp,
                         color = ICostTextSecondary
                     )
-                    OutlinedTextField(
+                    ICostFormField(
                         value = refundYuanStr,
                         onValueChange = { refundYuanStr = sanitizeMoneyInput(it) },
-                        label = { Text("退款金额（元）") },
+                        label = "退款金额（元）",
+                        placeholder = "0.00",
                         isError = refundError != null && refundYuanStr.isNotBlank(),
-                        supportingText = refundError?.let { msg -> { Text(msg) } },
+                        supportingText = refundError,
                         singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth()
                     )
-                    OutlinedTextField(
+                    ICostFormField(
                         value = refundNote,
                         onValueChange = { refundNote = it },
-                        label = { Text("备注（选填）") },
-                        singleLine = true
+                        label = "备注（选填）",
+                        placeholder = "如：商品部分退款",
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             },
@@ -755,15 +760,17 @@ fun TransactionDetailSheet(
                         value = categoryA,
                         onValueChange = { categoryA = it }
                     )
-                    OutlinedTextField(
+                    ICostFormField(
                         value = amountAStr,
                         onValueChange = { amountAStr = sanitizeMoneyInput(it) },
-                        label = { Text("金额（元）") },
+                        label = "金额（元）",
+                        placeholder = "0.00",
                         isError = splitError != null && amountAStr.isNotBlank() && amountACents != null &&
                             (amountACents <= 0L || amountACents >= totalCents),
-                        supportingText = splitError?.let { msg -> { Text(msg) } },
+                        supportingText = splitError,
                         singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth()
                     )
                     Text(
                         "第二笔 · 自动分配剩余 ${formatMoneyCents(remainBCents.coerceAtLeast(0L), tx.currency)}",
@@ -776,11 +783,13 @@ fun TransactionDetailSheet(
                         value = categoryB,
                         onValueChange = { categoryB = it }
                     )
-                    OutlinedTextField(
+                    ICostFormField(
                         value = noteB,
                         onValueChange = { noteB = it },
-                        label = { Text("备注（选填）") },
-                        singleLine = true
+                        label = "备注（选填）",
+                        placeholder = "如：分摊项目",
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             },

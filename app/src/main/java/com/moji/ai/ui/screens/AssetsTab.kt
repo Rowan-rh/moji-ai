@@ -59,8 +59,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -108,7 +106,11 @@ import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
+import com.moji.ai.ui.theme.ICostFormCard
+import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostSheetHeader
+import com.moji.ai.ui.theme.ICostSmoothBottomSheet
 import com.moji.ai.ui.theme.ICostSwipeActionRow
 import com.moji.ai.ui.theme.ICostTextMuted
 import com.moji.ai.ui.theme.ICostTextPrimary
@@ -119,6 +121,7 @@ import com.moji.ai.ui.theme.daysUntilRepaymentText
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
 import com.moji.ai.ui.theme.iCostPressScale
+import com.moji.ai.ui.theme.iCostUnifiedSwitchColors
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -208,7 +211,13 @@ fun ICostAssetsScreen(
     var showAddInstallment by remember { mutableStateOf(false) }
     var showAddRecurringRule by remember { mutableStateOf(false) }
 
-    val subpageActive = inspectingWallet != null || showSelectTypeFullScreen
+    val hasActiveBottomSheet = selectedPresetForEditor != null ||
+        editingWallet != null ||
+        reconcilingWallet != null ||
+        showAddSavingPlan ||
+        showAddInstallment ||
+        showAddRecurringRule
+    val subpageActive = inspectingWallet != null || showSelectTypeFullScreen || hasActiveBottomSheet
     androidx.compose.runtime.LaunchedEffect(subpageActive) {
         onSubpageActiveChange(subpageActive)
     }
@@ -1134,41 +1143,73 @@ fun ICostAssetsScreen(
             ICostSelectAccountTypeFullScreen(
                 onBack = { showSelectTypeFullScreen = false },
                 onSelectPreset = { option ->
-                    showSelectTypeFullScreen = false
                     selectedPresetForEditor = option
                 }
             )
         }
-    }
 
-    // 账户信息表单弹窗（新建或编辑）
-    if (selectedPresetForEditor != null || editingWallet != null) {
-        WalletEditorSheet(
-            existing = editingWallet,
-            preset = selectedPresetForEditor,
-            onDismiss = {
-                selectedPresetForEditor = null
-                editingWallet = null
-            },
-            onConfirm = { saved ->
-                onSaveWallet(saved)
-                selectedPresetForEditor = null
-                editingWallet = null
-            }
-        )
-    }
+        // 账户信息表单抽屉（新建或编辑）
+        if (selectedPresetForEditor != null || editingWallet != null) {
+            WalletEditorSheet(
+                existing = editingWallet,
+                preset = selectedPresetForEditor,
+                onDismiss = {
+                    selectedPresetForEditor = null
+                    editingWallet = null
+                },
+                onConfirm = { saved ->
+                    onSaveWallet(saved)
+                    selectedPresetForEditor = null
+                    editingWallet = null
+                    showSelectTypeFullScreen = false
+                }
+            )
+        }
 
-    // 核对余额弹窗（可补记差额账单）
-    val targetReconcile = reconcilingWallet
-    if (targetReconcile != null) {
-        WalletBalanceReconcileSheet(
-            wallet = targetReconcile,
-            onDismiss = { reconcilingWallet = null },
-            onConfirmReconcile = { actualYuan, recordAdjustmentTx, note ->
-                onReconcileWallet(targetReconcile.id, actualYuan, recordAdjustmentTx, note)
-                reconcilingWallet = null
-            }
-        )
+        // 核对余额抽屉（可补记差额账单）
+        val targetReconcile = reconcilingWallet
+        if (targetReconcile != null) {
+            WalletBalanceReconcileSheet(
+                wallet = targetReconcile,
+                onDismiss = { reconcilingWallet = null },
+                onConfirmReconcile = { actualYuan, recordAdjustmentTx, note ->
+                    onReconcileWallet(targetReconcile.id, actualYuan, recordAdjustmentTx, note)
+                    reconcilingWallet = null
+                }
+            )
+        }
+
+        if (showAddSavingPlan) {
+            AddSavingPlanSheet(
+                onDismiss = { showAddSavingPlan = false },
+                onConfirm = { title, targetYuan, savedYuan, deadline ->
+                    showAddSavingPlan = false
+                    onAddSavingPlan(title, targetYuan, savedYuan, deadline)
+                }
+            )
+        }
+
+        if (showAddInstallment) {
+            AddInstallmentSheet(
+                wallets = wallets,
+                onDismiss = { showAddInstallment = false },
+                onConfirm = { title, walletId, totalYuan, feeYuan, periods ->
+                    showAddInstallment = false
+                    onAddInstallmentPlan(title, walletId, totalYuan, feeYuan, periods)
+                }
+            )
+        }
+
+        if (showAddRecurringRule) {
+            AddRecurringRuleSheet(
+                wallets = wallets,
+                onDismiss = { showAddRecurringRule = false },
+                onConfirm = { title, amountYuan, currency, category, walletId, frequency ->
+                    showAddRecurringRule = false
+                    onAddRecurringRule(title, amountYuan, currency, category, walletId, frequency)
+                }
+            )
+        }
     }
 
     // 删除账户确认
@@ -1239,38 +1280,6 @@ fun ICostAssetsScreen(
             onConfirm = { yuan ->
                 depositingPlan = null
                 onDepositSavingPlan(plan.id, yuan)
-            }
-        )
-    }
-
-    if (showAddSavingPlan) {
-        AddSavingPlanSheet(
-            onDismiss = { showAddSavingPlan = false },
-            onConfirm = { title, targetYuan, savedYuan, deadline ->
-                showAddSavingPlan = false
-                onAddSavingPlan(title, targetYuan, savedYuan, deadline)
-            }
-        )
-    }
-
-    if (showAddInstallment) {
-        AddInstallmentSheet(
-            wallets = wallets,
-            onDismiss = { showAddInstallment = false },
-            onConfirm = { title, walletId, totalYuan, feeYuan, periods ->
-                showAddInstallment = false
-                onAddInstallmentPlan(title, walletId, totalYuan, feeYuan, periods)
-            }
-        )
-    }
-
-    if (showAddRecurringRule) {
-        AddRecurringRuleSheet(
-            wallets = wallets,
-            onDismiss = { showAddRecurringRule = false },
-            onConfirm = { title, amountYuan, currency, category, walletId, frequency ->
-                showAddRecurringRule = false
-                onAddRecurringRule(title, amountYuan, currency, category, walletId, frequency)
             }
         )
     }
@@ -1444,21 +1453,27 @@ private fun PlanActionChip(
 private fun ICostChoicePill(
     label: String,
     selected: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    compactHorizontalPadding: Boolean = false
 ) {
     Surface(
         onClick = onClick,
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(12.dp),
         color = if (selected) ICostBlueAccent else ICostCellGray,
-        modifier = Modifier.heightIn(min = 40.dp)
+        modifier = modifier.heightIn(min = 38.dp)
     ) {
-        Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 14.dp)) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.padding(horizontal = if (compactHorizontalPadding) 2.dp else 12.dp)
+        ) {
             Text(
                 text = label,
-                fontSize = 13.sp,
+                fontSize = if (compactHorizontalPadding) 12.sp else 13.sp,
                 fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
                 color = if (selected) Color.White else ICostTextPrimary,
-                maxLines = 1
+                maxLines = 1,
+                softWrap = false
             )
         }
     }
@@ -1479,7 +1494,13 @@ private fun PillChooserRow(content: @Composable () -> Unit) {
 
 @Composable
 private fun FieldLabel(text: String) {
-    Text(text, fontSize = 13.sp, color = ICostTextSecondary, fontWeight = FontWeight.Medium)
+    Text(
+        text = text,
+        fontSize = 12.sp,
+        color = ICostTextSecondary,
+        fontWeight = FontWeight.Bold,
+        modifier = Modifier.padding(start = 2.dp)
+    )
 }
 
 @Composable
@@ -1501,13 +1522,14 @@ private fun SavingPlanDepositDialog(
         containerColor = ICostCardWhite,
         title = { Text("存入「${plan.title}」", fontWeight = FontWeight.ExtraBold, fontSize = 18.sp) },
         text = {
-            OutlinedTextField(
+            ICostFormField(
                 value = input,
                 onValueChange = { input = sanitizeAmountInput(it) },
-                label = { Text("存入金额（元）") },
+                label = "存入金额（元）",
+                placeholder = "请输入存入金额",
                 singleLine = true,
                 isError = error != null,
-                supportingText = error?.let { { Text(it) } },
+                supportingText = error,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                 modifier = Modifier.fillMaxWidth()
             )
@@ -1523,7 +1545,6 @@ private fun SavingPlanDepositDialog(
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AddSavingPlanSheet(
     onDismiss: () -> Unit,
@@ -1551,72 +1572,91 @@ private fun AddSavingPlanSheet(
     val deadlineError = if (!deadlineValid) "日期格式如 $defaultDeadline" else null
     val valid = title.isNotBlank() && target != null && target >= 1.0 && saved != null && saved >= 0.0 && deadlineValid
 
-    ModalBottomSheet(
+    ICostSmoothBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = ICostCardWhite,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-    ) {
+        containerColor = ICostBgGray,
+        showDragHandle = false
+    ) { requestDismiss ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp)
                 .navigationBarsPadding()
-                .padding(bottom = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text("新增存钱计划", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = ICostTextPrimary)
-            OutlinedTextField(
-                value = title,
-                onValueChange = { title = it; titleTouched = true },
-                label = { Text("计划名称") },
-                placeholder = { Text("如：旅行基金") },
-                singleLine = true,
-                isError = titleError != null,
-                supportingText = titleError?.let { { Text(it) } },
-                modifier = Modifier.fillMaxWidth()
+            ICostSheetHeader(
+                title = "新增存钱计划",
+                onClose = requestDismiss
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(
-                    value = targetStr,
-                    onValueChange = { targetStr = sanitizeAmountInput(it); targetTouched = true },
-                    label = { Text("目标金额（元）") },
-                    singleLine = true,
-                    isError = targetError != null,
-                    supportingText = targetError?.let { { Text(it) } },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    modifier = Modifier.weight(1f)
-                )
-                OutlinedTextField(
-                    value = savedStr,
-                    onValueChange = { savedStr = sanitizeAmountInput(it) },
-                    label = { Text("已存（元，选填）") },
-                    singleLine = true,
-                    isError = savedError != null,
-                    supportingText = savedError?.let { { Text(it) } },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    modifier = Modifier.weight(1f)
-                )
-            }
-            OutlinedTextField(
-                value = deadline,
-                onValueChange = { deadline = it.take(10) },
-                label = { Text("截止日期") },
-                singleLine = true,
-                isError = deadlineError != null,
-                supportingText = deadlineError?.let { { Text(it) } },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
-                modifier = Modifier.fillMaxWidth()
-            )
-            Button(
-                onClick = { if (valid) onConfirm(title.trim(), target!!, saved!!, deadline.trim()) },
-                enabled = valid,
-                colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
-                shape = RoundedCornerShape(16.dp),
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp)
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text("保存", fontWeight = FontWeight.Bold)
+                ICostFormCard {
+                    ICostFormField(
+                        value = title,
+                        onValueChange = { title = it; titleTouched = true },
+                        label = "计划名称",
+                        placeholder = "如：旅行基金、备用金",
+                        singleLine = true,
+                        isError = titleError != null,
+                        supportingText = titleError,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        ICostFormField(
+                            value = targetStr,
+                            onValueChange = { targetStr = sanitizeAmountInput(it); targetTouched = true },
+                            label = "目标金额（元）",
+                            placeholder = "0.00",
+                            singleLine = true,
+                            isError = targetError != null,
+                            supportingText = targetError,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.weight(1f)
+                        )
+                        ICostFormField(
+                            value = savedStr,
+                            onValueChange = { savedStr = sanitizeAmountInput(it) },
+                            label = "已存金额（选填）",
+                            placeholder = "0.00",
+                            singleLine = true,
+                            isError = savedError != null,
+                            supportingText = savedError,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    ICostFormField(
+                        value = deadline,
+                        onValueChange = { deadline = it.take(10) },
+                        label = "截止日期",
+                        placeholder = defaultDeadline,
+                        singleLine = true,
+                        isError = deadlineError != null,
+                        supportingText = deadlineError,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                Button(
+                    onClick = {
+                        if (valid) {
+                            onConfirm(title.trim(), target!!, saved!!, deadline.trim())
+                            requestDismiss()
+                        }
+                    },
+                    enabled = valid,
+                    colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                ) {
+                    Text("保存", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                }
             }
         }
     }
@@ -1633,7 +1673,6 @@ private fun isValidDateLabel(raw: String): Boolean {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AddInstallmentSheet(
     wallets: List<WalletEntity>,
@@ -1664,96 +1703,116 @@ private fun AddInstallmentSheet(
     val valid = title.isNotBlank() && walletId != null && total != null && total >= 1.0 &&
         fee != null && fee >= 0.0 && periods != null && periods in 2..60
 
-    ModalBottomSheet(
+    ICostSmoothBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = ICostCardWhite,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-    ) {
+        containerColor = ICostBgGray,
+        showDragHandle = false
+    ) { requestDismiss ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp)
                 .navigationBarsPadding()
-                .padding(bottom = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            Text("新增分期", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = ICostTextPrimary)
-            OutlinedTextField(
-                value = title,
-                onValueChange = { title = it; titleTouched = true },
-                label = { Text("分期名称") },
-                placeholder = { Text("如：手机分期") },
-                singleLine = true,
-                isError = titleError != null,
-                supportingText = titleError?.let { { Text(it) } },
-                modifier = Modifier.fillMaxWidth()
+            ICostSheetHeader(
+                title = "新增分期",
+                onClose = requestDismiss
             )
-            FieldLabel("还款账户")
-            if (orderedWallets.isEmpty()) {
-                Text("请先添加账户", fontSize = 13.sp, color = ICostCoralRed)
-            } else {
-                PillChooserRow {
-                    orderedWallets.forEach { w ->
-                        ICostChoicePill(label = w.name, selected = walletId == w.id, onClick = { walletId = w.id })
-                    }
-                }
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                OutlinedTextField(
-                    value = totalStr,
-                    onValueChange = { totalStr = sanitizeAmountInput(it); totalTouched = true },
-                    label = { Text("分期总额（元）") },
-                    singleLine = true,
-                    isError = totalError != null,
-                    supportingText = totalError?.let { { Text(it) } },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    modifier = Modifier.weight(1f)
-                )
-                OutlinedTextField(
-                    value = feeStr,
-                    onValueChange = { feeStr = sanitizeAmountInput(it) },
-                    label = { Text("每期手续费（选填）") },
-                    singleLine = true,
-                    isError = feeError != null,
-                    supportingText = feeError?.let { { Text(it) } },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    modifier = Modifier.weight(1f)
-                )
-            }
-            FieldLabel("期数")
-            PillChooserRow {
-                listOf(3, 6, 12, 24).forEach { p ->
-                    ICostChoicePill(label = "${p} 期", selected = periods == p, onClick = { periodsStr = p.toString() })
-                }
-                OutlinedTextField(
-                    value = periodsStr,
-                    onValueChange = { v -> periodsStr = v.filter { it.isDigit() }.take(2) },
-                    label = { Text("其他") },
-                    singleLine = true,
-                    isError = periodsError != null,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.width(88.dp)
-                )
-            }
-            if (periodsError != null) {
-                Text(periodsError, fontSize = 12.sp, color = ICostCoralRed)
-            }
-            Button(
-                onClick = { if (valid) onConfirm(title.trim(), walletId!!, total!!, fee!!, periods!!) },
-                enabled = valid,
-                colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
-                shape = RoundedCornerShape(16.dp),
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp)
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text("保存", fontWeight = FontWeight.Bold)
+                ICostFormCard {
+                    ICostFormField(
+                        value = title,
+                        onValueChange = { title = it; titleTouched = true },
+                        label = "分期名称",
+                        placeholder = "如：手机分期、电脑分期",
+                        singleLine = true,
+                        isError = titleError != null,
+                        supportingText = titleError,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FieldLabel("还款账户")
+                        if (orderedWallets.isEmpty()) {
+                            Text("请先添加账户", fontSize = 13.sp, color = ICostCoralRed)
+                        } else {
+                            PillChooserRow {
+                                orderedWallets.forEach { w ->
+                                    ICostChoicePill(label = w.name, selected = walletId == w.id, onClick = { walletId = w.id })
+                                }
+                            }
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        ICostFormField(
+                            value = totalStr,
+                            onValueChange = { totalStr = sanitizeAmountInput(it); totalTouched = true },
+                            label = "分期总额（元）",
+                            placeholder = "0.00",
+                            singleLine = true,
+                            isError = totalError != null,
+                            supportingText = totalError,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.weight(1f)
+                        )
+                        ICostFormField(
+                            value = feeStr,
+                            onValueChange = { feeStr = sanitizeAmountInput(it) },
+                            label = "每期手续费（选填）",
+                            placeholder = "0.00",
+                            singleLine = true,
+                            isError = feeError != null,
+                            supportingText = feeError,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FieldLabel("分期期数")
+                        PillChooserRow {
+                            listOf(3, 6, 12, 24).forEach { p ->
+                                ICostChoicePill(label = "${p} 期", selected = periods == p, onClick = { periodsStr = p.toString() })
+                            }
+                        }
+                        ICostFormField(
+                            value = periodsStr,
+                            onValueChange = { v -> periodsStr = v.filter { it.isDigit() }.take(2) },
+                            label = "自定义期数（2–60 期）",
+                            placeholder = "12",
+                            singleLine = true,
+                            isError = periodsError != null,
+                            supportingText = periodsError,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = {
+                        if (valid) {
+                            onConfirm(title.trim(), walletId!!, total!!, fee!!, periods!!)
+                            requestDismiss()
+                        }
+                    },
+                    enabled = valid,
+                    colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                ) {
+                    Text("保存", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                }
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AddRecurringRuleSheet(
     wallets: List<WalletEntity>,
@@ -1779,108 +1838,132 @@ private fun AddRecurringRuleSheet(
     }
     val valid = title.isNotBlank() && amount != null && amount > 0.0 && walletId != null
 
-    ModalBottomSheet(
+    ICostSmoothBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = ICostCardWhite,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-    ) {
-        LazyColumn(
+        containerColor = ICostBgGray,
+        showDragHandle = false
+    ) { requestDismiss ->
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp)
-                .navigationBarsPadding(),
-            contentPadding = PaddingValues(bottom = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .navigationBarsPadding()
         ) {
-            item {
-                Text("添加周期账单", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = ICostTextPrimary)
-            }
-            item {
-                OutlinedTextField(
-                    value = title,
-                    onValueChange = { title = it; titleTouched = true },
-                    label = { Text("名称") },
-                    placeholder = { Text("如：房租、视频会员") },
-                    singleLine = true,
-                    isError = titleError != null,
-                    supportingText = titleError?.let { { Text(it) } },
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            item {
-                OutlinedTextField(
-                    value = amountStr,
-                    onValueChange = { amountStr = sanitizeAmountInput(it); amountTouched = true },
-                    label = { Text("每次金额") },
-                    singleLine = true,
-                    isError = amountError != null,
-                    supportingText = amountError?.let { { Text(it) } },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FieldLabel("币种")
-                    PillChooserRow {
-                        CurrencyCode.entries.forEach { c ->
-                            ICostChoicePill(label = c.name, selected = currency == c.name, onClick = { currency = c.name })
+            ICostSheetHeader(
+                title = "添加周期账单",
+                onClose = requestDismiss
+            )
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                contentPadding = PaddingValues(bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                item {
+                    ICostFormCard {
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            ICostFormField(
+                                value = title,
+                                onValueChange = { title = it; titleTouched = true },
+                                label = "账单名称",
+                                placeholder = "如：房租、会员订阅",
+                                singleLine = true,
+                                isError = titleError != null,
+                                supportingText = titleError,
+                                modifier = Modifier.weight(1f)
+                            )
+                            ICostFormField(
+                                value = amountStr,
+                                onValueChange = { amountStr = sanitizeAmountInput(it); amountTouched = true },
+                                label = "每次金额",
+                                placeholder = "0.00",
+                                singleLine = true,
+                                isError = amountError != null,
+                                supportingText = amountError,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                modifier = Modifier.weight(1f)
+                            )
                         }
-                    }
-                }
-            }
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FieldLabel("重复")
-                    PillChooserRow {
-                        RecurrenceFrequency.entries.forEach { f ->
-                            ICostChoicePill(label = f.displayName, selected = frequency == f, onClick = { frequency = f })
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FieldLabel("币种")
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                CurrencyCode.entries.forEach { c ->
+                                    ICostChoicePill(
+                                        label = c.name,
+                                        selected = currency == c.name,
+                                        onClick = { currency = c.name },
+                                        modifier = Modifier.weight(1f),
+                                        compactHorizontalPadding = true
+                                    )
+                                }
+                            }
                         }
-                    }
-                }
-            }
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FieldLabel("分类")
-                    PillChooserRow {
-                        categories.forEach { name ->
-                            ICostChoicePill(label = name, selected = category == name, onClick = { category = name })
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FieldLabel("重复周期")
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                RecurrenceFrequency.entries.forEach { f ->
+                                    ICostChoicePill(
+                                        label = f.displayName,
+                                        selected = frequency == f,
+                                        onClick = { frequency = f },
+                                        modifier = Modifier.weight(1f),
+                                        compactHorizontalPadding = true
+                                    )
+                                }
+                            }
                         }
-                    }
-                }
-            }
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FieldLabel("付款账户")
-                    if (wallets.isEmpty()) {
-                        Text("请先添加账户", fontSize = 13.sp, color = ICostCoralRed)
-                    } else {
-                        PillChooserRow {
-                            wallets.forEach { w ->
-                                ICostChoicePill(
-                                    label = w.name,
-                                    selected = walletId == w.id,
-                                    onClick = {
-                                        walletId = w.id
-                                        currency = CurrencyCode.fromCode(w.currency).name
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FieldLabel("记账分类")
+                            PillChooserRow {
+                                categories.forEach { name ->
+                                    ICostChoicePill(label = name, selected = category == name, onClick = { category = name })
+                                }
+                            }
+                        }
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FieldLabel("扣款账户")
+                            if (wallets.isEmpty()) {
+                                Text("请先添加账户", fontSize = 13.sp, color = ICostCoralRed)
+                            } else {
+                                PillChooserRow {
+                                    wallets.forEach { w ->
+                                        ICostChoicePill(
+                                            label = w.name,
+                                            selected = walletId == w.id,
+                                            onClick = {
+                                                walletId = w.id
+                                                currency = CurrencyCode.fromCode(w.currency).name
+                                            }
+                                        )
                                     }
-                                )
+                                }
                             }
                         }
                     }
                 }
-            }
-            item {
-                Button(
-                    onClick = { if (valid) onConfirm(title.trim(), amount!!, currency, category, walletId!!, frequency) },
-                    enabled = valid,
-                    colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                ) {
-                    Text("保存", fontWeight = FontWeight.Bold)
+                item {
+                    Button(
+                        onClick = {
+                            if (valid) {
+                                onConfirm(title.trim(), amount!!, currency, category, walletId!!, frequency)
+                                requestDismiss()
+                            }
+                        },
+                        enabled = valid,
+                        colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                    ) {
+                        Text("保存", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    }
                 }
             }
         }
@@ -2673,182 +2756,204 @@ private fun WalletEditorSheet(
     val canSave = nameError == null && balanceError == null && limitError == null &&
         repaymentDayError == null && last4Error == null
 
-    ModalBottomSheet(
+    ICostSmoothBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = ICostCardWhite,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-    ) {
-        LazyColumn(
+        containerColor = ICostBgGray,
+        showDragHandle = false
+    ) { requestDismiss ->
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp)
-                .navigationBarsPadding(),
-            contentPadding = PaddingValues(bottom = 24.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .navigationBarsPadding()
         ) {
-            item {
-                Text(
-                    text = if (existing == null) "新建账户" else "编辑账户",
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = ICostTextPrimary
-                )
-            }
+            ICostSheetHeader(
+                title = if (existing == null) "新建账户" else "编辑账户",
+                subtitle = subTypeLabel,
+                onClose = requestDismiss
+            )
 
-            if (preset?.assetFile?.startsWith("bank_") == true) {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                contentPadding = PaddingValues(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
                 item {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text("信用卡", fontSize = 14.sp, color = ICostTextPrimary)
-                        Switch(
-                            checked = isCreditAccount,
-                            onCheckedChange = {
-                                isCreditAccount = it
-                                subTypeLabel = if (it) "信用卡" else "储蓄卡"
+                    ICostFormCard {
+                        if (preset?.assetFile?.startsWith("bank_") == true) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text("信用卡账户", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = ICostTextPrimary)
+                                Switch(
+                                    checked = isCreditAccount,
+                                    onCheckedChange = {
+                                        isCreditAccount = it
+                                        subTypeLabel = if (it) "信用卡" else "储蓄卡"
+                                    },
+                                    colors = iCostUnifiedSwitchColors()
+                                )
                             }
-                        )
-                    }
-                }
-            }
-
-            item {
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("账户名称") },
-                    isError = nameError != null,
-                    supportingText = nameError?.let { { Text(it) } },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-            }
-
-            item {
-                OutlinedTextField(
-                    value = balanceStr,
-                    onValueChange = { balanceStr = sanitizeAmountInput(it, allowNegative = !isCreditAccount) },
-                    label = { Text(if (isCreditAccount) "当前欠款（元）" else "当前余额（元）") },
-                    isError = balanceError != null,
-                    supportingText = balanceError?.let { { Text(it) } },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-            }
-
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FieldLabel("币种")
-                    PillChooserRow {
-                        CurrencyCode.entries.forEach { c ->
-                            ICostChoicePill(label = c.name, selected = currency == c.name, onClick = { currency = c.name })
                         }
-                    }
-                }
-            }
 
-            if (isCreditAccount) {
-                item {
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        OutlinedTextField(
-                            value = limitStr,
-                            onValueChange = { limitStr = sanitizeAmountInput(it) },
-                            label = { Text("信用额度（元）") },
-                            isError = limitError != null,
-                            supportingText = limitError?.let { { Text(it) } },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                            modifier = Modifier.weight(1f),
-                            singleLine = true
-                        )
-                        OutlinedTextField(
-                            value = repaymentDayStr,
-                            onValueChange = { v -> repaymentDayStr = v.filter { it.isDigit() }.take(2) },
-                            label = { Text("还款日") },
-                            isError = repaymentDayError != null,
-                            supportingText = repaymentDayError?.let { { Text(it) } },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier.width(110.dp),
-                            singleLine = true
-                        )
-                    }
-                }
-            }
-
-            item {
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    OutlinedTextField(
-                        value = last4,
-                        onValueChange = { v -> last4 = v.filter { it.isDigit() }.take(4) },
-                        label = { Text("卡号后四位（选填）") },
-                        isError = last4Error != null,
-                        supportingText = last4Error?.let { { Text(it) } },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = aliases,
-                        onValueChange = { aliases = it },
-                        label = { Text("识别关键词（选填）") },
-                        supportingText = { Text("多个用逗号分隔") },
-                        modifier = Modifier.weight(1f),
-                        singleLine = true
-                    )
-                }
-            }
-
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("计入净资产", fontSize = 14.sp)
-                    Switch(checked = includeInNetWorth, onCheckedChange = { includeInNetWorth = it })
-                }
-            }
-
-            item {
-                Button(
-                    onClick = {
-                        if (!canSave || balanceValue == null) return@Button
-                        val finalType = if (isCreditAccount) {
-                            WalletType.CREDIT
-                        } else {
-                            val base = preset?.defaultType ?: existing?.type ?: WalletType.DEBIT_BANK
-                            if (base.isLiability) WalletType.DEBIT_BANK else base
-                        }
-                        val balCents = (balanceValue * 100.0).roundToLong()
-                        val limCents = if (isCreditAccount) ((limitValue ?: 0.0) * 100.0).roundToLong() else null
-                        onConfirm(
-                            WalletEntity(
-                                id = existing?.id ?: 0L,
-                                name = name.trim(),
-                                type = finalType,
-                                subTypeLabel = subTypeLabel,
-                                brandCode = brandCode,
-                                currency = currency,
-                                balanceCents = balCents,
-                                creditLimitCents = limCents,
-                                cardLast4 = last4.trim().takeIf { it.isNotEmpty() },
-                                aliases = aliases.trim(),
-                                repaymentDay = if (isCreditAccount) repaymentDay else existing?.repaymentDay,
-                                includeInNetWorth = includeInNetWorth,
-                                colorHex = existing?.colorHex ?: 0xFFE65540
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            ICostFormField(
+                                value = name,
+                                onValueChange = { name = it },
+                                label = "账户名称",
+                                placeholder = "如：支付宝、招商银行",
+                                isError = nameError != null,
+                                supportingText = nameError,
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
                             )
-                        )
-                    },
-                    enabled = canSave,
-                    colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(48.dp)
-                ) {
-                    Text("保存", fontWeight = FontWeight.Bold)
+                            ICostFormField(
+                                value = balanceStr,
+                                onValueChange = { balanceStr = sanitizeAmountInput(it, allowNegative = !isCreditAccount) },
+                                label = if (isCreditAccount) "当前欠款（元）" else "当前余额（元）",
+                                placeholder = "0.00",
+                                isError = balanceError != null,
+                                supportingText = balanceError,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                        }
+
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            FieldLabel("币种")
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                CurrencyCode.entries.forEach { c ->
+                                    ICostChoicePill(
+                                        label = c.name,
+                                        selected = currency == c.name,
+                                        onClick = { currency = c.name },
+                                        modifier = Modifier.weight(1f),
+                                        compactHorizontalPadding = true
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                item {
+                    ICostFormCard {
+                        if (isCreditAccount) {
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                ICostFormField(
+                                    value = limitStr,
+                                    onValueChange = { limitStr = sanitizeAmountInput(it) },
+                                    label = "信用额度（元）",
+                                    placeholder = "20000",
+                                    isError = limitError != null,
+                                    supportingText = limitError,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                    modifier = Modifier.weight(1f),
+                                    singleLine = true
+                                )
+                                ICostFormField(
+                                    value = repaymentDayStr,
+                                    onValueChange = { v -> repaymentDayStr = v.filter { it.isDigit() }.take(2) },
+                                    label = "每月还款日",
+                                    placeholder = "1–31",
+                                    isError = repaymentDayError != null,
+                                    supportingText = repaymentDayError,
+                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                    modifier = Modifier.weight(1f),
+                                    singleLine = true
+                                )
+                            }
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            ICostFormField(
+                                value = last4,
+                                onValueChange = { v -> last4 = v.filter { it.isDigit() }.take(4) },
+                                label = "卡号后四位（选填）",
+                                placeholder = "如 3354",
+                                isError = last4Error != null,
+                                supportingText = last4Error,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                            ICostFormField(
+                                value = aliases,
+                                onValueChange = { aliases = it },
+                                label = "识别关键词（选填）",
+                                placeholder = "多个用逗号分隔",
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                        }
+
+                        HorizontalDivider(color = ICostDivider)
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("计入净资产", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = ICostTextPrimary)
+                                Text("开启后该账户余额或欠款会汇总到首页净资产", fontSize = 11.sp, color = ICostTextSecondary)
+                            }
+                            Switch(
+                                checked = includeInNetWorth,
+                                onCheckedChange = { includeInNetWorth = it },
+                                colors = iCostUnifiedSwitchColors()
+                            )
+                        }
+                    }
+                }
+
+                item {
+                    Button(
+                        onClick = {
+                            if (!canSave || balanceValue == null) return@Button
+                            val finalType = if (isCreditAccount) {
+                                WalletType.CREDIT
+                            } else {
+                                val base = preset?.defaultType ?: existing?.type ?: WalletType.DEBIT_BANK
+                                if (base.isLiability) WalletType.DEBIT_BANK else base
+                            }
+                            val balCents = (balanceValue * 100.0).roundToLong()
+                            val limCents = if (isCreditAccount) ((limitValue ?: 0.0) * 100.0).roundToLong() else null
+                            onConfirm(
+                                WalletEntity(
+                                    id = existing?.id ?: 0L,
+                                    name = name.trim(),
+                                    type = finalType,
+                                    subTypeLabel = subTypeLabel,
+                                    brandCode = brandCode,
+                                    currency = currency,
+                                    balanceCents = balCents,
+                                    creditLimitCents = limCents,
+                                    cardLast4 = last4.trim().takeIf { it.isNotEmpty() },
+                                    aliases = aliases.trim(),
+                                    repaymentDay = if (isCreditAccount) repaymentDay else existing?.repaymentDay,
+                                    includeInNetWorth = includeInNetWorth,
+                                    colorHex = existing?.colorHex ?: 0xFFE65540
+                                )
+                            )
+                            requestDismiss()
+                        },
+                        enabled = canSave,
+                        colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                    ) {
+                        Text("保存", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+                    }
                 }
             }
         }
@@ -2858,7 +2963,6 @@ private fun WalletEditorSheet(
 /**
  * 核对余额：输入真实余额（或欠款），可选择补记一笔差额账单，或只修改账面余额。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun WalletBalanceReconcileSheet(
     wallet: WalletEntity,
@@ -2896,100 +3000,107 @@ private fun WalletBalanceReconcileSheet(
             if (recordAdjustmentTx) "欠款比账面少 $absDiffText，将补记一笔欠款减少" else "欠款比账面少 $absDiffText，将直接修改欠款"
     }
 
-    ModalBottomSheet(
+    ICostSmoothBottomSheet(
         onDismissRequest = onDismiss,
-        containerColor = ICostCardWhite,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
-    ) {
+        containerColor = ICostBgGray,
+        showDragHandle = false
+    ) { requestDismiss ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 8.dp)
-                .navigationBarsPadding(),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+                .navigationBarsPadding()
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                WalletBrandAvatar(wallet, size = 34.dp)
-                Spacer(modifier = Modifier.width(10.dp))
-                Column {
-                    Text(
-                        text = "核对余额",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = ICostTextPrimary
-                    )
-                    Text(
-                        text = "${wallet.name} · 账面${if (wallet.type.isLiability) "欠款" else "余额"} ${formatMoneyCents(wallet.balanceCents, wallet.currency)}",
-                        fontSize = 12.sp,
-                        color = ICostTextSecondary
-                    )
-                }
-            }
-
-            OutlinedTextField(
-                value = actualInput,
-                onValueChange = { actualInput = sanitizeAmountInput(it) },
-                label = { Text(if (wallet.type.isLiability) "实际欠款" else "实际余额") },
-                isError = inputError != null,
-                supportingText = inputError?.let { { Text(it) } },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true
+            ICostSheetHeader(
+                title = "核对余额",
+                subtitle = "${wallet.name} · 账面${if (wallet.type.isLiability) "欠款" else "余额"} ${formatMoneyCents(wallet.balanceCents, wallet.currency)}",
+                onClose = requestDismiss
             )
 
-            Surface(
-                shape = RoundedCornerShape(14.dp),
-                color = if (diffCents == 0L) ICostBgGray else Color(0xFFEEF4FF),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text(
-                    text = diffSummary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = if (diffCents == 0L) ICostTextSecondary else ICostBlueAccent,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                )
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
-                    Text("补记差额账单", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = ICostTextPrimary)
-                    Text("开启后会记一笔差额账单，方便日后查账；关闭则只修改账面金额", fontSize = 12.sp, color = ICostTextSecondary)
-                }
-                Switch(checked = recordAdjustmentTx, onCheckedChange = { recordAdjustmentTx = it })
-            }
-
-            if (recordAdjustmentTx && diffCents != 0L) {
-                OutlinedTextField(
-                    value = customNote,
-                    onValueChange = { customNote = it },
-                    label = { Text("备注（选填）") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
-                )
-            }
-
-            Button(
-                onClick = {
-                    parsedActualYuan?.let { onConfirmReconcile(it, recordAdjustmentTx, customNote.trim()) }
-                },
-                enabled = inputError == null && diffCents != 0L,
-                colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
-                shape = RoundedCornerShape(16.dp),
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(48.dp)
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text(
-                    text = if (recordAdjustmentTx) "确认并补记账单" else "只修改账面金额",
-                    fontWeight = FontWeight.Bold
-                )
+                ICostFormCard {
+                    ICostFormField(
+                        value = actualInput,
+                        onValueChange = { actualInput = sanitizeAmountInput(it) },
+                        label = if (wallet.type.isLiability) "实际欠款（元）" else "实际余额（元）",
+                        placeholder = "0.00",
+                        isError = inputError != null,
+                        supportingText = inputError,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (diffCents == 0L) ICostBgGray else Color(0xFFEEF4FF),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = diffSummary,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (diffCents == 0L) ICostTextSecondary else ICostBlueAccent,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                        )
+                    }
+
+                    HorizontalDivider(color = ICostDivider)
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                            Text("补记差额账单", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = ICostTextPrimary)
+                            Text("开启后会记一笔差额账单，方便日后查账；关闭则只修改账面金额", fontSize = 11.sp, color = ICostTextSecondary)
+                        }
+                        Switch(
+                            checked = recordAdjustmentTx,
+                            onCheckedChange = { recordAdjustmentTx = it },
+                            colors = iCostUnifiedSwitchColors()
+                        )
+                    }
+
+                    if (recordAdjustmentTx && diffCents != 0L) {
+                        ICostFormField(
+                            value = customNote,
+                            onValueChange = { customNote = it },
+                            label = "备注（选填）",
+                            placeholder = "如：月底对账平账",
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                    }
+                }
+
+                Button(
+                    onClick = {
+                        parsedActualYuan?.let {
+                            onConfirmReconcile(it, recordAdjustmentTx, customNote.trim())
+                            requestDismiss()
+                        }
+                    },
+                    enabled = inputError == null && diffCents != 0L,
+                    colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp)
+                ) {
+                    Text(
+                        text = if (recordAdjustmentTx) "确认并补记账单" else "只修改账面金额",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp
+                    )
+                }
             }
-            Spacer(modifier = Modifier.height(12.dp))
         }
     }
 }

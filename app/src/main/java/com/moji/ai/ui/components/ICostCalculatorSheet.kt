@@ -98,6 +98,7 @@ import com.moji.ai.ui.theme.ICostCardWhite
 import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
+import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
 import com.moji.ai.ui.theme.ICostSlateIcon
 import com.moji.ai.ui.theme.ICostSmoothBottomSheet
@@ -1553,11 +1554,13 @@ fun ICostCalculatorSheet(
             containerColor = ICostCardWhite,
             title = { Text("添加标签", fontWeight = FontWeight.Bold) },
             text = {
-                OutlinedTextField(
+                ICostFormField(
                     value = tagText,
                     onValueChange = { tagText = it },
-                    label = { Text("如：聚餐、出差、固定开支") },
-                    singleLine = true
+                    label = "标签名称",
+                    placeholder = "如：聚餐、出差、固定开支",
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
                 )
             },
             confirmButton = {
@@ -1587,14 +1590,16 @@ private fun MoneyInputDialog(
         containerColor = ICostCardWhite,
         title = { Text(title, fontWeight = FontWeight.Bold) },
         text = {
-            OutlinedTextField(
+            ICostFormField(
                 value = text,
                 onValueChange = { text = sanitizeMoneyInput(it) },
-                label = { Text(label) },
-                supportingText = { Text(if (isError) "请输入正确的金额" else supporting) },
+                label = label,
+                placeholder = "0.00",
+                supportingText = if (isError) "请输入正确的金额" else supporting,
                 isError = isError,
                 singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.fillMaxWidth()
             )
         },
         confirmButton = {

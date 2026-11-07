@@ -99,6 +99,7 @@ import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
+import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
 import com.moji.ai.ui.theme.ICostSearchBg
 import com.moji.ai.ui.theme.ICostSwipeActionRow
@@ -1104,16 +1105,16 @@ fun ICostLedgerHomeScreen(
             containerColor = ICostCardWhite,
             title = { Text("设置月预算", fontWeight = FontWeight.Bold) },
             text = {
-                OutlinedTextField(
+                ICostFormField(
                     value = budgetText,
                     onValueChange = { budgetText = sanitizeMoneyInput(it) },
-                    label = { Text("每月预算（元）") },
-                    supportingText = {
-                        Text(if (isInvalid) "请输入正确的金额" else "留空或填 0 表示不设预算")
-                    },
+                    label = "每月预算（元）",
+                    placeholder = "0.00",
+                    supportingText = if (isInvalid) "请输入正确的金额" else "留空或填 0 表示不设预算",
                     isError = isInvalid,
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
                 )
             },
             confirmButton = {
@@ -1168,10 +1169,11 @@ fun ICostLedgerHomeScreen(
                         }
                     }
                     Spacer(modifier = Modifier.height(4.dp))
-                    OutlinedTextField(
+                    ICostFormField(
                         value = newLedgerName,
                         onValueChange = { newLedgerName = it },
-                        label = { Text("新建账本名称") },
+                        label = "新建账本名称",
+                        placeholder = "如：家庭账本、旅行账本",
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )

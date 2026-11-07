@@ -37,9 +37,16 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -55,6 +62,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -63,6 +71,7 @@ import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -77,9 +86,12 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.TextUnit
@@ -187,7 +199,7 @@ fun ICostSmoothBottomSheet(
     keepWarm: Boolean = false,
     containerColor: Color = ICostBgGray,
     shape: Shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-    showDragHandle: Boolean = true,
+    showDragHandle: Boolean = false,
     /**
      * 用户通过下拉或点击遮罩关闭前的拦截：返回 false 时抽屉弹回原位不关闭
      * （例如记账面板已输入金额时先弹出「放弃本次记账？」确认）
@@ -1225,3 +1237,219 @@ val ICostChartPalette: List<Color> = listOf(
     Color(0xFF06B6D4),
     Color(0xFF6366F1)
 )
+
+/**
+ * 1:1 iCost 统一底部抽屉顶栏：左侧 38dp 白色圆形 `✕` 关闭按钮 + 居中主副标题 + 右侧对称占位或操作区
+ */
+@Composable
+fun ICostSheetHeader(
+    title: String,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+    subtitle: String? = null,
+    trailingContent: (@Composable () -> Unit)? = null
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        ICostCircleIconButton(onClick = onClose, size = 38.dp) {
+            Icon(
+                imageVector = Icons.Default.Close,
+                contentDescription = "关闭",
+                tint = ICostTextPrimary,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = title,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.Bold,
+                color = ICostTextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (!subtitle.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(1.dp))
+                Text(
+                    text = subtitle,
+                    fontSize = 11.sp,
+                    color = ICostTextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
+
+        Box(
+            modifier = Modifier.size(38.dp),
+            contentAlignment = Alignment.CenterEnd
+        ) {
+            if (trailingContent != null) {
+                trailingContent()
+            }
+        }
+    }
+}
+
+/**
+ * 1:1 iCost 底部抽屉内分组白卡容器（置于 ICostBgGray 背景上）
+ */
+@Composable
+fun ICostFormCard(
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = ICostCardWhite,
+        modifier = modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            content()
+        }
+    }
+}
+
+/**
+ * 1:1 iCost 无黑框圆角表单输入框（替代生硬且双列易折行的 Material3 OutlinedTextField）：
+ * 顶部单行清晰小标题 + 柔和灰底圆角输入胶囊（聚焦时蓝色细描边，报错时珊瑚红细描边）+ 底部提示/报错信息
+ */
+@Composable
+fun ICostFormField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+    placeholder: String = "",
+    supportingText: String? = null,
+    isError: Boolean = false,
+    singleLine: Boolean = true,
+    readOnly: Boolean = false,
+    minLines: Int = 1,
+    maxLines: Int = if (singleLine) 1 else 6,
+    containerColor: Color = Color(0xFFF3F4F6),
+    keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+    trailingContent: (@Composable () -> Unit)? = null
+) {
+    var isFocused by remember { mutableStateOf(false) }
+    val borderColor = when {
+        isError -> ICostCoralRed
+        isFocused -> ICostBlueAccent
+        else -> Color.Transparent
+    }
+    val bgColor = when {
+        isError -> Color(0xFFFFF5F3)
+        isFocused -> Color(0xFFEFF5FF)
+        else -> containerColor
+    }
+
+    Column(modifier = modifier) {
+        if (label.isNotBlank()) {
+            Text(
+                text = label,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = if (isError) ICostCoralRed else ICostTextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+        }
+
+        Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = bgColor,
+            modifier = Modifier
+                .fillMaxWidth()
+                .then(
+                    if (borderColor != Color.Transparent) {
+                        Modifier.border(1.2.dp, borderColor, RoundedCornerShape(14.dp))
+                    } else {
+                        Modifier
+                    }
+                )
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = if (minLines > 1) (minLines * 22 + 20).dp else 46.dp)
+                    .padding(horizontal = 14.dp, vertical = if (minLines > 1) 10.dp else 11.dp),
+                verticalAlignment = if (minLines > 1) Alignment.Top else Alignment.CenterVertically
+            ) {
+                Box(modifier = Modifier.weight(1f)) {
+                    if (value.isEmpty() && placeholder.isNotEmpty()) {
+                        Text(
+                            text = placeholder,
+                            fontSize = 14.sp,
+                            color = ICostTextMuted,
+                            maxLines = if (singleLine) 1 else maxLines,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    BasicTextField(
+                        value = value,
+                        onValueChange = onValueChange,
+                        readOnly = readOnly,
+                        singleLine = singleLine,
+                        minLines = minLines,
+                        maxLines = maxLines,
+                        keyboardOptions = keyboardOptions,
+                        visualTransformation = visualTransformation,
+                        cursorBrush = SolidColor(ICostBlueAccent),
+                        textStyle = TextStyle(
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = ICostTextPrimary
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .onFocusChanged { isFocused = it.isFocused }
+                    )
+                }
+                if (trailingContent != null) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    trailingContent()
+                }
+            }
+        }
+
+        if (!supportingText.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = supportingText,
+                fontSize = 11.sp,
+                color = if (isError) ICostCoralRed else ICostTextSecondary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+fun iCostUnifiedSwitchColors() = SwitchDefaults.colors(
+    checkedThumbColor = Color.White,
+    checkedTrackColor = ICostBlueAccent,
+    uncheckedThumbColor = Color.White,
+    uncheckedTrackColor = Color(0xFFE0E0E5),
+    uncheckedBorderColor = Color.Transparent
+)
+
+
