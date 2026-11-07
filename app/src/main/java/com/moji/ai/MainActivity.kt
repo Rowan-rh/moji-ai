@@ -1,6 +1,7 @@
 package com.moji.ai
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -34,6 +35,10 @@ private val MoJiColorScheme = lightColorScheme(
 
 class MainActivity : ComponentActivity() {
 
+    companion object {
+        const val EXTRA_OPEN_TRANSACTION_ID = "extra_open_transaction_id"
+    }
+
     private val viewModel: MainViewModel by viewModels()
 
     private val notificationPermissionLauncher = registerForActivityResult(
@@ -54,6 +59,7 @@ class MainActivity : ComponentActivity() {
             )
         )
         requestPostNotificationPermissionIfNeeded()
+        handleLaunchIntent(intent)
 
         setContent {
             MaterialTheme(colorScheme = MoJiColorScheme) {
@@ -61,6 +67,20 @@ class MainActivity : ComponentActivity() {
                     MoJiMainScreen(viewModel = viewModel)
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleLaunchIntent(intent)
+    }
+
+    private fun handleLaunchIntent(intent: Intent?) {
+        val openTxId = intent?.getLongExtra(EXTRA_OPEN_TRANSACTION_ID, -1L) ?: -1L
+        if (openTxId > 0L) {
+            viewModel.requestOpenTransactionDetail(openTxId)
+            intent?.removeExtra(EXTRA_OPEN_TRANSACTION_ID)
         }
     }
 

@@ -1,10 +1,18 @@
 package com.moji.ai.ui.components
 
+import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import java.io.File
+import kotlin.math.abs
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -155,7 +163,26 @@ fun TransactionDetailSheet(
     val badgeColor = resolveTransactionBadgeColor(tx.type)
 
     val fullTimeStr = remember(tx.timestamp) {
-        SimpleDateFormat("yyyy年MM月dd日 HH:mm", Locale.CHINA).format(Date(tx.timestamp))
+        val cal = Calendar.getInstance().apply { timeInMillis = tx.timestamp }
+        val pattern = if (cal.get(Calendar.SECOND) != 0) "yyyy年MM月dd日 HH:mm:ss" else "yyyy年MM月dd日 HH:mm"
+        SimpleDateFormat(pattern, Locale.CHINA).format(Date(tx.timestamp))
+    }
+    val capturedTimeStr = remember(tx.capturedAtMillis, tx.timestamp, tx.captureSource) {
+        if (tx.captureSource != "MANUAL" && tx.capturedAtMillis > 0L) {
+            SimpleDateFormat("yyyy年MM月dd日 HH:mm:ss", Locale.CHINA).format(Date(tx.capturedAtMillis))
+        } else {
+            null
+        }
+    }
+    val screenshotBitmap = remember(tx.screenshotPath) {
+        if (tx.screenshotPath.isNotBlank()) {
+            runCatching {
+                val f = File(tx.screenshotPath)
+                if (f.exists()) BitmapFactory.decodeFile(f.absolutePath)?.asImageBitmap() else null
+            }.getOrNull()
+        } else {
+            null
+        }
     }
 
     val remainingRefundableCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
@@ -165,6 +192,7 @@ fun TransactionDetailSheet(
     var showSplitDialog by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showSettleDialog by remember { mutableStateOf(false) }
+    var showScreenshotFullscreen by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -251,6 +279,23 @@ fun TransactionDetailSheet(
                     color = amountColor
                 )
 
+                if (tx.type == TransactionType.EXPENSE) {
+                    val origCents = tx.amountCents + tx.discountCents
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (tx.discountCents > 0L) Color(0xFFFFF4EC) else ICostCellGray
+                    ) {
+                        Text(
+                            text = "原价 ${formatMoneyCents(origCents, tx.currency)}  ·  优惠 ${formatMoneyCents(tx.discountCents, tx.currency)}  ·  实扣 ${formatMoneyCents(tx.amountCents, tx.currency)}",
+                            fontSize = 12.sp,
+                            color = if (tx.discountCents > 0L) Color(0xFFD96B27) else ICostTextSecondary,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+
                 if (tx.refundedAmountCents > 0L) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
@@ -263,7 +308,49 @@ fun TransactionDetailSheet(
 
                 Spacer(modifier = Modifier.height(22.dp))
 
-                DetailKeyValueRow("记录时间", fullTimeStr)
+                if (tx.duplicateSuspected) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xFFFFEFEA),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                            Text(
+                                text = "⚠️ 疑似重复（已手动确认录入）",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostCoralRed
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "该笔账单在识别时曾触发重复保护（订单Key或交易时间+金额一致），由您点击「录入」后手动写入账本。",
+                                fontSize = 12.sp,
+                                color = Color(0xFF8C2D19)
+                            )
+                        }
+                    }
+                }
+
+                if (tx.type == TransactionType.EXPENSE) {
+                    val origCents = tx.amountCents + tx.discountCents
+                    DetailKeyValueRow("商品原价", formatMoneyCents(origCents, tx.currency))
+                    DetailKeyValueRow(
+                        "优惠立减",
+                        if (tx.discountCents > 0L) "-${formatMoneyCents(tx.discountCents, tx.currency)}" else formatMoneyCents(0L, tx.currency)
+                    )
+                    DetailKeyValueRow("实扣金额", formatMoneyCents(tx.amountCents, tx.currency))
+                }
+                DetailKeyValueRow("实际购物时间", fullTimeStr)
+                if (capturedTimeStr != null && abs(tx.capturedAtMillis - tx.timestamp) >= 1_000L) {
+                    DetailKeyValueRow("截图/识账时间", capturedTimeStr)
+                }
+                DetailKeyValueRow("商品数量", tx.quantityDesc.ifBlank { "${tx.itemQuantity}件" })
+                val effectiveOrderKey = tx.orderKey.ifBlank { tx.transactionNo }.ifBlank { tx.merchantOrderNo }
+                if (effectiveOrderKey.isNotBlank()) {
+                    DetailKeyValueRow("订单唯一Key", effectiveOrderKey)
+                }
                 DetailKeyValueRow("账本", tx.ledgerName)
                 DetailKeyValueRow(
                     "资金账户",
@@ -275,7 +362,16 @@ fun TransactionDetailSheet(
                         else -> formatWalletDisplayName(sourceWallet)
                     }
                 )
-                if (tx.discountCents > 0L) {
+                if (tx.paymentMethodRaw.isNotBlank()) {
+                    DetailKeyValueRow("账单支付方式", tx.paymentMethodRaw)
+                }
+                if (tx.transactionNo.isNotBlank() && tx.transactionNo != effectiveOrderKey) {
+                    DetailKeyValueRow("交易流水号", tx.transactionNo)
+                }
+                if (tx.merchantOrderNo.isNotBlank() && tx.merchantOrderNo != effectiveOrderKey) {
+                    DetailKeyValueRow("商户单号", tx.merchantOrderNo)
+                }
+                if (tx.type != TransactionType.EXPENSE && tx.discountCents > 0L) {
                     DetailKeyValueRow("优惠金额", formatMoneyCents(tx.discountCents))
                 }
                 if (tx.feeCents > 0L) {
@@ -294,6 +390,68 @@ fun TransactionDetailSheet(
                     DetailKeyValueRow("备注", note)
                 } else if (merchant.isNotEmpty() || note.isNotEmpty()) {
                     DetailKeyValueRow("备注", merchant.ifEmpty { note })
+                }
+                if (tx.captureSource != "MANUAL") {
+                    val sourceLabel = when (tx.captureSource) {
+                        "AI_ACCESSIBILITY" -> "无障碍页面自动识账"
+                        "AI_OCR" -> "端侧截屏 OCR 识账"
+                        "AI_NOTIFICATION" -> "通知栏静默识账"
+                        "AI_FUSED", "AI_MERGED" -> "多通道证据融合识账"
+                        else -> tx.captureSource
+                    }
+                    DetailKeyValueRow("识账来源", sourceLabel)
+                }
+            }
+        }
+
+        if (screenshotBitmap != null) {
+            Spacer(modifier = Modifier.height(14.dp))
+            Surface(
+                shape = RoundedCornerShape(22.dp),
+                color = ICostCardWhite,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .iCostPressScale(pressedScale = 0.98f) { showScreenshotFullscreen = true }
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "识账原图留证",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ICostTextPrimary
+                        )
+                        Text(
+                            text = "点击查看大图",
+                            fontSize = 12.sp,
+                            color = ICostBlueAccent,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = if (tx.transactionNo.isNotBlank()) {
+                            "包含订单流水号 (${tx.transactionNo.takeLast(8)}) 与金额，已绑定防重复录入校验"
+                        } else {
+                            "已绑定图像 SHA-256 指纹 (${tx.screenshotSha256.take(8)})，防止重复录入"
+                        },
+                        fontSize = 11.sp,
+                        color = ICostTextSecondary
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Image(
+                        bitmap = screenshotBitmap,
+                        contentDescription = "账单原图截图",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(210.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                    )
                 }
             }
         }
@@ -374,6 +532,31 @@ fun TransactionDetailSheet(
             },
             onDismiss = { showDeleteConfirm = false }
         )
+    }
+
+    if (showScreenshotFullscreen && screenshotBitmap != null) {
+        Dialog(
+            onDismissRequest = { showScreenshotFullscreen = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xEB000000))
+                    .clickable { showScreenshotFullscreen = false }
+                    .padding(16.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Image(
+                    bitmap = screenshotBitmap,
+                    contentDescription = "账单原图大图",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(16.dp))
+                )
+            }
+        }
     }
 
     if (showSettleDialog) {

@@ -154,25 +154,37 @@ fun ICostAssetsScreen(
     onAddRecurringRule: (title: String, amountYuan: Double, currency: String, category: String, walletId: Long, frequency: RecurrenceFrequency) -> Unit = { _, _, _, _, _, _ -> }
 ) {
     val assetPagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
-    val totalAssetsCnyCents = wallets.filter { !it.type.isLiability && it.includeInNetWorth }.sumOf { w ->
-        (w.balanceCents * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
+    val totalAssetsCnyCents = remember(wallets) {
+        wallets.filter { !it.type.isLiability && it.includeInNetWorth }.sumOf { w ->
+            (w.balanceCents * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
+        }
     }
-    val totalLiabilityCnyCents = wallets.filter { it.type.isLiability && it.includeInNetWorth }.sumOf { w ->
-        (w.balanceCents * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
+    val totalLiabilityCnyCents = remember(wallets) {
+        wallets.filter { it.type.isLiability && it.includeInNetWorth }.sumOf { w ->
+            (w.balanceCents * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
+        }
     }
     val netWorthCnyCents = totalAssetsCnyCents - totalLiabilityCnyCents
 
-    val totalLoanInCents = transactions.filter { it.type == TransactionType.LOAN_IN }.sumOf { it.amountCnyCents }
-    val totalLoanOutCents = transactions.filter { it.type == TransactionType.LOAN_OUT }.sumOf { it.amountCnyCents }
-
-    val creditWallets = wallets.filter { it.type.isLiability }
-    val assetWallets = wallets.filter { !it.type.isLiability }
-    // 分组标题按组内全部账户汇总（含不计入净资产的账户），与列表内容一致
-    val creditGroupDebtCnyCents = creditWallets.sumOf { w ->
-        (w.balanceCents.coerceAtLeast(0L) * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
+    val totalLoanInCents = remember(transactions) {
+        transactions.filter { it.type == TransactionType.LOAN_IN }.sumOf { it.amountCnyCents }
     }
-    val assetGroupBalanceCnyCents = assetWallets.sumOf { w ->
-        (w.balanceCents * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
+    val totalLoanOutCents = remember(transactions) {
+        transactions.filter { it.type == TransactionType.LOAN_OUT }.sumOf { it.amountCnyCents }
+    }
+
+    val creditWallets = remember(wallets) { wallets.filter { it.type.isLiability } }
+    val assetWallets = remember(wallets) { wallets.filter { !it.type.isLiability } }
+    // 分组标题按组内全部账户汇总（含不计入净资产的账户），与列表内容一致
+    val creditGroupDebtCnyCents = remember(creditWallets) {
+        creditWallets.sumOf { w ->
+            (w.balanceCents.coerceAtLeast(0L) * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
+        }
+    }
+    val assetGroupBalanceCnyCents = remember(assetWallets) {
+        assetWallets.sumOf { w ->
+            (w.balanceCents * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
+        }
     }
 
     var creditExpanded by rememberSaveable { mutableStateOf(true) }

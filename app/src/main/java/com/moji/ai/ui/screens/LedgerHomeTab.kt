@@ -171,33 +171,45 @@ fun ICostLedgerHomeScreen(
         }
     }
     val trimmedQuery = searchQuery.trim()
-    // 列表展示用：再叠加搜索词
+    // 列表展示用：再叠加搜索词（支持搜分类、商户、备注、标签、交易单号、商户单号、支付方式）
     val monthTransactions = remember(allMonthTransactions, trimmedQuery) {
         if (trimmedQuery.isEmpty()) allMonthTransactions else allMonthTransactions.filter { tx ->
             tx.category.contains(trimmedQuery, ignoreCase = true) ||
                 tx.merchant.contains(trimmedQuery, ignoreCase = true) ||
                 tx.note.contains(trimmedQuery, ignoreCase = true) ||
-                tx.tags.contains(trimmedQuery, ignoreCase = true)
+                tx.tags.contains(trimmedQuery, ignoreCase = true) ||
+                tx.transactionNo.contains(trimmedQuery, ignoreCase = true) ||
+                tx.merchantOrderNo.contains(trimmedQuery, ignoreCase = true) ||
+                tx.paymentMethodRaw.contains(trimmedQuery, ignoreCase = true)
         }
     }
 
-    val monthExpenseCents = allMonthTransactions
-        .filter { it.type == TransactionType.EXPENSE }
-        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+    val monthExpenseCents = remember(allMonthTransactions) {
+        allMonthTransactions
+            .filter { it.type == TransactionType.EXPENSE }
+            .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+    }
 
-    val monthIncomeCents = allMonthTransactions
-        .filter { it.type == TransactionType.INCOME }
-        .sumOf { it.amountCnyCents }
+    val monthIncomeCents = remember(allMonthTransactions) {
+        allMonthTransactions
+            .filter { it.type == TransactionType.INCOME }
+            .sumOf { it.amountCnyCents }
+    }
 
     val monthBalanceCents = monthIncomeCents - monthExpenseCents
 
     // 报销统计
-    val pendingReimburseList = allMonthTransactions.filter { it.reimbursable && !it.reimbursed }
-    val pendingReimburseCents = pendingReimburseList
-        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
-    val settledReimburseCents = allMonthTransactions
-        .filter { it.reimbursable && it.reimbursed }
-        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+    val pendingReimburseList = remember(allMonthTransactions) {
+        allMonthTransactions.filter { it.reimbursable && !it.reimbursed }
+    }
+    val pendingReimburseCents = remember(pendingReimburseList) {
+        pendingReimburseList.sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+    }
+    val settledReimburseCents = remember(allMonthTransactions) {
+        allMonthTransactions
+            .filter { it.reimbursable && it.reimbursed }
+            .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+    }
 
     // 分组 key 带年份，避免跨年同月同日的折叠状态串用；标题单独展示
     val groupedByDay = remember(monthTransactions) {
@@ -1248,7 +1260,12 @@ private fun ICostLedgerRow(
         if (tx.merchant.isNotBlank()) {
             append(" · ")
             append(tx.merchant)
-        } else if (tx.note.isNotBlank()) {
+        }
+        val extraGoods = tx.note.substringAfter("| ", "").trim()
+        if (extraGoods.isNotBlank() && extraGoods != tx.merchant) {
+            append(" · ")
+            append(extraGoods)
+        } else if (tx.merchant.isBlank() && tx.note.isNotBlank()) {
             append(" · ")
             append(tx.note)
         }
@@ -1257,6 +1274,7 @@ private fun ICostLedgerRow(
     val isRefundedExpense = tx.type == TransactionType.EXPENSE && tx.refundedAmountCents > 0L
     val isFullRefund = isRefundedExpense && tx.refundedAmountCents >= tx.amountCnyCents
     val netExpenseCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
+    val hasDiscountBreakdown = tx.type == TransactionType.EXPENSE && tx.discountCents > 0L
 
     Row(
         modifier = Modifier
@@ -1300,9 +1318,40 @@ private fun ICostLedgerRow(
                 overflow = TextOverflow.Ellipsis
             )
 
-            if (isRefundedExpense || tx.reimbursable) {
+            if (hasDiscountBreakdown || tx.duplicateSuspected || isRefundedExpense || tx.reimbursable || tx.screenshotPath.isNotBlank()) {
                 Spacer(modifier = Modifier.height(5.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (hasDiscountBreakdown) {
+                        val origCents = tx.amountCents + tx.discountCents
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFFFFF4EC)
+                        ) {
+                            Text(
+                                text = "原价${formatMoneyCents(origCents)} · 优惠${formatMoneyCents(tx.discountCents)} · 实扣${formatMoneyCents(tx.amountCents)}",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Color(0xFFD96B27),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    if (tx.duplicateSuspected) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFFFFEFEA)
+                        ) {
+                            Text(
+                                text = "⚠️ 疑似重复扣费",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostCoralRed,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
                     if (isRefundedExpense) {
                         Surface(
                             shape = RoundedCornerShape(6.dp),
@@ -1325,6 +1374,19 @@ private fun ICostLedgerRow(
                                 text = if (tx.reimbursed) "已报销" else "待报销",
                                 fontSize = 10.sp,
                                 color = if (tx.reimbursed) ICostGreenIncome else ICostBlueAccent,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    if (tx.screenshotPath.isNotBlank()) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFFF3F6FA)
+                        ) {
+                            Text(
+                                text = "原图留证",
+                                fontSize = 10.sp,
+                                color = Color(0xFF5A6B82),
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }

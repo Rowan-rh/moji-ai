@@ -25,6 +25,7 @@ import kotlin.math.roundToLong
 @Serializable
 data class BackupWalletDto(
     val id: Long = 0L,
+    val syncUuid: String = "",
     val name: String = "未命名账户",
     val type: String = "DIGITAL_WALLET",
     val subTypeLabel: String = "",
@@ -37,12 +38,14 @@ data class BackupWalletDto(
     val billingDay: Int? = null,
     val repaymentDay: Int? = null,
     val includeInNetWorth: Boolean = true,
-    val colorHex: Long = 0xFFE65540
+    val colorHex: Long = 0xFFE65540,
+    val updatedAtMillis: Long = 0L
 )
 
 @Serializable
 data class BackupTransactionDto(
     val id: Long = 0L,
+    val syncUuid: String = "",
     val ledgerName: String = "默认账本",
     val type: String = "EXPENSE",
     val amountCents: Long = 0L,
@@ -51,6 +54,8 @@ data class BackupTransactionDto(
     val amountCnyCents: Long = 0L,
     val discountCents: Long = 0L,
     val feeCents: Long = 0L,
+    val itemQuantity: Int = 1,
+    val quantityDesc: String = "1件",
     val category: String = "餐饮",
     val merchant: String = "",
     val note: String = "",
@@ -62,9 +67,20 @@ data class BackupTransactionDto(
     val reimbursed: Boolean = false,
     val tags: String = "",
     val timestamp: Long = System.currentTimeMillis(),
+    val capturedAtMillis: Long = 0L,
+    val orderKey: String = "",
+    val transactionNo: String = "",
+    val merchantOrderNo: String = "",
+    val paymentMethodRaw: String = "",
+    val screenshotPath: String = "",
+    val screenshotSha256: String = "",
+    val dedupFingerprint: String = "",
+    val duplicateSuspected: Boolean = false,
     val captureSource: String = "MANUAL",
     val rawCapturedText: String = "",
-    val aiConfidence: Float = 1.0f
+    val aiConfidence: Float = 1.0f,
+    val updatedAtMillis: Long = 0L,
+    val syncRevision: Long = 1L
 )
 
 @Serializable
@@ -131,6 +147,7 @@ object BackupAndCsvTransferEngine {
             wallets = wallets.map { w ->
                 BackupWalletDto(
                     id = w.id,
+                    syncUuid = w.syncUuid,
                     name = w.name,
                     type = w.type.name,
                     subTypeLabel = w.subTypeLabel,
@@ -143,12 +160,14 @@ object BackupAndCsvTransferEngine {
                     billingDay = w.billingDay,
                     repaymentDay = w.repaymentDay,
                     includeInNetWorth = w.includeInNetWorth,
-                    colorHex = w.colorHex
+                    colorHex = w.colorHex,
+                    updatedAtMillis = w.updatedAtMillis
                 )
             },
             transactions = transactions.map { tx ->
                 BackupTransactionDto(
                     id = tx.id,
+                    syncUuid = tx.syncUuid,
                     ledgerName = tx.ledgerName,
                     type = tx.type.name,
                     amountCents = tx.amountCents,
@@ -157,6 +176,8 @@ object BackupAndCsvTransferEngine {
                     amountCnyCents = tx.amountCnyCents,
                     discountCents = tx.discountCents,
                     feeCents = tx.feeCents,
+                    itemQuantity = tx.itemQuantity,
+                    quantityDesc = tx.quantityDesc,
                     category = tx.category,
                     merchant = tx.merchant,
                     note = tx.note,
@@ -168,9 +189,20 @@ object BackupAndCsvTransferEngine {
                     reimbursed = tx.reimbursed,
                     tags = tx.tags,
                     timestamp = tx.timestamp,
+                    capturedAtMillis = tx.capturedAtMillis,
+                    orderKey = tx.orderKey,
+                    transactionNo = tx.transactionNo,
+                    merchantOrderNo = tx.merchantOrderNo,
+                    paymentMethodRaw = tx.paymentMethodRaw,
+                    screenshotPath = tx.screenshotPath,
+                    screenshotSha256 = tx.screenshotSha256,
+                    dedupFingerprint = tx.dedupFingerprint,
+                    duplicateSuspected = tx.duplicateSuspected,
                     captureSource = tx.captureSource,
                     rawCapturedText = tx.rawCapturedText,
-                    aiConfidence = tx.aiConfidence
+                    aiConfidence = tx.aiConfidence,
+                    updatedAtMillis = tx.updatedAtMillis,
+                    syncRevision = tx.syncRevision
                 )
             },
             recurringRules = recurringRules.map { r ->
@@ -200,6 +232,7 @@ object BackupAndCsvTransferEngine {
         val wallets = snapshot.wallets.map { dto ->
             WalletEntity(
                 id = dto.id,
+                syncUuid = dto.syncUuid.ifBlank { java.util.UUID.randomUUID().toString() },
                 name = dto.name,
                 type = runCatching { WalletType.valueOf(dto.type) }.getOrDefault(WalletType.DIGITAL_WALLET),
                 subTypeLabel = dto.subTypeLabel,
@@ -212,12 +245,14 @@ object BackupAndCsvTransferEngine {
                 billingDay = dto.billingDay,
                 repaymentDay = dto.repaymentDay,
                 includeInNetWorth = dto.includeInNetWorth,
-                colorHex = dto.colorHex
+                colorHex = dto.colorHex,
+                updatedAtMillis = if (dto.updatedAtMillis > 0L) dto.updatedAtMillis else System.currentTimeMillis()
             )
         }
         val transactions = snapshot.transactions.map { dto ->
             TransactionEntity(
                 id = dto.id,
+                syncUuid = dto.syncUuid.ifBlank { java.util.UUID.randomUUID().toString() },
                 ledgerName = dto.ledgerName,
                 type = runCatching { TransactionType.valueOf(dto.type) }.getOrDefault(TransactionType.EXPENSE),
                 amountCents = dto.amountCents,
@@ -226,6 +261,8 @@ object BackupAndCsvTransferEngine {
                 amountCnyCents = if (dto.amountCnyCents > 0L) dto.amountCnyCents else dto.amountCents,
                 discountCents = dto.discountCents,
                 feeCents = dto.feeCents,
+                itemQuantity = dto.itemQuantity.coerceAtLeast(1),
+                quantityDesc = dto.quantityDesc.ifBlank { "${dto.itemQuantity.coerceAtLeast(1)}件" },
                 category = dto.category,
                 merchant = dto.merchant,
                 note = dto.note,
@@ -237,9 +274,20 @@ object BackupAndCsvTransferEngine {
                 reimbursed = dto.reimbursed,
                 tags = dto.tags,
                 timestamp = dto.timestamp,
+                capturedAtMillis = if (dto.capturedAtMillis > 0L) dto.capturedAtMillis else dto.timestamp,
+                orderKey = dto.orderKey.ifBlank { dto.transactionNo.ifBlank { dto.merchantOrderNo } },
+                transactionNo = dto.transactionNo,
+                merchantOrderNo = dto.merchantOrderNo,
+                paymentMethodRaw = dto.paymentMethodRaw,
+                screenshotPath = dto.screenshotPath,
+                screenshotSha256 = dto.screenshotSha256,
+                dedupFingerprint = dto.dedupFingerprint,
+                duplicateSuspected = dto.duplicateSuspected,
                 captureSource = dto.captureSource,
                 rawCapturedText = dto.rawCapturedText,
-                aiConfidence = dto.aiConfidence
+                aiConfidence = dto.aiConfidence,
+                updatedAtMillis = if (dto.updatedAtMillis > 0L) dto.updatedAtMillis else dto.timestamp,
+                syncRevision = dto.syncRevision
             )
         }
         return Triple(wallets, transactions, snapshot)

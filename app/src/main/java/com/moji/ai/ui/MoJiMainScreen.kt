@@ -10,11 +10,16 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -39,6 +44,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -79,6 +85,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -176,6 +183,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val smartRules by viewModel.smartRules.collectAsState()
     val observabilityLogs by viewModel.observabilityLogs.collectAsState()
     val webDavConfig by viewModel.webDavConfig.collectAsState()
+    val pendingOpenTxId by viewModel.pendingOpenTransactionId.collectAsState()
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) } // 0: 账本, 1: 资产, 2: 统计
     // 每个 Tab 独立保存 rememberSaveable 状态（搜索词、折叠状态、统计周期等），切换 Tab 回来不丢失
@@ -238,30 +246,84 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         cachedInspectingTx = activeTx
     }
 
+    // 响应点击顶部流体云胶囊或通知栏：直接定位并打开当前记录的账单详情页
+    LaunchedEffect(pendingOpenTxId, transactions) {
+        val targetId = pendingOpenTxId ?: return@LaunchedEffect
+        val matchedTx = transactions.firstOrNull { it.id == targetId }
+            ?: viewModel.getTransactionByIdDirect(targetId)
+        if (matchedTx != null) {
+            selectedTab = 0
+            showSettingsPage = false
+            showSmartBookkeepingPage = false
+            calendarMonthTxs = null
+            showCalculatorSheet = false
+            editingTx = null
+            if (matchedTx.ledgerName.isNotBlank() && matchedTx.ledgerName != currentLedger) {
+                viewModel.selectLedger(matchedTx.ledgerName)
+            }
+            val txCal = Calendar.getInstance().apply { timeInMillis = matchedTx.timestamp }
+            selectedYear = txCal.get(Calendar.YEAR)
+            selectedMonth = txCal.get(Calendar.MONTH) + 1
+            inspectingTx = matchedTx
+            viewModel.consumePendingOpenTransactionDetail()
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(ICostBgGray)
             .statusBarsPadding()
     ) {
-        AnimatedContent(
-            targetState = selectedTab,
-            transitionSpec = {
-                val direction = if (targetState >= initialState) 1 else -1
-                (slideInHorizontally(
-                    initialOffsetX = { fullWidth -> direction * (fullWidth / 7) },
-                    animationSpec = tween(durationMillis = 260, easing = FastOutSlowInEasing)
-                ) + fadeIn(animationSpec = tween(durationMillis = 220))) togetherWith
-                    (slideOutHorizontally(
-                        targetOffsetX = { fullWidth -> -direction * (fullWidth / 7) },
-                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
-                    ) + fadeOut(animationSpec = tween(durationMillis = 160)))
-            },
-            label = "MainTabTransition"
-        ) { tabIndex ->
-            tabStateHolder.SaveableStateProvider(tabIndex) {
-            when (tabIndex) {
-                0 -> ICostLedgerHomeScreen(
+        // 120Hz 零重组常驻三栏容器：不在切换时销毁/重建 Compose 节点树，彻底消除“账本 / 资产 / 统计”切换卡顿
+        val tabTransitionPos = remember { Animatable(selectedTab.toFloat()) }
+        LaunchedEffect(selectedTab) {
+            tabTransitionPos.animateTo(
+                targetValue = selectedTab.toFloat(),
+                animationSpec = spring(
+                    dampingRatio = 0.88f,
+                    stiffness = 620f
+                )
+            )
+        }
+
+        @Composable
+        fun KeepAliveMainTabLayer(
+            tabIndex: Int,
+            content: @Composable () -> Unit
+        ) {
+            val isVisibleOrAnimating by remember(tabIndex) {
+                derivedStateOf {
+                    abs(tabTransitionPos.value - tabIndex.toFloat()) < 0.995f
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .offset {
+                        val delta = tabIndex.toFloat() - tabTransitionPos.value
+                        if (abs(delta) >= 0.995f) {
+                            IntOffset(100_000, 0)
+                        } else {
+                            val slidePx = (delta * 26.dp.toPx()).roundToInt()
+                            IntOffset(slidePx, 0)
+                        }
+                    }
+                    .graphicsLayer {
+                        val dist = abs(tabTransitionPos.value - tabIndex.toFloat())
+                        alpha = (1f - dist * 1.15f).coerceIn(0f, 1f)
+                    }
+            ) {
+                if (isVisibleOrAnimating || true) {
+                    tabStateHolder.SaveableStateProvider(tabIndex) {
+                        content()
+                    }
+                }
+            }
+        }
+
+        KeepAliveMainTabLayer(tabIndex = 0) {
+            ICostLedgerHomeScreen(
                     currentLedger = currentLedger,
                     ledgers = ledgers,
                     onSelectLedger = { viewModel.selectLedger(it) },
@@ -297,9 +359,11 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                         }
                     },
                     onDeleteTransaction = { txId -> viewModel.deleteTransaction(txId) }
-                )
+            )
+        }
 
-                1 -> ICostAssetsScreen(
+        KeepAliveMainTabLayer(tabIndex = 1) {
+            ICostAssetsScreen(
                     wallets = wallets,
                     transactions = transactions,
                     recurringRules = recurringRules,
@@ -337,9 +401,11 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onAddRecurringRule = { title, amountYuan, currency, category, walletId, frequency ->
                         viewModel.addRecurringRule(title, amountYuan, currency, category, walletId, frequency)
                     }
-                )
+            )
+        }
 
-                else -> ICostStatisticsScreen(
+        KeepAliveMainTabLayer(tabIndex = 2) {
+            ICostStatisticsScreen(
                     transactions = transactions,
                     wallets = wallets,
                     initialYear = selectedYear,
@@ -347,9 +413,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     currentLedger = currentLedger,
                     hideAmounts = hideAssetAmounts,
                     onOpenSettingsPage = { showSettingsPage = true }
-                )
-            }
-            }
+            )
         }
 
         // 非首页 Tab 按返回键先回到「账本」，而不是直接退出应用（二级页面与弹窗各自的返回处理优先级更高）
@@ -741,6 +805,11 @@ private fun ICostFloatingBottomBar(
         horizontalArrangement = Arrangement.spacedBy(14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        val pillIndicatorPos by animateFloatAsState(
+            targetValue = selectedTab.toFloat(),
+            animationSpec = spring(dampingRatio = 0.86f, stiffness = 640f),
+            label = "BottomBarPillPos"
+        )
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -763,29 +832,33 @@ private fun ICostFloatingBottomBar(
             Row(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 5.dp, vertical = 4.dp),
+                    .padding(horizontal = 5.dp, vertical = 4.dp)
+                    .drawBehind {
+                        val slotWidth = size.width / 3f
+                        val pillX = slotWidth * pillIndicatorPos.coerceIn(0f, 2f)
+                        val r = 25.dp.toPx()
+                        drawRoundRect(
+                            color = Color(0xFFE9E9EC),
+                            topLeft = androidx.compose.ui.geometry.Offset(pillX, 0f),
+                            size = androidx.compose.ui.geometry.Size(slotWidth, size.height),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r)
+                        )
+                    },
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val tabs = listOf(
-                    Triple(0, "账本", "tab_record.webp"),
-                    Triple(1, "资产", "tab_asset.webp"),
-                    Triple(2, "统计", "tab_statistics.webp")
-                )
+                val tabs = remember {
+                    listOf(
+                        Triple(0, "账本", "tab_record.webp"),
+                        Triple(1, "资产", "tab_asset.webp"),
+                        Triple(2, "统计", "tab_statistics.webp")
+                    )
+                }
                 tabs.forEach { (index, label, assetFile) ->
                     val isSelected = selectedTab == index
-                    val pillColor by animateColorAsState(
-                        targetValue = if (isSelected) Color(0xFFE9E9EC) else Color.Transparent,
-                        animationSpec = tween(durationMillis = 220),
-                        label = "BottomTabPillColor"
-                    )
-                    val contentColor by animateColorAsState(
-                        targetValue = if (isSelected) ICostBlueAccent else ICostTextPrimary,
-                        animationSpec = tween(durationMillis = 220),
-                        label = "BottomTabContentColor"
-                    )
+                    val contentColor = if (isSelected) ICostBlueAccent else ICostTextPrimary
                     val iconScale by animateFloatAsState(
                         targetValue = if (isSelected) 1.08f else 1.0f,
-                        animationSpec = spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMedium),
+                        animationSpec = spring(dampingRatio = 0.65f, stiffness = Spring.StiffnessMedium),
                         label = "BottomTabIconScale"
                     )
                     Box(
@@ -793,8 +866,9 @@ private fun ICostFloatingBottomBar(
                             .weight(1f)
                             .fillMaxHeight()
                             .clip(RoundedCornerShape(25.dp))
-                            .background(pillColor)
-                            .iCostPressScale(pressedScale = 0.92f) { onSelectTab(index) },
+                            .iCostPressScale(pressedScale = 0.92f) {
+                                if (selectedTab != index) onSelectTab(index)
+                            },
                         contentAlignment = Alignment.Center
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1427,6 +1501,7 @@ private fun ICostSmartBookkeepingFullScreen(
                             visibleLogs.forEachIndexed { idx, log ->
                                 val badgeColor = when (log.outcome) {
                                     CaptureEventOutcome.RECORDED -> ICostGreenIncome
+                                    CaptureEventOutcome.DUPLICATE_SUSPECTED -> ICostCoralRed
                                     CaptureEventOutcome.FUSED_PATCH -> ICostBlueAccent
                                     CaptureEventOutcome.DEDUP_BLOCKED -> ICostAmberGold
                                     CaptureEventOutcome.NOISE_IGNORED -> ICostTextSecondary

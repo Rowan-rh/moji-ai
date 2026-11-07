@@ -19,10 +19,21 @@
 ### 1. 自动触发与无感交互（纯后台静默模式）
 - **三模无感采集（免 Root）**：
   - **通知栏监听 (`NotificationListenerService`)**：实时捕获微信支付、支付宝、云闪付、银行 App 动账通知及 955xx 银行扣款短信。
-  - **微信/支付宝无障碍兼容识别 (`SelectToSpeakService` + `PaymentAccessibilityService`)**：通过 `com.google.android.accessibility.selecttospeak.SelectToSpeakService` 兼容入口与 `FLAG_REQUEST_ENHANCED_WEB_ACCESSIBILITY` 突破微信支付与账单详情容器节点限制；仅遍历匹配当前目标应用包名的活跃窗口（深度 50、节点上限 500），配合 `150/450/1000/1800ms` 四阶延迟探测与单笔详情锚点校验，精准提取微信/支付宝「支付成功 / 账单详情 / 交易详情」页面结构化字段（支持 `-7.51`、`支出12.9元` 等裸金额及 `商品 / 支付方式 / 商户全称 / 交易单号` 键值对齐），并自动过滤账单列表页与微信支付服务号历史卡片流。
+  - **微信/支付宝及拼多多/抖音/京东等电商无障碍兼容识别 (`SelectToSpeakService` + `PaymentAccessibilityService`)**：通过 `com.google.android.accessibility.selecttospeak.SelectToSpeakService` 兼容入口与 `FLAG_REQUEST_ENHANCED_WEB_ACCESSIBILITY` 突破微信支付与账单详情容器节点限制；仅遍历匹配当前目标应用包名的活跃窗口（深度 50、节点上限 500），配合 `150/450/1000/1800ms` 四阶延迟探测与单笔详情锚点校验，全面支持 **微信支付、支付宝、云闪付、拼多多 (`com.xunmeng.pinduoduo`)、抖音/抖音极速版 (`com.ss.android.ugc.aweme` / `.lite`)、京东 (`com.jingdong.app.mall`)、淘宝 (`com.taobao.taobao`)、天猫 (`com.tmall.wireless`)、美团/美团外卖 (`com.sankuai.meituan`)、饿了么 (`me.ele`)、唯品会 (`com.achievo.vipshop`)、小红书 (`com.xingin.xhs`)** 的「支付成功 / 拼单成功 / 账单详情 / 订单详情」页面结构化提取，并自动过滤账单列表页、订单列表页、购物车结算页与微信支付服务号历史卡片流。
+  - **iCost 模板「原价 · 优惠了多少 · 实扣多少」解析与全链路展示 (`AiAccountingEngine.extractPriceBreakdown`)**：自动缝合电商详情页跨节点拆分的整数与小数金额（如 `¥ | 29 | .90`），优先提取 `实付款 / 实付金额 / 实扣 / 应付总额` 作为入账实扣金额 (`amountCents`)，同时提取 `商品总价 / 原价` 与 `已优惠 / 共减 / 百亿补贴 / 店铺优惠 / 平台优惠 / 多多支付立减 / 抖音支付优惠 / 京豆 / 红包` 作为优惠金额 (`discountCents`)，按 **`原价¥X.XX · 优惠¥Y.YY · 实扣¥Z.ZZ | 商品名称 · 支付方式`** 模板格式生成备注，并在流体云胶囊、首页账单列表标签与账单详情页同步展示。
   - **Android 11+ 免 Root 截屏端侧 OCR 兜底与快捷设置磁贴 (`OcrTileService`)**：当目标支付/账单窗口节点缺失金额或用户下拉控制中心点击「默记识屏记账」磁贴时，调用 `AccessibilityService.takeScreenshot` 与内置离线中文 OCR（按 Y 轴行聚类与 X 轴排序还原左右分栏键值）完成识账。
-- **交易单号级幂等去重、滑动时间窗聚合与 30s 跨通道事后证据融合**：
-  - 自动提取微信/支付宝「交易单号 / 订单号 / 支付时间」进行单据级幂等拦截，杜绝多阶延迟探测重复入账；同时支持 `30s` **跨通道证据融合 (`AI_FUSED`)**，并在入账成功时通过免悬浮窗权限的 `TYPE_ACCESSIBILITY_OVERLAY` 弹出顶部胶囊横幅（`RecognitionBanner`）给予即时视觉反馈。
+- **核心四要素留存、双规则重复判定（默认不录入 + 弹窗点“录入”才入账）与一加流体云实况胶囊**：
+  - **核心计费四要素持久化 (`TransactionEntity` Room v5)**：留存 **订单唯一 Key (`orderKey`，优先取平台交易单号/订单号，其次取商户单号)**、**实际购物发生时间 (`timestamp`，从账单支付时间/创建时间解析，严格区别于截图时间 `capturedAtMillis`)**、**交易金额 (`amountCents`)** 与 **购物商品数量 (`itemQuantity` / `quantityDesc`)**。
+  - **双规则同笔/重复判定、详情增量补全与默认不录入机制 (`CapturePipelineCoordinator`)**：
+    1. **规则 1**：如果订单的唯一 Key（订单号 / 交易单号 / 商户单号 `orderKey`）一致，100% 认定为同一笔账单；
+    2. **规则 2**：如果没有订单 Key（新账单或已有账单任一方无 `orderKey`，例如支付宝未点开“更多”或来自通知栏），只要 **「实际交易发生时间 + 金额」一致**，100% 认定为同一笔账单。
+    - **点开详情补充细节 vs. 重复拦截的智能分流**：
+      - 当命中上述同笔规则且新采集的详情页包含原记录缺失的字段（如 `订单号`、`商户单号`、`支付方式`及对应扣款账户、`具体商户名`、`商品说明备注`、`商品数量`、`立减优惠金额`）时，自动将新细节增量合并至原账单（并同步校准扣款账户余额），顶部流体云弹出 **「已补全账单详情」**；
+      - 当原账单各项细节早已齐全、无任何新字段可补充时，判定为纯粹的重复扫描：**默认绝不写入数据库**，在顶部流体云胶囊与通知中心提示 **「检测到疑似重复 · 未录入」**，仅当用户主动点击 **「录入」** 按钮时才强制入账。
+  - **识账截图本地保存 (`BillScreenshotStorage`)**：无障碍详情页与端侧 OCR 识别到的账单截图自动以 WebP 格式保存在应用沙盒 `files/bill_screenshots/`，支持在账单详情页预览放大原图。
+  - **支付账号智能匹配 (`matchWalletForPayment`)**：银行卡（储蓄卡/信用卡）优先根据后 4 位数字尾号（如 `3354`、`8848`）及卡种匹配；花呗、白条、零钱、账户余额/余额宝等根据汉字名称与别名匹配，自动扣减对应账户余额或增加信用账户待还欠款。
+  - **一加流体云 (Fluid Cloud) 120Hz 挖孔延伸与缩回胶囊 (`RecognitionBanner` + `SilentBookkeepingNotifier`)**：通过 `LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS` 直接从前置摄像头挖孔 (`centerX, 19.5dp`) 向下拉出流体水滴连接带并撑开为曜石黑胶囊，配备抗锯齿 Canvas 自绘发光状态环、凝缩金额排印、正常入账一键「撤销」与疑似重复一键「录入」大热区按钮；当用户离开账单页、点击操作、上滑或超时后自动回吸缩进前置摄像头孔内，配合看门狗清理机制彻底杜绝悬浮窗卡死残留。
+  - **面向未来云同步的 Room v5 底层数据结构**：在 `wallets`、`transactions`、`recurring_rules` 与 `capture_evidences` 表中内置 `syncUuid`（全局 UUIDv4）、`updatedAtMillis`、`deletedAtMillis`（软删除墓碑）、`syncRevision` 与 `syncDirty` 增量同步标记。
 - **纯后台静默入账 + 系统通知栏三键快捷操作**：
   - 付款后无需人工点击确认弹窗，后台直接完成解析与入账，并推送一条系统通知提醒。
   - 通知栏自带 **「撤销入账」「切换分类（同步写入商户记忆库）」「标为待报销」** 三个快捷按钮，无需打开 App 即可在通知栏一键完成回滚、改分类或打报销标记。

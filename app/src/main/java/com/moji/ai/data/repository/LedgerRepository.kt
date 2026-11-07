@@ -24,6 +24,34 @@ class LedgerRepository(private val db: AppDatabase) {
     suspend fun getRecentRefundableExpenses(limit: Int = 15): List<TransactionEntity> =
         db.transactionDao().getRecentRefundableExpenses(limit)
 
+    suspend fun getTransactionById(id: Long): TransactionEntity? =
+        if (id <= 0L) null else db.transactionDao().getTransactionById(id)
+
+    suspend fun findTransactionByOrderKey(orderKey: String): TransactionEntity? =
+        if (orderKey.isBlank()) null else db.transactionDao().findByOrderKey(orderKey)
+
+    suspend fun findTransactionByNo(txNo: String): TransactionEntity? =
+        if (txNo.isBlank()) null else db.transactionDao().findByTransactionNo(txNo)
+
+    suspend fun findTransactionByMerchantOrderNo(orderNo: String): TransactionEntity? =
+        if (orderNo.isBlank()) null else db.transactionDao().findByMerchantOrderNo(orderNo)
+
+    suspend fun findTransactionByScreenshotSha256(sha256: String): TransactionEntity? =
+        if (sha256.isBlank()) null else db.transactionDao().findByScreenshotSha256(sha256)
+
+    suspend fun findTransactionsByAmountAndOccurredWindow(
+        amountCents: Long,
+        occurredAtMillis: Long,
+        toleranceMillis: Long = 60_000L
+    ): List<TransactionEntity> =
+        db.transactionDao().findByAmountAndOccurredWindow(amountCents, occurredAtMillis, toleranceMillis)
+
+    suspend fun insertCaptureEvidence(evidence: com.moji.ai.data.local.CaptureEvidenceEntity): Long =
+        db.captureEvidenceDao().insertEvidence(evidence)
+
+    suspend fun getEvidencesForTransaction(txId: Long): List<com.moji.ai.data.local.CaptureEvidenceEntity> =
+        db.captureEvidenceDao().getEvidencesForTransaction(txId)
+
     /**
      * 账户真实余额锚点登记 + 差额自动生成平账流水（对标 blue-whale-keeper 与 moneywallet）：
      * - 当 recordAdjustmentTx = true 时，自动计算「真实余额 - 账面余额」的差额，生成一笔「平账」支出/收入/冲销流水并原子化校准余额；
@@ -330,12 +358,51 @@ class LedgerRepository(private val db: AppDatabase) {
         true
     }
 
-    suspend fun undoAndDeleteTransaction(transactionId: Long): Boolean = db.withTransaction {
-        val txDao = db.transactionDao()
-        val tx = txDao.getTransactionById(transactionId) ?: return@withTransaction false
-        revertWalletImpact(tx)
-        txDao.deleteTransaction(tx)
-        true
+    suspend fun undoAndDeleteTransaction(transactionId: Long): Boolean {
+        var screenshotToDelete: String? = null
+        val deleted = db.withTransaction {
+            val txDao = db.transactionDao()
+            val tx = txDao.getTransactionById(transactionId) ?: return@withTransaction false
+            revertWalletImpact(tx)
+            txDao.deleteTransaction(tx)
+            if (tx.screenshotPath.isNotBlank()) {
+                val stillReferenced = txDao.getAllTransactions().any {
+                    it.id != tx.id && it.screenshotPath == tx.screenshotPath
+                }
+                if (!stillReferenced) {
+                    screenshotToDelete = tx.screenshotPath
+                }
+            }
+            true
+        }
+        if (deleted && !screenshotToDelete.isNullOrBlank()) {
+            com.moji.ai.service.BillScreenshotStorage.deleteIfExists(screenshotToDelete)
+        }
+        return deleted
+    }
+
+    suspend fun clearAllTransactionsAndEvidences() = db.withTransaction {
+        db.transactionDao().deleteAllTransactions()
+        db.captureEvidenceDao().deleteAllEvidences()
+        val walletDao = db.walletDao()
+        val currentWallets = walletDao.getAllWallets()
+        val defaultBalances = mapOf(
+            1L to 0L,
+            2L to 0L,
+            3L to 0L,
+            4L to 352000L,
+            5L to 124922L,
+            6L to 230000L
+        )
+        for (w in currentWallets) {
+            val resetBalance = defaultBalances[w.id] ?: if (w.type.isLiability) 0L else w.balanceCents.coerceAtLeast(0L)
+            walletDao.updateWallet(
+                w.copy(
+                    balanceCents = resetBalance,
+                    updatedAtMillis = System.currentTimeMillis()
+                )
+            )
+        }
     }
 
     suspend fun saveWallet(wallet: WalletEntity): Long = db.walletDao().insertWallet(wallet)

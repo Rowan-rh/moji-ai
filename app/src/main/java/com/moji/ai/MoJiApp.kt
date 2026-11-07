@@ -58,8 +58,13 @@ class MoJiApp : Application() {
             smartRuleEngine = smartRuleEngine
         )
 
-        // 启动时自动检查是否有到期的周期性固定收支（如房租、订阅）并静默入账
+        // 启动时检查一次性历史电商记录校准（仅按版本号执行一次，避免每次冷启动全表扫描）及到期的周期性固定收支
         appScope.launch {
+            val prefs = getSharedPreferences("moji_maintenance_prefs", MODE_PRIVATE)
+            if (!prefs.getBoolean("repaired_legacy_ecommerce_v20261107_2", false)) {
+                captureCoordinator.repairLegacyEcommerceRecordsIfNeeded()
+                prefs.edit().putBoolean("repaired_legacy_ecommerce_v20261107_2", true).apply()
+            }
             val createdList = repository.processDueRecurringRules()
             if (createdList.isNotEmpty()) {
                 val wallets = repository.getAllWallets()

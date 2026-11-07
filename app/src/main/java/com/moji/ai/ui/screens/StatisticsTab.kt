@@ -390,15 +390,13 @@ fun ICostStatisticsScreen(
         StatsRangeMode.ALL -> "全部账单"
     }
 
-    // 核心统计指标计算
-    val netExpenseCents = filteredTxs
-        .filter { it.type == TransactionType.EXPENSE }
-        .sumOf { netExpenseOf(it) }
-
-    val totalIncomeCents = filteredTxs
-        .filter { it.type == TransactionType.INCOME }
-        .sumOf { it.amountCnyCents }
-
+    // 核心统计指标计算（remember 缓存，避免图表动画期间重复遍历账单列表）
+    val netExpenseCents = remember(filteredTxs) {
+        filteredTxs.filter { it.type == TransactionType.EXPENSE }.sumOf { netExpenseOf(it) }
+    }
+    val totalIncomeCents = remember(filteredTxs) {
+        filteredTxs.filter { it.type == TransactionType.INCOME }.sumOf { it.amountCnyCents }
+    }
     val balanceCents = totalIncomeCents - netExpenseCents
 
     // 日均支出除数：当前周期按已过天数，过去周期按整段天数，全部按首笔账单至今天数
@@ -412,28 +410,39 @@ fun ICostStatisticsScreen(
     }
     val dailyAvgExpenseCents = netExpenseCents / daysDivisor
 
-    val totalRefundCents = filteredTxs
-        .filter { it.type == TransactionType.REFUND_OFFSET }
-        .sumOf { it.amountCnyCents }
+    val totalRefundCents = remember(filteredTxs) {
+        filteredTxs.filter { it.type == TransactionType.REFUND_OFFSET }.sumOf { it.amountCnyCents }
+    }
+    val totalDiscountCents = remember(filteredTxs) { filteredTxs.sumOf { it.discountCents } }
+    val totalFeeCents = remember(filteredTxs) {
+        filteredTxs.sumOf { (it.feeCents * (if (it.exchangeRateToCny > 0.0) it.exchangeRateToCny else 1.0)).roundToLong() }
+    }
 
-    val totalDiscountCents = filteredTxs.sumOf { it.discountCents }
-    val totalFeeCents = filteredTxs.sumOf { (it.feeCents * (if (it.exchangeRateToCny > 0.0) it.exchangeRateToCny else 1.0)).roundToLong() }
+    val pendingReimburseCents = remember(filteredTxs) {
+        filteredTxs.filter { it.reimbursable && !it.reimbursed }.sumOf { netExpenseOf(it) }
+    }
+    val settledReimburseCents = remember(filteredTxs) {
+        filteredTxs.filter { it.reimbursable && it.reimbursed }.sumOf { netExpenseOf(it) }
+    }
 
-    val pendingReimburseCents = filteredTxs
-        .filter { it.reimbursable && !it.reimbursed }
-        .sumOf { netExpenseOf(it) }
-    val settledReimburseCents = filteredTxs
-        .filter { it.reimbursable && it.reimbursed }
-        .sumOf { netExpenseOf(it) }
-
-    val repaymentCents = filteredTxs.filter { it.type == TransactionType.REPAYMENT }.sumOf { it.amountCnyCents }
-    val transferCents = filteredTxs.filter { it.type == TransactionType.TRANSFER }.sumOf { it.amountCnyCents }
-    val loanInCents = filteredTxs.filter { it.type == TransactionType.LOAN_IN }.sumOf { it.amountCnyCents }
-    val loanOutCents = filteredTxs.filter { it.type == TransactionType.LOAN_OUT }.sumOf { it.amountCnyCents }
-    val installmentPayCents = filteredTxs.filter { tx ->
-        tx.type == TransactionType.EXPENSE &&
-            (tx.captureSource == "INSTALLMENT" || tx.tags.split(",", "，").any { it.trim() == "分期" })
-    }.sumOf { netExpenseOf(it) }
+    val repaymentCents = remember(filteredTxs) {
+        filteredTxs.filter { it.type == TransactionType.REPAYMENT }.sumOf { it.amountCnyCents }
+    }
+    val transferCents = remember(filteredTxs) {
+        filteredTxs.filter { it.type == TransactionType.TRANSFER }.sumOf { it.amountCnyCents }
+    }
+    val loanInCents = remember(filteredTxs) {
+        filteredTxs.filter { it.type == TransactionType.LOAN_IN }.sumOf { it.amountCnyCents }
+    }
+    val loanOutCents = remember(filteredTxs) {
+        filteredTxs.filter { it.type == TransactionType.LOAN_OUT }.sumOf { it.amountCnyCents }
+    }
+    val installmentPayCents = remember(filteredTxs) {
+        filteredTxs.filter { tx ->
+            tx.type == TransactionType.EXPENSE &&
+                (tx.captureSource == "INSTALLMENT" || tx.tags.split(",", "，").any { it.trim() == "分期" })
+        }.sumOf { netExpenseOf(it) }
+    }
 
     // 图表分桶（柱状图与趋势图共用，刻度与峰值标签来自同一组分桶）
     val buckets = remember(rangeMode, range) {
@@ -817,7 +826,6 @@ fun ICostStatisticsScreen(
                                     bars.indices.maxByOrNull { bars[it] } ?: 0
                                 }
                                 val peakCents = bars.getOrElse(peakIdx) { 0L }
-                                val animFrac = barProgress.value
 
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
@@ -850,6 +858,7 @@ fun ICostStatisticsScreen(
                                         .fillMaxWidth()
                                         .height(145.dp)
                                 ) {
+                                    val animFrac = barProgress.value
                                     val w = size.width
                                     val h = size.height
                                     val dashEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f), 0f)
@@ -959,7 +968,6 @@ fun ICostStatisticsScreen(
                                 1 -> Color(0xFF3B82F6)
                                 else -> ICostCoralRed
                             }
-                            val trendFrac = trendProgress.value
                             val hasTrend = trendPoints.isNotEmpty() && trendPoints.any { it != 0L }
 
                             Row(
@@ -989,6 +997,7 @@ fun ICostStatisticsScreen(
                                         .fillMaxWidth()
                                         .height(135.dp)
                                 ) {
+                                    val trendFrac = trendProgress.value
                                     val w = size.width
                                     val h = size.height
                                     val dash = PathEffect.dashPathEffect(floatArrayOf(8f, 8f), 0f)
@@ -1104,7 +1113,6 @@ fun ICostStatisticsScreen(
                     ) {
                         Column(modifier = Modifier.padding(top = 14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                             val totalTargetCents = if (donutMetric == 0) netExpenseCents else totalIncomeCents
-                            val donutFrac = donutProgress.value
 
                             if (categoryBreakdown.isEmpty() || totalTargetCents <= 0L) {
                                 Text(
@@ -1122,6 +1130,7 @@ fun ICostStatisticsScreen(
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Canvas(modifier = Modifier.size(152.dp)) {
+                                        val donutFrac = donutProgress.value
                                         val strokePx = 24.dp.toPx()
                                         val diameter = size.minDimension - strokePx
                                         val topLeft = Offset(strokePx / 2f, strokePx / 2f)
@@ -1272,7 +1281,7 @@ fun ICostStatisticsScreen(
                                             }
                                             Spacer(modifier = Modifier.height(6.dp))
                                             LinearProgressIndicator(
-                                                progress = { (ratio * donutFrac).coerceIn(0f, 1f) },
+                                                progress = { (ratio * donutProgress.value).coerceIn(0f, 1f) },
                                                 color = itemColor,
                                                 trackColor = ICostCellGray,
                                                 modifier = Modifier

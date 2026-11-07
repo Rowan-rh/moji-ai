@@ -98,6 +98,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _webDavConfig = MutableStateFlow(WebDavSyncClient.loadConfig(application))
     val webDavConfig: StateFlow<WebDavConfig> = _webDavConfig.asStateFlow()
 
+    /**
+     * 从流体云胶囊或系统通知点击跳转进入 App 时，待直接打开详情页的账单 ID
+     */
+    private val _pendingOpenTransactionId = MutableStateFlow<Long?>(null)
+    val pendingOpenTransactionId: StateFlow<Long?> = _pendingOpenTransactionId.asStateFlow()
+
+    fun requestOpenTransactionDetail(txId: Long) {
+        if (txId > 0L) {
+            _pendingOpenTransactionId.value = txId
+        }
+    }
+
+    fun consumePendingOpenTransactionDetail() {
+        _pendingOpenTransactionId.value = null
+    }
+
+    suspend fun getTransactionByIdDirect(txId: Long): TransactionEntity? {
+        return repository.getTransactionById(txId)
+    }
+
     private val _ledgers = MutableStateFlow(loadSavedLedgers())
     val ledgers: StateFlow<List<String>> = _ledgers.asStateFlow()
 
