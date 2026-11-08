@@ -119,6 +119,42 @@ class SmartRuleEngine(context: Context) {
     }
 
     /**
+     * 当分类被重命名或删除迁移时，同步级联更新条件规则中的 targetCategory
+     */
+    fun migrateCategoryCascade(
+        oldCategory: String,
+        newCategory: String,
+        includeSubPrefix: Boolean,
+        preserveSubSuffix: Boolean
+    ) {
+        val prefix = "$oldCategory-"
+        var changed = false
+        val updated = _rules.value.map { rule ->
+            val mapped = when {
+                rule.targetCategory == oldCategory -> newCategory
+                includeSubPrefix && rule.targetCategory.startsWith(prefix) -> {
+                    if (preserveSubSuffix) {
+                        "$newCategory-${rule.targetCategory.removePrefix(prefix)}"
+                    } else {
+                        newCategory
+                    }
+                }
+                else -> null
+            }
+            if (mapped != null && mapped != rule.targetCategory) {
+                changed = true
+                rule.copy(targetCategory = mapped)
+            } else {
+                rule
+            }
+        }
+        if (changed) {
+            _rules.value = updated
+            saveInternal(updated)
+        }
+    }
+
+    /**
      * 对 AI 或离线引擎产出的候选账单执行用户自定义 When -> Then 规则管道
      */
     fun evaluateAndApply(

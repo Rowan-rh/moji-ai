@@ -2,6 +2,7 @@ package com.moji.ai.ai
 
 import android.content.Context
 import com.moji.ai.data.local.TransactionEntity
+import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.TransactionType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -113,6 +114,41 @@ class MerchantMemoryManager(context: Context) {
     fun deleteMemory(keyword: String) {
         val updated = _memoriesFlow.value.filterNot { it.merchantKeyword.equals(keyword, ignoreCase = true) }
         saveEntries(updated)
+    }
+
+    /**
+     * 当分类被重命名或删除迁移时，同步级联更新商户记忆库中的目标分类
+     */
+    fun migrateCategoryCascade(
+        oldCategory: String,
+        newCategory: String,
+        includeSubPrefix: Boolean,
+        preserveSubSuffix: Boolean
+    ) {
+        val prefix = "$oldCategory-"
+        var changed = false
+        val updated = _memoriesFlow.value.map { entry ->
+            val mapped = when {
+                entry.category == oldCategory -> newCategory
+                includeSubPrefix && entry.category.startsWith(prefix) -> {
+                    if (preserveSubSuffix) {
+                        "$newCategory-${entry.category.removePrefix(prefix)}"
+                    } else {
+                        newCategory
+                    }
+                }
+                else -> null
+            }
+            if (mapped != null && mapped != entry.category) {
+                changed = true
+                entry.copy(category = mapped, updatedAtMillis = System.currentTimeMillis())
+            } else {
+                entry
+            }
+        }
+        if (changed) {
+            saveEntries(updated)
+        }
     }
 
     /**
@@ -376,7 +412,8 @@ object WeightedCategoryClassifier {
 
     fun classifyExpense(rawText: String, merchant: String = ""): Pair<String, Float> {
         val combined = "$merchant $rawText"
-        var bestCategory = "餐饮"
+        val activeExpenseCats = CategoryCatalog.expenseCategories
+        var bestCategory = activeExpenseCats.firstOrNull()?.name ?: "餐饮"
         var bestScore = 0
 
         for (rule in rules) {
@@ -397,6 +434,45 @@ object WeightedCategoryClassifier {
                 bestScore = score
                 bestCategory = rule.category
             }
+        }
+
+        // 动态感知用户在 CategoryCatalog 中新增或修改的一级/二级分类名称
+        for (cat in activeExpenseCats) {
+            for (sub in cat.subCategories) {
+                if (sub.name.length >= 2 && combined.contains(sub.name, ignoreCase = true)) {
+                    val customScore = 14
+                    if (customScore > bestScore) {
+                        bestScore = customScore
+                        bestCategory = "${cat.name}-${sub.name}"
+                    }
+                }
+            }
+            if (cat.name.length >= 2 && combined.contains(cat.name, ignoreCase = true)) {
+                val customScore = 11
+                if (customScore > bestScore) {
+                    bestScore = customScore
+                    bestCategory = cat.name
+                }
+            }
+        }
+
+        // 若内置规则产出的分类已被用户重命名或删除，回退到当前有效分类
+        val parts = bestCategory.split("-")
+        val mainPart = parts.firstOrNull().orEmpty()
+        val subPart = parts.getOrNull(1)
+        val matchedMain = activeExpenseCats.firstOrNull { it.name == mainPart }
+        if (matchedMain == null) {
+            val matchedBySub = if (!subPart.isNullOrBlank()) {
+                activeExpenseCats.firstNotNullOfOrNull { c ->
+                    c.subCategories.firstOrNull { it.name == subPart }?.let { "${c.name}-${it.name}" }
+                }
+            } else null
+            bestCategory = matchedBySub
+                ?: activeExpenseCats.firstOrNull { it.name == "其他" }?.name
+                ?: activeExpenseCats.firstOrNull()?.name
+                ?: bestCategory
+        } else if (!subPart.isNullOrBlank() && matchedMain.subCategories.none { it.name == subPart }) {
+            bestCategory = matchedMain.name
         }
 
         val confidence = when {

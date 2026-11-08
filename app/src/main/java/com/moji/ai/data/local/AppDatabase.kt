@@ -130,6 +130,22 @@ interface TransactionDao {
     @Update
     suspend fun updateTransaction(tx: TransactionEntity)
 
+    @Query(
+        """
+        UPDATE transactions
+        SET category = :newCategory,
+            updatedAtMillis = :nowMillis,
+            syncRevision = syncRevision + 1,
+            syncDirty = 1
+        WHERE id = :id
+        """
+    )
+    suspend fun updateTransactionCategoryById(
+        id: Long,
+        newCategory: String,
+        nowMillis: Long
+    )
+
     @Delete
     suspend fun deleteTransaction(tx: TransactionEntity)
 
@@ -168,6 +184,21 @@ interface RecurringRuleDao {
 
     @Update
     suspend fun updateRule(rule: RecurringRuleEntity)
+
+    @Query(
+        """
+        UPDATE recurring_rules
+        SET category = :newCategory,
+            updatedAtMillis = :nowMillis,
+            syncDirty = 1
+        WHERE id = :id
+        """
+    )
+    suspend fun updateRuleCategoryById(
+        id: Long,
+        newCategory: String,
+        nowMillis: Long
+    )
 
     @Delete
     suspend fun deleteRule(rule: RecurringRuleEntity)

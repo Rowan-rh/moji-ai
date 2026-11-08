@@ -15,8 +15,11 @@ import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.CategoryCatalog
+import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.RecurrenceFrequency
+import com.moji.ai.data.model.SubCategoryDef
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.update.AppUpdateConfig
@@ -95,6 +98,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val merchantMemories: StateFlow<List<MerchantMemoryEntry>> = app.merchantMemoryManager.memoriesFlow
 
     val smartRules: StateFlow<List<SmartConditionRule>> = app.smartRuleEngine.rules
+
+    val expenseCategories: StateFlow<List<CategoryDef>> = CategoryCatalog.expenseCategoriesFlow
+
+    val incomeCategories: StateFlow<List<CategoryDef>> = CategoryCatalog.incomeCategoriesFlow
 
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = app.captureCoordinator.observabilityLogs
 
@@ -537,7 +544,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             wallets = wallets.value,
             transactions = transactions.value,
             recurringRules = recurringRules.value,
-            merchantMemories = merchantMemories.value
+            merchantMemories = merchantMemories.value,
+            customExpenseCategories = CategoryCatalog.expenseCategories,
+            customIncomeCategories = CategoryCatalog.incomeCategories
         )
     }
 
@@ -610,6 +619,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val (backupWallets, backupTxs, snapshot) = parsed
             val backupRules = BackupAndCsvTransferEngine.toRecurringRuleEntities(snapshot.recurringRules)
             val txCount = repository.restoreFullSnapshot(backupWallets, backupTxs, backupRules)
+            if (snapshot.customExpenseCategories.isNotEmpty() || snapshot.customIncomeCategories.isNotEmpty()) {
+                CategoryCatalog.replaceAllCategories(
+                    expenseList = snapshot.customExpenseCategories,
+                    incomeList = snapshot.customIncomeCategories
+                )
+            }
             snapshot.merchantMemories.forEach { m ->
                 app.merchantMemoryManager.upsertMemory(m.merchantKeyword, m.category, m.preferredWalletId)
             }
@@ -858,5 +873,243 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun ignoreAppUpdateTag(tag: String) {
         app.appUpdateManager.ignoreReleaseTag(tag)
         postMessage("已忽略版本 $tag 的自动弹窗提醒")
+    }
+
+    suspend fun countTransactionsByCategory(
+        category: String,
+        includeSubPrefix: Boolean,
+        isExpense: Boolean? = null
+    ): Int = repository.countTransactionsByCategory(category, includeSubPrefix, isExpense)
+
+    private suspend fun cascadeCategoryEverywhere(
+        oldCategory: String,
+        newCategory: String,
+        includeSubPrefix: Boolean,
+        preserveSubSuffix: Boolean,
+        isExpense: Boolean? = null
+    ): Int {
+        val updatedTxCount = repository.migrateCategoryCascade(
+            oldCategory = oldCategory,
+            newCategory = newCategory,
+            includeSubPrefix = includeSubPrefix,
+            preserveSubSuffix = preserveSubSuffix,
+            isExpense = isExpense
+        )
+        val prefix = "$oldCategory-"
+
+        var templatesChanged = false
+        val updatedTemplates = _templates.value.map { tpl ->
+            val mapped = when {
+                tpl.category == oldCategory -> newCategory
+                includeSubPrefix && tpl.category.startsWith(prefix) -> {
+                    if (preserveSubSuffix) "$newCategory-${tpl.category.removePrefix(prefix)}" else newCategory
+                }
+                else -> null
+            }
+            if (mapped != null && mapped != tpl.category) {
+                templatesChanged = true
+                tpl.copy(category = mapped)
+            } else tpl
+        }
+        if (templatesChanged) {
+            _templates.value = updatedTemplates
+            uiPrefs.edit().putString("saved_templates_json", jsonCodec.encodeToString(updatedTemplates)).apply()
+        }
+
+        var installmentsChanged = false
+        val updatedInstallments = _installmentPlans.value.map { inst ->
+            val mapped = when {
+                inst.category == oldCategory -> newCategory
+                includeSubPrefix && inst.category.startsWith(prefix) -> {
+                    if (preserveSubSuffix) "$newCategory-${inst.category.removePrefix(prefix)}" else newCategory
+                }
+                else -> null
+            }
+            if (mapped != null && mapped != inst.category) {
+                installmentsChanged = true
+                inst.copy(category = mapped)
+            } else inst
+        }
+        if (installmentsChanged) {
+            _installmentPlans.value = updatedInstallments
+            uiPrefs.edit().putString("saved_installments_json", jsonCodec.encodeToString(updatedInstallments)).apply()
+        }
+
+        app.smartRuleEngine.migrateCategoryCascade(
+            oldCategory = oldCategory,
+            newCategory = newCategory,
+            includeSubPrefix = includeSubPrefix,
+            preserveSubSuffix = preserveSubSuffix
+        )
+        app.merchantMemoryManager.migrateCategoryCascade(
+            oldCategory = oldCategory,
+            newCategory = newCategory,
+            includeSubPrefix = includeSubPrefix,
+            preserveSubSuffix = preserveSubSuffix
+        )
+        return updatedTxCount
+    }
+
+    fun addPrimaryCategory(
+        isExpense: Boolean,
+        name: String,
+        assetFile: String,
+        onDone: (Result<CategoryDef>) -> Unit = {}
+    ) {
+        val res = CategoryCatalog.addPrimaryCategory(isExpense, name, assetFile)
+        res.onSuccess { created ->
+            postMessage("已新增${if (isExpense) "支出" else "收入"}分类「${created.name}」")
+        }
+        onDone(res)
+    }
+
+    fun updatePrimaryCategory(
+        isExpense: Boolean,
+        oldName: String,
+        newName: String,
+        newAssetFile: String,
+        onDone: (Result<CategoryDef>) -> Unit = {}
+    ) {
+        val res = CategoryCatalog.updatePrimaryCategory(isExpense, oldName, newName, newAssetFile)
+        res.onSuccess { updated ->
+            if (oldName != updated.name) {
+                viewModelScope.launch {
+                    val cnt = cascadeCategoryEverywhere(
+                        oldCategory = oldName,
+                        newCategory = updated.name,
+                        includeSubPrefix = true,
+                        preserveSubSuffix = true,
+                        isExpense = isExpense
+                    )
+                    postMessage(
+                        if (cnt > 0) "已将「$oldName」重命名为「${updated.name}」（同步迁移 $cnt 笔历史账单）"
+                        else "已将「$oldName」重命名为「${updated.name}」"
+                    )
+                    onDone(res)
+                }
+            } else {
+                postMessage("已更新「${updated.name}」图标")
+                onDone(res)
+            }
+        }.onFailure {
+            onDone(res)
+        }
+    }
+
+    fun movePrimaryCategory(isExpense: Boolean, index: Int, delta: Int) {
+        CategoryCatalog.movePrimaryCategory(isExpense, index, delta)
+    }
+
+    fun deletePrimaryCategoryAndMigrate(
+        isExpense: Boolean,
+        categoryName: String,
+        migrateTargetCategory: String,
+        onDone: (Result<Unit>) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val res = CategoryCatalog.deletePrimaryCategory(isExpense, categoryName)
+            res.onSuccess {
+                val target = migrateTargetCategory.ifBlank { "其他" }
+                val cnt = cascadeCategoryEverywhere(
+                    oldCategory = categoryName,
+                    newCategory = target,
+                    includeSubPrefix = true,
+                    preserveSubSuffix = false,
+                    isExpense = isExpense
+                )
+                postMessage(
+                    if (cnt > 0) "已删除「$categoryName」，$cnt 笔账单已迁移至「$target」"
+                    else "已删除分类「$categoryName」"
+                )
+            }
+            onDone(res)
+        }
+    }
+
+    fun addSubCategory(
+        isExpense: Boolean,
+        parentName: String,
+        subName: String,
+        assetFile: String,
+        onDone: (Result<SubCategoryDef>) -> Unit = {}
+    ) {
+        val res = CategoryCatalog.addSubCategory(isExpense, parentName, subName, assetFile)
+        res.onSuccess { created ->
+            postMessage("已在「$parentName」下新增「${created.name}」")
+        }
+        onDone(res)
+    }
+
+    fun updateSubCategory(
+        isExpense: Boolean,
+        parentName: String,
+        oldSubName: String,
+        newSubName: String,
+        newAssetFile: String,
+        onDone: (Result<SubCategoryDef>) -> Unit = {}
+    ) {
+        val res = CategoryCatalog.updateSubCategory(isExpense, parentName, oldSubName, newSubName, newAssetFile)
+        res.onSuccess { updated ->
+            if (oldSubName != updated.name) {
+                viewModelScope.launch {
+                    val oldFull = "$parentName-$oldSubName"
+                    val newFull = "$parentName-${updated.name}"
+                    val cnt = cascadeCategoryEverywhere(
+                        oldCategory = oldFull,
+                        newCategory = newFull,
+                        includeSubPrefix = false,
+                        preserveSubSuffix = false,
+                        isExpense = isExpense
+                    )
+                    postMessage(
+                        if (cnt > 0) "已将「$oldFull」重命名为「$newFull」（同步迁移 $cnt 笔历史账单）"
+                        else "已将「$oldFull」重命名为「$newFull」"
+                    )
+                    onDone(res)
+                }
+            } else {
+                postMessage("已更新「$parentName-${updated.name}」图标")
+                onDone(res)
+            }
+        }.onFailure {
+            onDone(res)
+        }
+    }
+
+    fun moveSubCategory(isExpense: Boolean, parentName: String, subIndex: Int, delta: Int) {
+        CategoryCatalog.moveSubCategory(isExpense, parentName, subIndex, delta)
+    }
+
+    fun deleteSubCategoryAndMigrate(
+        isExpense: Boolean,
+        parentName: String,
+        subName: String,
+        migrateTargetCategory: String,
+        onDone: (Result<Unit>) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val res = CategoryCatalog.deleteSubCategory(isExpense, parentName, subName)
+            res.onSuccess {
+                val oldFull = "$parentName-$subName"
+                val target = migrateTargetCategory.ifBlank { parentName }
+                val cnt = cascadeCategoryEverywhere(
+                    oldCategory = oldFull,
+                    newCategory = target,
+                    includeSubPrefix = false,
+                    preserveSubSuffix = false,
+                    isExpense = isExpense
+                )
+                postMessage(
+                    if (cnt > 0) "已删除「$oldFull」，$cnt 笔账单已迁移至「$target」"
+                    else "已删除二级分类「$oldFull」"
+                )
+            }
+            onDone(res)
+        }
+    }
+
+    fun restoreDefaultCategories(isExpense: Boolean? = null, mergeOnly: Boolean = true) {
+        CategoryCatalog.restoreDefaultCategories(isExpense = isExpense, mergeOnly = mergeOnly)
+        postMessage(if (mergeOnly) "已补全缺失的默认分类" else "已重置为默认分类树")
     }
 }

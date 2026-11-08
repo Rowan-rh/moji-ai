@@ -562,6 +562,92 @@ class LedgerRepository(private val db: AppDatabase) {
 
     suspend fun deleteRecurringRule(rule: RecurringRuleEntity) = db.recurringRuleDao().deleteRule(rule)
 
+    /**
+     * 统计指定分类（含可选二级分类前缀）关联的未删除历史账单数量
+     */
+    suspend fun countTransactionsByCategory(
+        category: String,
+        includeSubPrefix: Boolean,
+        isExpense: Boolean? = null
+    ): Int {
+        val allActive = db.transactionDao().getAllTransactions()
+        val prefix = "$category-"
+        return allActive.count { tx ->
+            val typeMatched = when (isExpense) {
+                true -> tx.type == TransactionType.EXPENSE
+                false -> tx.type == TransactionType.INCOME
+                null -> true
+            }
+            typeMatched && (tx.category == category || (includeSubPrefix && tx.category.startsWith(prefix)))
+        }
+    }
+
+    /**
+     * 在 Room 事务中原子级联更新历史账单与周期性规则的分类字段，并刷新 updatedAtMillis 与 syncDirty
+     * @return 实际受影响更新的历史账单笔数
+     */
+    suspend fun migrateCategoryCascade(
+        oldCategory: String,
+        newCategory: String,
+        includeSubPrefix: Boolean,
+        preserveSubSuffix: Boolean,
+        isExpense: Boolean? = null
+    ): Int = db.withTransaction {
+        val now = System.currentTimeMillis()
+        val txDao = db.transactionDao()
+        val ruleDao = db.recurringRuleDao()
+        val prefix = "$oldCategory-"
+        var updatedTxCount = 0
+
+        for (tx in txDao.getAllTransactions()) {
+            val typeMatched = when (isExpense) {
+                true -> tx.type == TransactionType.EXPENSE
+                false -> tx.type == TransactionType.INCOME
+                null -> true
+            }
+            if (!typeMatched) continue
+            val mapped = when {
+                tx.category == oldCategory -> newCategory
+                includeSubPrefix && tx.category.startsWith(prefix) -> {
+                    if (preserveSubSuffix) {
+                        "$newCategory-${tx.category.removePrefix(prefix)}"
+                    } else {
+                        newCategory
+                    }
+                }
+                else -> null
+            }
+            if (mapped != null && mapped != tx.category) {
+                txDao.updateTransactionCategoryById(tx.id, mapped, now)
+                updatedTxCount++
+            }
+        }
+
+        for (rule in ruleDao.getAllRules()) {
+            val typeMatched = when (isExpense) {
+                true -> rule.type == TransactionType.EXPENSE
+                false -> rule.type == TransactionType.INCOME
+                null -> true
+            }
+            if (!typeMatched) continue
+            val mapped = when {
+                rule.category == oldCategory -> newCategory
+                includeSubPrefix && rule.category.startsWith(prefix) -> {
+                    if (preserveSubSuffix) {
+                        "$newCategory-${rule.category.removePrefix(prefix)}"
+                    } else {
+                        newCategory
+                    }
+                }
+                else -> null
+            }
+            if (mapped != null && mapped != rule.category) {
+                ruleDao.updateRuleCategoryById(rule.id, mapped, now)
+            }
+        }
+        updatedTxCount
+    }
+
     suspend fun processDueRecurringRules(nowMillis: Long = System.currentTimeMillis()): List<TransactionEntity> {
         val dueRules = db.recurringRuleDao().getDueRules(nowMillis)
         val created = mutableListOf<TransactionEntity>()
