@@ -178,6 +178,7 @@ fun ICostCalculatorSheet(
     ledgers: List<String> = listOf("默认账本"),
     onSelectLedger: (String) -> Unit = {},
     visible: Boolean = true,
+    suspendedBySubpage: Boolean = false,
     editingTransaction: TransactionEntity? = null,
     initialType: TransactionType = TransactionType.EXPENSE,
     initialSourceWalletId: Long? = null,
@@ -299,6 +300,20 @@ fun ICostCalculatorSheet(
             isSubmitting = false
             inlineError = null
             showDiscardConfirm = false
+        }
+    }
+
+    // 当用户在「分类管理」二级页中重命名或删除了当前选中的分类时，返回计算器后自动修正选中项
+    LaunchedEffect(expenseCategories, incomeCategories, txType) {
+        if (txType == TransactionType.EXPENSE || txType == TransactionType.INCOME) {
+            val activeList = if (txType == TransactionType.EXPENSE) expenseCategories else incomeCategories
+            val matchedMain = activeList.firstOrNull { it.name == selectedMainCategory }
+            if (matchedMain == null) {
+                selectedMainCategory = activeList.firstOrNull()?.name ?: "餐饮"
+                selectedSubCategory = ""
+            } else if (selectedSubCategory.isNotBlank() && matchedMain.subCategories.none { it.name == selectedSubCategory }) {
+                selectedSubCategory = ""
+            }
         }
     }
 
@@ -573,9 +588,10 @@ fun ICostCalculatorSheet(
 
     // 新记一笔且已输入金额时，关闭前确认，避免误触丢失（X、返回键、下拉、点遮罩都会拦截）
     val hasUnsavedInput = !isEditing && !isSubmitting && expr.isNotEmpty()
+    val sheetVisible = visible && !suspendedBySubpage
     ICostSmoothBottomSheet(
         onDismissRequest = onDismiss,
-        visible = visible,
+        visible = sheetVisible,
         keepWarm = true,
         containerColor = ICostBgGray,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
@@ -593,7 +609,7 @@ fun ICostCalculatorSheet(
         // 晚于抽屉自身注册，优先拦截系统返回键
         // 只在面板可见时注册：BackHandler 按注册先后决定优先级，常驻预热的面板若一直注册，
         // 会被之后打开的全屏页（钱包详情、日历）抢先处理返回键
-        if (visible) {
+        if (sheetVisible) {
             BackHandler(enabled = hasUnsavedInput) { showDiscardConfirm = true }
         }
 

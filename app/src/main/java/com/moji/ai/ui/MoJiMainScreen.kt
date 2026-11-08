@@ -684,6 +684,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 ledgers = ledgers,
                 onSelectLedger = { viewModel.selectLedger(it) },
                 visible = showCalculatorSheet,
+                suspendedBySubpage = showCategoryManagementPage,
                 editingTransaction = editingTx,
                 initialType = calcInitialType,
                 initialSourceWalletId = calcInitialSourceWalletId,
@@ -701,8 +702,6 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 },
                 onOpenAiSandbox = { showAiSandboxSheet = true },
                 onOpenCategoryManagement = { isExpense ->
-                    showCalculatorSheet = false
-                    editingTx = null
                     categoryManagementInitialExpense = isExpense
                     showCategoryManagementPage = true
                 }

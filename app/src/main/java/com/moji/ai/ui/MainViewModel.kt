@@ -897,6 +897,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         var templatesChanged = false
         val updatedTemplates = _templates.value.map { tpl ->
+            val tplIsExpense = tpl.typeName != TransactionType.INCOME.name
+            if (isExpense != null && tplIsExpense != isExpense) return@map tpl
             val mapped = CategoryCatalog.remapCascadedCategory(
                 current = tpl.category,
                 oldCategory = oldCategory,
@@ -914,30 +916,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             uiPrefs.edit().putString("saved_templates_json", jsonCodec.encodeToString(updatedTemplates)).apply()
         }
 
-        var installmentsChanged = false
-        val updatedInstallments = _installmentPlans.value.map { inst ->
-            val mapped = CategoryCatalog.remapCascadedCategory(
-                current = inst.category,
-                oldCategory = oldCategory,
-                newCategory = newCategory,
-                includeSubPrefix = includeSubPrefix,
-                preserveSubSuffix = preserveSubSuffix
-            )
-            if (mapped != null) {
-                installmentsChanged = true
-                inst.copy(category = mapped)
-            } else inst
-        }
-        if (installmentsChanged) {
-            _installmentPlans.value = updatedInstallments
-            uiPrefs.edit().putString("saved_installments_json", jsonCodec.encodeToString(updatedInstallments)).apply()
+        if (isExpense != false) {
+            var installmentsChanged = false
+            val updatedInstallments = _installmentPlans.value.map { inst ->
+                val mapped = CategoryCatalog.remapCascadedCategory(
+                    current = inst.category,
+                    oldCategory = oldCategory,
+                    newCategory = newCategory,
+                    includeSubPrefix = includeSubPrefix,
+                    preserveSubSuffix = preserveSubSuffix
+                )
+                if (mapped != null) {
+                    installmentsChanged = true
+                    inst.copy(category = mapped)
+                } else inst
+            }
+            if (installmentsChanged) {
+                _installmentPlans.value = updatedInstallments
+                uiPrefs.edit().putString("saved_installments_json", jsonCodec.encodeToString(updatedInstallments)).apply()
+            }
         }
 
         app.smartRuleEngine.migrateCategoryCascade(
             oldCategory = oldCategory,
             newCategory = newCategory,
             includeSubPrefix = includeSubPrefix,
-            preserveSubSuffix = preserveSubSuffix
+            preserveSubSuffix = preserveSubSuffix,
+            isExpense = isExpense
         )
         app.merchantMemoryManager.migrateCategoryCascade(
             oldCategory = oldCategory,
@@ -1007,7 +1012,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val res = CategoryCatalog.deletePrimaryCategory(isExpense, categoryName)
             res.onSuccess {
-                val target = migrateTargetCategory.ifBlank { "其他" }
+                val remaining = if (isExpense) CategoryCatalog.expenseCategories else CategoryCatalog.incomeCategories
+                val fallbackTarget = remaining.firstOrNull { it.name == "其他" }?.name
+                    ?: remaining.firstOrNull()?.name
+                    ?: "其他"
+                val target = migrateTargetCategory.takeIf { candidate ->
+                    candidate.isNotBlank() && remaining.any {
+                        it.name == candidate || candidate.startsWith("${it.name}-")
+                    }
+                } ?: fallbackTarget
                 val cnt = cascadeCategoryEverywhere(
                     oldCategory = categoryName,
                     newCategory = target,

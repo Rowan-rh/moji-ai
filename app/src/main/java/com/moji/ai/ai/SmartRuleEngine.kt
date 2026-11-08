@@ -126,10 +126,12 @@ class SmartRuleEngine(context: Context) {
         oldCategory: String,
         newCategory: String,
         includeSubPrefix: Boolean,
-        preserveSubSuffix: Boolean
+        preserveSubSuffix: Boolean,
+        isExpense: Boolean? = null
     ) {
         var changed = false
         val updated = _rules.value.map { rule ->
+            if (isExpense == false && rule.onlyExpense) return@map rule
             val mapped = CategoryCatalog.remapCascadedCategory(
                 current = rule.targetCategory,
                 oldCategory = oldCategory,

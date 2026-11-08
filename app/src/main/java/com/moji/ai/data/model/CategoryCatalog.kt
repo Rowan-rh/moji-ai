@@ -36,6 +36,7 @@ object CategoryCatalog {
     private const val PREFS_NAME = "moji_category_catalog_prefs"
     private const val KEY_EXPENSE_JSON = "custom_expense_categories_json"
     private const val KEY_INCOME_JSON = "custom_income_categories_json"
+    const val SYSTEM_BALANCE_ANCHOR_CATEGORY = "平账"
 
     private val jsonCodec = Json {
         ignoreUnknownKeys = true
@@ -318,13 +319,48 @@ object CategoryCatalog {
     val incomeCategories: List<CategoryDef>
         get() = _incomeCategoriesFlow.value
 
+    private fun isValidSanitizedName(trimmed: String): Boolean {
+        return trimmed.isNotEmpty() &&
+            trimmed != SYSTEM_BALANCE_ANCHOR_CATEGORY &&
+            trimmed.length <= 12 &&
+            trimmed.none { it == '-' || it == '/' || it == '·' }
+    }
+
+    /**
+     * 对外部导入或本地反序列化的分类列表执行清洗与同名去重，防止异常 JSON 引发 UI Key 冲突或保留字污染
+     */
+    private fun sanitizeCategoryList(rawList: List<CategoryDef>): List<CategoryDef> {
+        return rawList
+            .mapNotNull { cat ->
+                val cleanName = cat.name.trim()
+                if (!isValidSanitizedName(cleanName)) return@mapNotNull null
+                val cleanAsset = cat.assetFile.trim().ifBlank { "cat_other.webp" }
+                val cleanSubs = cat.subCategories
+                    .mapNotNull { sub ->
+                        val subName = sub.name.trim()
+                        if (!isValidSanitizedName(subName)) return@mapNotNull null
+                        SubCategoryDef(
+                            name = subName,
+                            assetFile = sub.assetFile.trim().ifBlank { cleanAsset }
+                        )
+                    }
+                    .distinctBy { it.name }
+                CategoryDef(
+                    name = cleanName,
+                    assetFile = cleanAsset,
+                    subCategories = cleanSubs
+                )
+            }
+            .distinctBy { it.name }
+    }
+
     fun init(context: Context) {
         val sp = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs = sp
         val expRaw = sp.getString(KEY_EXPENSE_JSON, null)
         if (!expRaw.isNullOrBlank()) {
             runCatching {
-                jsonCodec.decodeFromString<List<CategoryDef>>(expRaw)
+                sanitizeCategoryList(jsonCodec.decodeFromString<List<CategoryDef>>(expRaw))
             }.getOrNull()?.takeIf { it.isNotEmpty() }?.let {
                 _expenseCategoriesFlow.value = it
             }
@@ -332,7 +368,7 @@ object CategoryCatalog {
         val incRaw = sp.getString(KEY_INCOME_JSON, null)
         if (!incRaw.isNullOrBlank()) {
             runCatching {
-                jsonCodec.decodeFromString<List<CategoryDef>>(incRaw)
+                sanitizeCategoryList(jsonCodec.decodeFromString<List<CategoryDef>>(incRaw))
             }.getOrNull()?.takeIf { it.isNotEmpty() }?.let {
                 _incomeCategoriesFlow.value = it
             }
@@ -352,7 +388,7 @@ object CategoryCatalog {
     }
 
     /**
-     * 校验分类名称（去除首尾空白后不能为空、不能包含 `-` `/` `·` 分隔符、同级不能重名）
+     * 校验分类名称（去除首尾空白后不能为空、不能为系统保留名「平账」、不能包含 `-` `/` `·` 分隔符、同级不能重名）
      */
     fun validateCategoryName(
         rawName: String,
@@ -361,6 +397,9 @@ object CategoryCatalog {
     ): String? {
         val trimmed = rawName.trim()
         if (trimmed.isEmpty()) return "分类名称不能为空"
+        if (trimmed == SYSTEM_BALANCE_ANCHOR_CATEGORY) {
+            return "「$SYSTEM_BALANCE_ANCHOR_CATEGORY」为系统平账保留分类"
+        }
         if (trimmed.any { it == '-' || it == '/' || it == '·' }) {
             return "名称不能包含 -、/ 或 · 分隔符"
         }
@@ -405,15 +444,17 @@ object CategoryCatalog {
         expenseList: List<CategoryDef>,
         incomeList: List<CategoryDef>
     ) {
-        if (expenseList.isEmpty() && incomeList.isEmpty()) return
+        val cleanExpense = sanitizeCategoryList(expenseList)
+        val cleanIncome = sanitizeCategoryList(incomeList)
+        if (cleanExpense.isEmpty() && cleanIncome.isEmpty()) return
         val editor = prefs?.edit()
-        if (expenseList.isNotEmpty()) {
-            _expenseCategoriesFlow.value = expenseList
-            editor?.putString(KEY_EXPENSE_JSON, jsonCodec.encodeToString(expenseList))
+        if (cleanExpense.isNotEmpty()) {
+            _expenseCategoriesFlow.value = cleanExpense
+            editor?.putString(KEY_EXPENSE_JSON, jsonCodec.encodeToString(cleanExpense))
         }
-        if (incomeList.isNotEmpty()) {
-            _incomeCategoriesFlow.value = incomeList
-            editor?.putString(KEY_INCOME_JSON, jsonCodec.encodeToString(incomeList))
+        if (cleanIncome.isNotEmpty()) {
+            _incomeCategoriesFlow.value = cleanIncome
+            editor?.putString(KEY_INCOME_JSON, jsonCodec.encodeToString(cleanIncome))
         }
         editor?.apply()
         _versionFlow.value += 1

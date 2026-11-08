@@ -842,15 +842,20 @@ private fun CategoryEditorBottomSheet(
     var nameInput by remember(target) { mutableStateOf(target.existingName.orEmpty()) }
     var selectedIcon by remember(target) { mutableStateOf(target.initialIconAsset) }
     var nameTouched by remember(target) { mutableStateOf(false) }
+    var isSaving by remember(target) { mutableStateOf(false) }
 
-    val validationError = remember(nameInput, siblingNames, target.existingName) {
-        CategoryCatalog.validateCategoryName(
-            rawName = nameInput,
-            siblingNames = siblingNames,
-            ignoreName = target.existingName
-        )
+    val validationError = remember(nameInput, siblingNames, target.existingName, isSaving) {
+        if (isSaving) {
+            null
+        } else {
+            CategoryCatalog.validateCategoryName(
+                rawName = nameInput,
+                siblingNames = siblingNames,
+                ignoreName = target.existingName
+            )
+        }
     }
-    val canSubmit = validationError == null
+    val canSubmit = !isSaving && validationError == null
     val accentColor = if (target.isExpense) ICostCoralRed else ICostGreenIncome
 
     val sheetTitle = when {
@@ -1036,7 +1041,10 @@ private fun CategoryEditorBottomSheet(
                     onClick = {
                         nameTouched = true
                         if (canSubmit) {
-                            onSave(nameInput.trim(), selectedIcon, requestDismiss)
+                            onSave(nameInput.trim(), selectedIcon) {
+                                isSaving = true
+                                requestDismiss()
+                            }
                         }
                     },
                     enabled = canSubmit,
@@ -1078,7 +1086,7 @@ private fun CategorySafeDeleteMigrationDialog(
         )
     }
 
-    // 候选迁移目标分类列表（排除自身）
+    // 候选迁移目标分类列表（排除自身，仅包含真实存在的分类）
     val candidateTargets = remember(target, availableCategories) {
         buildList {
             if (target.isSubCategory && !target.parentName.isNullOrBlank()) {
@@ -1094,9 +1102,6 @@ private fun CategorySafeDeleteMigrationDialog(
                 .forEach { cat ->
                     if (cat.name !in this) add(cat.name)
                 }
-            if ("其他" !in this && target.categoryName != "其他") {
-                add("其他")
-            }
         }
     }
 
@@ -1104,7 +1109,7 @@ private fun CategorySafeDeleteMigrationDialog(
         when {
             target.isSubCategory && !target.parentName.isNullOrBlank() -> target.parentName
             "其他" in candidateTargets -> "其他"
-            else -> candidateTargets.firstOrNull() ?: "其他"
+            else -> candidateTargets.firstOrNull().orEmpty()
         }
     }
     var selectedMigrateTarget by remember(defaultMigrateTarget) { mutableStateOf(defaultMigrateTarget) }

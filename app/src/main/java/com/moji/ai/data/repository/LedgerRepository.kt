@@ -569,8 +569,11 @@ class LedgerRepository(private val db: AppDatabase) {
         null -> true
     }
 
+    private fun TransactionEntity.isSystemBalanceAnchor(): Boolean =
+        captureSource == "BALANCE_ANCHOR" || category == CategoryCatalog.SYSTEM_BALANCE_ANCHOR_CATEGORY
+
     /**
-     * 统计指定分类（含可选二级分类前缀）关联的未删除历史账单数量
+     * 统计指定分类（含可选二级分类前缀）关联的未删除历史账单数量（排除系统平账流水）
      */
     suspend fun countTransactionsByCategory(
         category: String,
@@ -578,7 +581,8 @@ class LedgerRepository(private val db: AppDatabase) {
         isExpense: Boolean? = null
     ): Int {
         return db.transactionDao().getAllTransactions().count { tx ->
-            tx.type.matchesDirectionFilter(isExpense) &&
+            !tx.isSystemBalanceAnchor() &&
+                tx.type.matchesDirectionFilter(isExpense) &&
                 CategoryCatalog.matchesCategoryScope(tx.category, category, includeSubPrefix)
         }
     }
@@ -600,6 +604,7 @@ class LedgerRepository(private val db: AppDatabase) {
         var updatedTxCount = 0
 
         for (tx in txDao.getAllTransactions()) {
+            if (tx.isSystemBalanceAnchor()) continue
             if (!tx.type.matchesDirectionFilter(isExpense)) continue
             val mapped = CategoryCatalog.remapCascadedCategory(
                 current = tx.category,
