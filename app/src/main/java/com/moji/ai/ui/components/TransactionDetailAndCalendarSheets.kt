@@ -48,6 +48,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -133,13 +134,6 @@ internal fun ICostConfirmDialog(
             TextButton(onClick = onDismiss) { Text(dismissText) }
         }
     )
-}
-
-/** 拆分账单可选的支出分类（主分类及「主-子」二级分类），与记账面板保持同一份目录 */
-private val splitCategoryOptions: List<String> by lazy {
-    CategoryCatalog.expenseCategories.flatMap { cat ->
-        listOf(cat.name) + cat.subCategories.map { "${cat.name}-${it.name}" }
-    }
 }
 
 /**
@@ -823,6 +817,12 @@ private fun SplitCategoryPicker(
     value: String,
     onValueChange: (String) -> Unit
 ) {
+    val expenseCategories by CategoryCatalog.expenseCategoriesFlow.collectAsState()
+    val splitCategoryOptions = remember(expenseCategories) {
+        expenseCategories.flatMap { cat ->
+            listOf(cat.name) + cat.subCategories.map { "${cat.name}-${it.name}" }
+        }
+    }
     var expanded by remember { mutableStateOf(false) }
     Box {
         Surface(

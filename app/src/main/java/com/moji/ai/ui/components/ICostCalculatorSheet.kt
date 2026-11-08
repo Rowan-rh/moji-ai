@@ -48,6 +48,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.filled.AccessTime
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material3.AlertDialog
@@ -66,6 +67,7 @@ import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -87,8 +89,11 @@ import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CategoryCatalog
+import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.SubCategoryDef
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.ui.screens.CategoryEditorBottomSheet
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
 import com.moji.ai.ui.theme.ICostAssetImage
@@ -173,15 +178,20 @@ fun ICostCalculatorSheet(
     ledgers: List<String> = listOf("默认账本"),
     onSelectLedger: (String) -> Unit = {},
     visible: Boolean = true,
+    suspendedBySubpage: Boolean = false,
     editingTransaction: TransactionEntity? = null,
     initialType: TransactionType = TransactionType.EXPENSE,
     initialSourceWalletId: Long? = null,
     initialTargetWalletId: Long? = null,
     onDismiss: () -> Unit,
     onSaveTransaction: (TransactionEntity, keepOpen: Boolean) -> Unit,
-    onOpenAiSandbox: () -> Unit = {}
+    onOpenAiSandbox: () -> Unit = {},
+    onOpenCategoryManagement: (isExpense: Boolean) -> Unit = {}
 ) {
     val isEditing = editingTransaction != null
+    val expenseCategories by CategoryCatalog.expenseCategoriesFlow.collectAsState()
+    val incomeCategories by CategoryCatalog.incomeCategoriesFlow.collectAsState()
+    var quickAddSubParent by remember { mutableStateOf<Pair<Boolean, CategoryDef>?>(null) }
     // 1:1 iCost 顶部三态：支出 | 收入 | 转账（若外部传入 REPAYMENT 则归在转账 tab 并在保存时自动判断目标账户）
     var txType by remember {
         val raw = editingTransaction?.type ?: initialType
@@ -191,9 +201,10 @@ fun ICostCalculatorSheet(
     }
 
     // 解析初始主分类与子分类
-    val initFullCategory = editingTransaction?.category ?: "餐饮"
+    val defaultExpName = expenseCategories.firstOrNull()?.name ?: "餐饮"
+    val initFullCategory = editingTransaction?.category ?: defaultExpName
     val initParts = initFullCategory.split("-")
-    var selectedMainCategory by remember { mutableStateOf(initParts.firstOrNull() ?: "餐饮") }
+    var selectedMainCategory by remember { mutableStateOf(initParts.firstOrNull() ?: defaultExpName) }
     var selectedSubCategory by remember { mutableStateOf(initParts.getOrNull(1) ?: "") }
 
     var expr by remember {
@@ -255,13 +266,14 @@ fun ICostCalculatorSheet(
         if (visible) {
             val raw = editingTransaction?.type ?: initialType
             txType = if (raw == TransactionType.REPAYMENT) TransactionType.TRANSFER else raw
+            val fallbackExpName = CategoryCatalog.expenseCategories.firstOrNull()?.name ?: "餐饮"
             val fullCat = editingTransaction?.category ?: if (raw == TransactionType.INCOME) {
                 CategoryCatalog.incomeCategories.first().name
             } else {
-                "餐饮"
+                fallbackExpName
             }
             val parts = fullCat.split("-")
-            selectedMainCategory = parts.firstOrNull() ?: "餐饮"
+            selectedMainCategory = parts.firstOrNull() ?: fallbackExpName
             selectedSubCategory = parts.getOrNull(1) ?: ""
             expr = if (editingTransaction != null) {
                 String.format(Locale.US, "%.2f", editingTransaction.amountCents / 100.0).trimEnd('0').trimEnd('.')
@@ -288,6 +300,20 @@ fun ICostCalculatorSheet(
             isSubmitting = false
             inlineError = null
             showDiscardConfirm = false
+        }
+    }
+
+    // 当用户在「分类管理」二级页中重命名或删除了当前选中的分类时，返回计算器后自动修正选中项
+    LaunchedEffect(expenseCategories, incomeCategories, txType) {
+        if (txType == TransactionType.EXPENSE || txType == TransactionType.INCOME) {
+            val activeList = if (txType == TransactionType.EXPENSE) expenseCategories else incomeCategories
+            val matchedMain = activeList.firstOrNull { it.name == selectedMainCategory }
+            if (matchedMain == null) {
+                selectedMainCategory = activeList.firstOrNull()?.name ?: "餐饮"
+                selectedSubCategory = ""
+            } else if (selectedSubCategory.isNotBlank() && matchedMain.subCategories.none { it.name == selectedSubCategory }) {
+                selectedSubCategory = ""
+            }
         }
     }
 
@@ -562,9 +588,10 @@ fun ICostCalculatorSheet(
 
     // 新记一笔且已输入金额时，关闭前确认，避免误触丢失（X、返回键、下拉、点遮罩都会拦截）
     val hasUnsavedInput = !isEditing && !isSubmitting && expr.isNotEmpty()
+    val sheetVisible = visible && !suspendedBySubpage
     ICostSmoothBottomSheet(
         onDismissRequest = onDismiss,
-        visible = visible,
+        visible = sheetVisible,
         keepWarm = true,
         containerColor = ICostBgGray,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
@@ -582,7 +609,7 @@ fun ICostCalculatorSheet(
         // 晚于抽屉自身注册，优先拦截系统返回键
         // 只在面板可见时注册：BackHandler 按注册先后决定优先级，常驻预热的面板若一直注册，
         // 会被之后打开的全屏页（钱包详情、日历）抢先处理返回键
-        if (visible) {
+        if (sheetVisible) {
             BackHandler(enabled = hasUnsavedInput) { showDiscardConfirm = true }
         }
 
@@ -739,12 +766,13 @@ fun ICostCalculatorSheet(
             ) { currentMode ->
                 if (currentMode == TransactionType.EXPENSE || currentMode == TransactionType.INCOME) {
                     val categories = if (currentMode == TransactionType.EXPENSE) {
-                        CategoryCatalog.expenseCategories
+                        expenseCategories
                     } else {
-                        CategoryCatalog.incomeCategories
+                        incomeCategories
                     }
                     val activeColor = if (currentMode == TransactionType.EXPENSE) ICostCoralRed else ICostGreenIncome
-                    val rows = remember(categories) { categories.chunked(5) }
+                    val gridCells: List<CategoryDef?> = remember(categories) { categories + listOf(null) }
+                    val rows = remember(gridCells) { gridCells.chunked(5) }
                     val categoryScrollState = rememberScrollState()
 
                     Column(
@@ -760,7 +788,8 @@ fun ICostCalculatorSheet(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                        rowItems.forEach { cat ->
+                                    rowItems.forEach { cat ->
+                                        if (cat != null) {
                                             val isSelected = selectedMainCategory == cat.name
                                             val circleBg = if (isSelected) activeColor else Color(0xFFECECEE)
                                             Column(
@@ -817,44 +846,86 @@ fun ICostCalculatorSheet(
                                                     maxLines = 1
                                                 )
                                             }
-                                        }
-                                        repeat(5 - rowItems.size) {
-                                            Spacer(modifier = Modifier.weight(1f))
-                                        }
-                                    }
-
-                                    // 1:1 展开当前选中主分类的 5 列浅灰圆角二级分类盒（高响应临界阻尼弹簧过渡）
-                                    val expandedCat = rowItems.firstOrNull {
-                                        it.name == selectedMainCategory && it.subCategories.isNotEmpty()
-                                    }
-                                    AnimatedVisibility(
-                                        visible = expandedCat != null,
-                                        enter = expandVertically(
-                                            animationSpec = spring(dampingRatio = 0.94f, stiffness = 620f)
-                                        ) + fadeIn(tween(140)),
-                                        exit = shrinkVertically(
-                                            animationSpec = spring(dampingRatio = 0.96f, stiffness = 680f)
-                                        ) + fadeOut(tween(110))
-                                    ) {
-                                        if (expandedCat != null) {
-                                            Column {
-                                                Spacer(modifier = Modifier.height(5.dp))
-                                                Surface(
-                                                    shape = RoundedCornerShape(16.dp),
-                                                    color = Color(0xFFECECEE),
-                                                    modifier = Modifier.fillMaxWidth()
+                                        } else {
+                                            // 一级分类网格末尾「管理」快捷入口
+                                            Column(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .iCostPressScale(pressedScale = 0.88f) {
+                                                        onOpenCategoryManagement(currentMode == TransactionType.EXPENSE)
+                                                    },
+                                                horizontalAlignment = Alignment.CenterHorizontally
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier.size(48.dp),
+                                                    contentAlignment = Alignment.Center
                                                 ) {
-                                                    val subRows = expandedCat.subCategories.chunked(5)
-                                                    Column(
-                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(44.dp)
+                                                            .clip(CircleShape)
+                                                            .background(Color(0xFFECECEE)),
+                                                        contentAlignment = Alignment.Center
                                                     ) {
-                                                        subRows.forEach { subRow ->
-                                                            Row(
-                                                                modifier = Modifier.fillMaxWidth(),
-                                                                horizontalArrangement = Arrangement.SpaceBetween
-                                                            ) {
-                                                                subRow.forEach { sub ->
+                                                        ICostAssetImage(
+                                                            assetFile = "setting_category.webp",
+                                                            tint = ICostSlateIcon,
+                                                            modifier = Modifier.size(22.dp)
+                                                        )
+                                                    }
+                                                }
+                                                Spacer(modifier = Modifier.height(3.dp))
+                                                Text(
+                                                    text = "管理",
+                                                    fontSize = 12.sp,
+                                                    color = ICostTextSecondary,
+                                                    fontWeight = FontWeight.Medium,
+                                                    maxLines = 1
+                                                )
+                                            }
+                                        }
+                                    }
+                                    repeat(5 - rowItems.size) {
+                                        Spacer(modifier = Modifier.weight(1f))
+                                    }
+                                }
+
+                                // 1:1 展开当前选中主分类的 5 列浅灰圆角二级分类盒（高响应临界阻尼弹簧过渡）
+                                val expandedCat = rowItems.filterNotNull().firstOrNull {
+                                    it.name == selectedMainCategory && it.subCategories.isNotEmpty()
+                                }
+                                AnimatedVisibility(
+                                    visible = expandedCat != null,
+                                    enter = expandVertically(
+                                        animationSpec = spring(dampingRatio = 0.94f, stiffness = 620f)
+                                    ) + fadeIn(tween(140)),
+                                    exit = shrinkVertically(
+                                        animationSpec = spring(dampingRatio = 0.96f, stiffness = 680f)
+                                    ) + fadeOut(tween(110))
+                                ) {
+                                    if (expandedCat != null) {
+                                        Column {
+                                            Spacer(modifier = Modifier.height(5.dp))
+                                            Surface(
+                                                shape = RoundedCornerShape(16.dp),
+                                                color = Color(0xFFECECEE),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                val subCells: List<SubCategoryDef?> = remember(expandedCat.subCategories) {
+                                                    expandedCat.subCategories + listOf(null)
+                                                }
+                                                val subRows = remember(subCells) { subCells.chunked(5) }
+                                                Column(
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    subRows.forEach { subRow ->
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = Arrangement.SpaceBetween
+                                                        ) {
+                                                            subRow.forEach { sub ->
+                                                                if (sub != null) {
                                                                     val subSelected = selectedSubCategory == sub.name
                                                                     Column(
                                                                         modifier = Modifier
@@ -886,9 +957,43 @@ fun ICostCalculatorSheet(
                                                                             maxLines = 1
                                                                         )
                                                                     }
+                                                                } else {
+                                                                    // 展开二级分类盒末尾「+ 新建」快捷胶囊
+                                                                    Column(
+                                                                        modifier = Modifier
+                                                                            .weight(1f)
+                                                                            .iCostPressScale(pressedScale = 0.88f) {
+                                                                                quickAddSubParent = (currentMode == TransactionType.EXPENSE) to expandedCat
+                                                                            },
+                                                                        horizontalAlignment = Alignment.CenterHorizontally
+                                                                    ) {
+                                                                        Box(
+                                                                            modifier = Modifier
+                                                                                .size(30.dp)
+                                                                                .clip(CircleShape)
+                                                                                .background(Color(0xFFE0E0E4)),
+                                                                            contentAlignment = Alignment.Center
+                                                                        ) {
+                                                                            Icon(
+                                                                                imageVector = Icons.Default.Add,
+                                                                                contentDescription = "新建二级分类",
+                                                                                tint = ICostSlateIcon,
+                                                                                modifier = Modifier.size(16.dp)
+                                                                            )
+                                                                        }
+                                                                        Spacer(modifier = Modifier.height(1.dp))
+                                                                        Text(
+                                                                            text = "+ 新建",
+                                                                            fontSize = 11.sp,
+                                                                            color = ICostTextSecondary,
+                                                                            fontWeight = FontWeight.Medium,
+                                                                            maxLines = 1
+                                                                        )
+                                                                    }
                                                                 }
-                                                                repeat(5 - subRow.size) {
-                                                                    Spacer(modifier = Modifier.weight(1f))
+                                                            }
+                                                            repeat(5 - subRow.size) {
+                                                                Spacer(modifier = Modifier.weight(1f))
                                                             }
                                                         }
                                                     }
@@ -1565,6 +1670,31 @@ fun ICostCalculatorSheet(
             },
             confirmButton = {
                 TextButton(onClick = { showTagDialog = false }) { Text("确定") }
+            }
+        )
+    }
+
+    quickAddSubParent?.let { (isExp, parentCat) ->
+        CategoryEditorBottomSheet(
+            isExpense = isExp,
+            isSubCategory = true,
+            parentName = parentCat.name,
+            existingName = null,
+            initialIconAsset = parentCat.assetFile,
+            siblingNames = parentCat.subCategories.map { it.name },
+            onDismiss = { quickAddSubParent = null },
+            onSave = { newSubName, newAsset, requestDismiss ->
+                val res = CategoryCatalog.addSubCategory(
+                    isExpense = isExp,
+                    parentName = parentCat.name,
+                    subName = newSubName,
+                    assetFile = newAsset
+                )
+                if (res.isSuccess) {
+                    selectedMainCategory = parentCat.name
+                    selectedSubCategory = newSubName
+                    requestDismiss()
+                }
             }
         )
     }

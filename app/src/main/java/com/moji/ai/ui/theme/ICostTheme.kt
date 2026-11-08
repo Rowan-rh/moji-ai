@@ -51,6 +51,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -1165,6 +1166,11 @@ fun WalletBrandAvatar(wallet: WalletEntity, size: Dp = 40.dp) {
 /**
  * 解析交易分类对应的 iCost 原生线性图标文件名（支持二级分类如 "餐饮-零食"）
  */
+fun resolveCategoryIconAsset(
+    category: String,
+    type: TransactionType = TransactionType.EXPENSE
+): String = resolveCategoryAssetFile(category, type)
+
 fun resolveCategoryAssetFile(
     category: String,
     type: TransactionType = TransactionType.EXPENSE
@@ -1178,24 +1184,42 @@ fun resolveCategoryAssetFile(
     val mainPart = parts.firstOrNull() ?: category
     val subPart = parts.getOrNull(1)
 
-    val allCats = CategoryCatalog.expenseCategories + CategoryCatalog.incomeCategories
-
-    // 优先精确匹配二级分类图标（如 零食 -> sub_snacks.webp）
-    if (!subPart.isNullOrBlank()) {
-        allCats.forEach { cat ->
-            cat.subCategories.firstOrNull { it.name == subPart }?.let { return it.assetFile }
-        }
+    val primaryList = if (type == TransactionType.INCOME) {
+        CategoryCatalog.incomeCategories
+    } else {
+        CategoryCatalog.expenseCategories
+    }
+    val secondaryList = if (type == TransactionType.INCOME) {
+        CategoryCatalog.expenseCategories
+    } else {
+        CategoryCatalog.incomeCategories
     }
 
-    // 再匹配整个名称是否直接命中二级分类或一级分类
-    allCats.forEach { cat ->
-        if (cat.name == category || cat.name == mainPart) {
-            return cat.assetFile
+    fun matchFromList(cats: List<com.moji.ai.data.model.CategoryDef>): String? {
+        if (!subPart.isNullOrBlank()) {
+            // 1. 优先精确匹配「主分类名 + 子分类名」
+            cats.firstOrNull { it.name == mainPart }
+                ?.subCategories
+                ?.firstOrNull { it.name == subPart }
+                ?.let { return it.assetFile }
+            // 2. 次优匹配任意一级分类下的同名二级分类
+            cats.forEach { cat ->
+                cat.subCategories.firstOrNull { it.name == subPart }?.let { return it.assetFile }
+            }
         }
-        cat.subCategories.firstOrNull { it.name == category || it.name == mainPart }?.let {
-            return it.assetFile
+        // 3. 精确匹配一级分类名
+        cats.firstOrNull { it.name == category || it.name == mainPart }?.let { return it.assetFile }
+        // 4. 精确匹配二级分类名
+        cats.forEach { cat ->
+            cat.subCategories.firstOrNull { it.name == category || it.name == mainPart }?.let {
+                return it.assetFile
+            }
         }
+        return null
     }
+
+    matchFromList(primaryList)?.let { return it }
+    matchFromList(secondaryList)?.let { return it }
 
     // 语义模糊兜底
     return when {
@@ -1272,7 +1296,7 @@ fun resolveTransactionBadgeColor(type: TransactionType): Color = when (type) {
 }
 
 /**
- * 1:1 iCost 彩色实心圆 + 纯白线性分类图标徽章
+ * 1:1 iCost 彩色实心圆 + 纯白线性分类图标徽章（订阅 CategoryCatalog.versionFlow，改图标后全端实时重组）
  */
 @Composable
 fun ICostCategoryBadge(
@@ -1282,7 +1306,10 @@ fun ICostCategoryBadge(
     badgeColor: Color = resolveTransactionBadgeColor(type),
     iconRatio: Float = 0.56f
 ) {
-    val assetFile = resolveCategoryAssetFile(category, type)
+    val catalogVersion by CategoryCatalog.versionFlow.collectAsState()
+    val assetFile = remember(category, type, catalogVersion) {
+        resolveCategoryAssetFile(category, type)
+    }
     Box(
         modifier = Modifier
             .size(size)

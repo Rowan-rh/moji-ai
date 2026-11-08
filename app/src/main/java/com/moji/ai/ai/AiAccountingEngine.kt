@@ -2,6 +2,8 @@ package com.moji.ai.ai
 
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.CategoryCatalog
+import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
 import kotlinx.coroutines.Dispatchers
@@ -520,12 +522,27 @@ class AiAccountingEngine(
         val memoryDesc = merchantMemoryManager?.memoriesFlow?.value?.take(25)?.joinToString("\n") { m ->
             "- 商户包含\"${m.merchantKeyword}\" -> 优先分类=\"${m.category}\", 常用钱包ID=${m.preferredWalletId ?: "自动"}"
         }.orEmpty().ifBlank { "暂无历史商户偏好" }
+        fun List<CategoryDef>.formatPromptCatalog(): String = joinToString("；") { cat ->
+            if (cat.subCategories.isEmpty()) {
+                cat.name
+            } else {
+                "${cat.name}(${cat.subCategories.joinToString("/") { "${cat.name}-${it.name}" }})"
+            }
+        }
+        val expenseCategoryDesc = CategoryCatalog.expenseCategories.formatPromptCatalog()
+        val incomeCategoryDesc = CategoryCatalog.incomeCategories.formatPromptCatalog()
 
         return """
 你是一个专业的安卓全自动记账 AI 引擎。请分析用户手机通知栏、无障碍节点或截屏 OCR 抓取到的原始文本，判断是否为真实的已发生资金变动事件，并严格输出 JSON 对象。
 
 【当前用户的钱包列表】：
 $walletDesc
+
+【当前可用的支出分类目录（优先输出“一级-二级”或一级分类名）】：
+$expenseCategoryDesc
+
+【当前可用的收入分类目录】：
+$incomeCategoryDesc
 
 【支付账号匹配规则】：
 - 如果是银行卡（储蓄卡/信用卡），优先根据后 4 位卡号尾号（如 3354、8848）匹配对应钱包 ID；

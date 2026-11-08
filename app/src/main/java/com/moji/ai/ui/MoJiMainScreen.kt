@@ -145,6 +145,7 @@ import com.moji.ai.update.UpdateCheckState
 import com.moji.ai.ui.components.ICostCalculatorSheet
 import com.moji.ai.ui.components.MonthlyCalendarSheet
 import com.moji.ai.ui.components.TransactionDetailSheet
+import com.moji.ai.ui.screens.CategoryManagementScreen
 import com.moji.ai.ui.screens.ICostAssetsScreen
 import com.moji.ai.ui.screens.ICostLedgerHomeScreen
 import com.moji.ai.ui.screens.ICostStatisticsScreen
@@ -201,6 +202,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val appUpdateConfig by viewModel.appUpdateConfig.collectAsState()
     val appUpdateState by viewModel.appUpdateState.collectAsState()
     val pendingOpenTxId by viewModel.pendingOpenTransactionId.collectAsState()
+    val expenseCategories by viewModel.expenseCategories.collectAsState()
+    val incomeCategories by viewModel.incomeCategories.collectAsState()
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) } // 0: 账本, 1: 资产, 2: 统计
     // 每个 Tab 独立保存 rememberSaveable 状态（搜索词、折叠状态、统计周期等），切换 Tab 回来不丢失
@@ -234,17 +237,20 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var calcInitialSourceWalletId by remember { mutableStateOf<Long?>(null) }
     var calcInitialTargetWalletId by remember { mutableStateOf<Long?>(null) }
 
-    // 全屏二级页面状态：账单详情、收支日历、设置页、智能记账页、资产子页面
+    // 全屏二级页面状态：账单详情、收支日历、设置页、智能记账页、分类管理页、资产子页面
     var inspectingTx by remember { mutableStateOf<TransactionEntity?>(null) }
     var calendarMonthTxs by remember { mutableStateOf<List<TransactionEntity>?>(null) }
     var showSettingsPage by remember { mutableStateOf(false) }
     var showSmartBookkeepingPage by remember { mutableStateOf(false) }
+    var showCategoryManagementPage by remember { mutableStateOf(false) }
+    var categoryManagementInitialExpense by remember { mutableStateOf(true) }
     var isAssetSubpageOpen by remember { mutableStateOf(false) }
 
     val hasFullScreenOverlay = inspectingTx != null ||
         calendarMonthTxs != null ||
         showSettingsPage ||
         showSmartBookkeepingPage ||
+        showCategoryManagementPage ||
         isAssetSubpageOpen
 
     // AI 沙盒与模型配置弹窗状态
@@ -280,6 +286,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             selectedTab = 0
             showSettingsPage = false
             showSmartBookkeepingPage = false
+            showCategoryManagementPage = false
             calendarMonthTxs = null
             showCalculatorSheet = false
             editingTx = null
@@ -578,6 +585,62 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 },
                 onOpenAppUpdate = {
                     showAppUpdateSheet = true
+                },
+                expenseCategoryCount = expenseCategories.size,
+                incomeCategoryCount = incomeCategories.size,
+                onOpenCategoryManagement = {
+                    categoryManagementInitialExpense = true
+                    showCategoryManagementPage = true
+                }
+            )
+        }
+
+        // 全屏「分类管理」页面（对齐 setting_category.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showCategoryManagementPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            CategoryManagementScreen(
+                expenseCategories = expenseCategories,
+                incomeCategories = incomeCategories,
+                initialIsExpense = categoryManagementInitialExpense,
+                onBack = { showCategoryManagementPage = false },
+                onAddPrimaryCategory = { isExp, name, asset, onDone ->
+                    viewModel.addPrimaryCategory(isExp, name, asset, onDone)
+                },
+                onUpdatePrimaryCategory = { isExp, oldName, newName, asset, onDone ->
+                    viewModel.updatePrimaryCategory(isExp, oldName, newName, asset, onDone)
+                },
+                onMovePrimaryCategory = { isExp, idx, delta ->
+                    viewModel.movePrimaryCategory(isExp, idx, delta)
+                },
+                onDeletePrimaryCategory = { isExp, name, migrateTo, onDone ->
+                    viewModel.deletePrimaryCategoryAndMigrate(isExp, name, migrateTo, onDone)
+                },
+                onAddSubCategory = { isExp, parent, sub, asset, onDone ->
+                    viewModel.addSubCategory(isExp, parent, sub, asset, onDone)
+                },
+                onUpdateSubCategory = { isExp, parent, oldSub, newSub, asset, onDone ->
+                    viewModel.updateSubCategory(isExp, parent, oldSub, newSub, asset, onDone)
+                },
+                onMoveSubCategory = { isExp, parent, idx, delta ->
+                    viewModel.moveSubCategory(isExp, parent, idx, delta)
+                },
+                onDeleteSubCategory = { isExp, parent, sub, migrateTo, onDone ->
+                    viewModel.deleteSubCategoryAndMigrate(isExp, parent, sub, migrateTo, onDone)
+                },
+                onRestoreDefaults = { isExp, mergeOnly ->
+                    viewModel.restoreDefaultCategories(isExp, mergeOnly)
+                },
+                onCountCategoryTransactions = { cat, includeSub, isExp ->
+                    viewModel.countTransactionsByCategory(cat, includeSub, isExp)
                 }
             )
         }
@@ -621,6 +684,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 ledgers = ledgers,
                 onSelectLedger = { viewModel.selectLedger(it) },
                 visible = showCalculatorSheet,
+                suspendedBySubpage = showCategoryManagementPage,
                 editingTransaction = editingTx,
                 initialType = calcInitialType,
                 initialSourceWalletId = calcInitialSourceWalletId,
@@ -636,7 +700,11 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                         editingTx = null
                     }
                 },
-                onOpenAiSandbox = { showAiSandboxSheet = true }
+                onOpenAiSandbox = { showAiSandboxSheet = true },
+                onOpenCategoryManagement = { isExpense ->
+                    categoryManagementInitialExpense = isExpense
+                    showCategoryManagementPage = true
+                }
             )
         }
         // AI 静默识账沙盒测试面板
@@ -1055,7 +1123,10 @@ private fun ICostSettingsFullScreen(
     onOpenCsvExport: () -> Unit = {},
     onOpenWebDavSync: () -> Unit = {},
     onOpenBatchReimburse: () -> Unit = {},
-    onOpenAppUpdate: () -> Unit = {}
+    onOpenAppUpdate: () -> Unit = {},
+    expenseCategoryCount: Int = 24,
+    incomeCategoryCount: Int = 10,
+    onOpenCategoryManagement: () -> Unit = {}
 ) {
     BackHandler(onBack = onBack)
 
@@ -1186,7 +1257,12 @@ private fun ICostSettingsFullScreen(
                 SettingsSectionTitle("更多功能")
                 SettingsGroupCard(
                     rows = listOf(
-                        SettingRowDef("setting_category.webp", "分类管理"),
+                        SettingRowDef(
+                            "setting_category.webp",
+                            "分类管理",
+                            "${expenseCategoryCount + incomeCategoryCount} 个分类",
+                            onClick = onOpenCategoryManagement
+                        ),
                         SettingRowDef("setting_tag.webp", "标签管理"),
                         SettingRowDef("setting_template.webp", "记账模板"),
                         SettingRowDef("setting_currency.webp", "货币和汇率"),

@@ -2,6 +2,7 @@ package com.moji.ai.ai
 
 import android.content.Context
 import com.moji.ai.data.local.TransactionEntity
+import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.TransactionType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -116,6 +117,39 @@ class SmartRuleEngine(context: Context) {
         val updated = _rules.value.filterNot { it.id == ruleId }
         _rules.value = updated
         saveInternal(updated)
+    }
+
+    /**
+     * 当分类被重命名或删除迁移时，同步级联更新条件规则中的 targetCategory
+     */
+    fun migrateCategoryCascade(
+        oldCategory: String,
+        newCategory: String,
+        includeSubPrefix: Boolean,
+        preserveSubSuffix: Boolean,
+        isExpense: Boolean? = null
+    ) {
+        var changed = false
+        val updated = _rules.value.map { rule ->
+            if (isExpense == false && rule.onlyExpense) return@map rule
+            val mapped = CategoryCatalog.remapCascadedCategory(
+                current = rule.targetCategory,
+                oldCategory = oldCategory,
+                newCategory = newCategory,
+                includeSubPrefix = includeSubPrefix,
+                preserveSubSuffix = preserveSubSuffix
+            )
+            if (mapped != null) {
+                changed = true
+                rule.copy(targetCategory = mapped)
+            } else {
+                rule
+            }
+        }
+        if (changed) {
+            _rules.value = updated
+            saveInternal(updated)
+        }
     }
 
     /**

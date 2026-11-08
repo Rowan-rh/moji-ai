@@ -7,6 +7,7 @@ import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
 import kotlin.math.roundToLong
@@ -561,6 +562,78 @@ class LedgerRepository(private val db: AppDatabase) {
     suspend fun saveRecurringRule(rule: RecurringRuleEntity): Long = db.recurringRuleDao().insertRule(rule)
 
     suspend fun deleteRecurringRule(rule: RecurringRuleEntity) = db.recurringRuleDao().deleteRule(rule)
+
+    private fun TransactionType.matchesDirectionFilter(isExpense: Boolean?): Boolean = when (isExpense) {
+        true -> this == TransactionType.EXPENSE
+        false -> this == TransactionType.INCOME
+        null -> true
+    }
+
+    private fun TransactionEntity.isSystemBalanceAnchor(): Boolean =
+        captureSource == "BALANCE_ANCHOR" || category == CategoryCatalog.SYSTEM_BALANCE_ANCHOR_CATEGORY
+
+    /**
+     * 统计指定分类（含可选二级分类前缀）关联的未删除历史账单数量（排除系统平账流水）
+     */
+    suspend fun countTransactionsByCategory(
+        category: String,
+        includeSubPrefix: Boolean,
+        isExpense: Boolean? = null
+    ): Int {
+        return db.transactionDao().getAllTransactions().count { tx ->
+            !tx.isSystemBalanceAnchor() &&
+                tx.type.matchesDirectionFilter(isExpense) &&
+                CategoryCatalog.matchesCategoryScope(tx.category, category, includeSubPrefix)
+        }
+    }
+
+    /**
+     * 在 Room 事务中原子级联更新历史账单与周期性规则的分类字段，并刷新 updatedAtMillis 与 syncDirty
+     * @return 实际受影响更新的历史账单笔数
+     */
+    suspend fun migrateCategoryCascade(
+        oldCategory: String,
+        newCategory: String,
+        includeSubPrefix: Boolean,
+        preserveSubSuffix: Boolean,
+        isExpense: Boolean? = null
+    ): Int = db.withTransaction {
+        val now = System.currentTimeMillis()
+        val txDao = db.transactionDao()
+        val ruleDao = db.recurringRuleDao()
+        var updatedTxCount = 0
+
+        for (tx in txDao.getAllTransactions()) {
+            if (tx.isSystemBalanceAnchor()) continue
+            if (!tx.type.matchesDirectionFilter(isExpense)) continue
+            val mapped = CategoryCatalog.remapCascadedCategory(
+                current = tx.category,
+                oldCategory = oldCategory,
+                newCategory = newCategory,
+                includeSubPrefix = includeSubPrefix,
+                preserveSubSuffix = preserveSubSuffix
+            )
+            if (mapped != null) {
+                txDao.updateTransactionCategoryById(tx.id, mapped, now)
+                updatedTxCount++
+            }
+        }
+
+        for (rule in ruleDao.getAllRules()) {
+            if (!rule.type.matchesDirectionFilter(isExpense)) continue
+            val mapped = CategoryCatalog.remapCascadedCategory(
+                current = rule.category,
+                oldCategory = oldCategory,
+                newCategory = newCategory,
+                includeSubPrefix = includeSubPrefix,
+                preserveSubSuffix = preserveSubSuffix
+            )
+            if (mapped != null) {
+                ruleDao.updateRuleCategoryById(rule.id, mapped, now)
+            }
+        }
+        updatedTxCount
+    }
 
     suspend fun processDueRecurringRules(nowMillis: Long = System.currentTimeMillis()): List<TransactionEntity> {
         val dueRules = db.recurringRuleDao().getDueRules(nowMillis)
