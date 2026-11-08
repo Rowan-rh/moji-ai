@@ -86,6 +86,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
@@ -950,6 +951,59 @@ fun ICostAvatarButton(
                 style = Stroke(width = w * 0.032f, cap = StrokeCap.Round)
             )
         }
+    }
+}
+
+/**
+ * 默记（MoJi）「墨册朱签」品牌应用图标徽章（1:1 矢量渲染 Adaptive Icon 可视区）
+ */
+@Composable
+fun MoJiBrandIconBadge(
+    onClick: (() -> Unit)? = null,
+    size: Dp = 48.dp,
+    modifier: Modifier = Modifier
+) {
+    val cornerRadius = size * 0.24f
+    val shape = RoundedCornerShape(cornerRadius)
+    val pressModifier = if (onClick != null) {
+        Modifier.iCostPressScale(pressedScale = 0.92f, onClick = onClick)
+    } else {
+        Modifier
+    }
+    Box(
+        modifier = modifier
+            .size(size)
+            .then(pressModifier)
+            .shadow(
+                elevation = 2.dp,
+                shape = shape,
+                ambientColor = Color.Black.copy(alpha = 0.06f),
+                spotColor = Color.Black.copy(alpha = 0.10f)
+            )
+            .clip(shape)
+            .border(0.6.dp, Color.Black.copy(alpha = 0.07f), shape),
+        contentAlignment = Alignment.Center
+    ) {
+        Image(
+            painter = painterResource(id = R.drawable.ic_launcher_background),
+            contentDescription = null,
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = 1.5f
+                    scaleY = 1.5f
+                }
+        )
+        Image(
+            painter = painterResource(id = R.drawable.ic_launcher_foreground),
+            contentDescription = "默记图标",
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    scaleX = 1.5f
+                    scaleY = 1.5f
+                }
+        )
     }
 }
 
