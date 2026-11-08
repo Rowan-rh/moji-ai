@@ -3,6 +3,7 @@ package com.moji.ai.data.local
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.WalletType
@@ -122,7 +123,10 @@ data class TransactionEntity(
     val deletedAtMillis: Long? = null,
     val syncRevision: Long = 1L,
     val syncDirty: Boolean = true
-)
+) {
+    fun isSystemBalanceAnchor(): Boolean =
+        captureSource == "BALANCE_ANCHOR" || category == CategoryCatalog.SYSTEM_BALANCE_ANCHOR_CATEGORY
+}
 
 /**
  * 账单采集原始证据与截图归档表

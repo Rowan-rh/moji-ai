@@ -577,9 +577,6 @@ class LedgerRepository(private val db: AppDatabase) {
         null -> true
     }
 
-    private fun TransactionEntity.isSystemBalanceAnchor(): Boolean =
-        captureSource == "BALANCE_ANCHOR" || category == CategoryCatalog.SYSTEM_BALANCE_ANCHOR_CATEGORY
-
     /**
      * 统计指定分类（含可选二级分类前缀）关联的未删除历史账单数量（排除系统平账流水）
      */

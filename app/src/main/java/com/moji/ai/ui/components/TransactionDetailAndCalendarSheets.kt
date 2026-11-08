@@ -17,6 +17,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -76,7 +78,9 @@ import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.ui.screens.ICostColorTagChip
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
 import com.moji.ai.ui.theme.ICostAssetImage
@@ -382,8 +386,45 @@ fun TransactionDetailSheet(
                 if (tx.reimbursable) {
                     DetailKeyValueRow("报销状态", if (tx.reimbursed) "已报销" else "待报销", singleLine = true)
                 }
-                if (tx.tags.isNotBlank()) {
-                    DetailKeyValueRow("标签", "#${tx.tags}", singleLine = true)
+                val catalogTags by TagCatalog.tagsFlow.collectAsState()
+                val detailTags = remember(tx.tags) { TagCatalog.parseTags(tx.tags) }
+                if (detailTags.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "标签",
+                            fontSize = 14.sp,
+                            color = ICostTextSecondary,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        @OptIn(ExperimentalLayoutApi::class)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            detailTags.forEach { tagName ->
+                                val colorHex = remember(tagName, catalogTags) {
+                                    TagCatalog.resolveTagColorHex(tagName)
+                                }
+                                ICostColorTagChip(
+                                    tagName = tagName,
+                                    colorHex = colorHex,
+                                    fontSize = 12.sp,
+                                    horizontalPadding = 8.dp,
+                                    verticalPadding = 3.dp,
+                                    showDot = true
+                                )
+                            }
+                        }
+                    }
                 }
                 val merchant = tx.merchant.trim()
                 val cleanedNote = tx.note

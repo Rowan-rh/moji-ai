@@ -18,6 +18,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -58,6 +60,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -82,6 +85,7 @@ import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.ui.QuickBookkeepingTemplate
 import com.moji.ai.ui.components.ICostConfirmDialog
@@ -1293,7 +1297,9 @@ private fun ICostLedgerRow(
     val isRefundOffset = tx.type == TransactionType.REFUND_OFFSET
     val netExpenseCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
     val hasDiscountBreakdown = (tx.type == TransactionType.EXPENSE || isRefundOffset) && tx.discountCents > 0L
-    val hasTagsRow = hasDiscountBreakdown || tx.duplicateSuspected || isRefundedExpense || isRefundOffset || tx.reimbursable
+    val catalogTags by TagCatalog.tagsFlow.collectAsState()
+    val userTags = remember(tx.tags) { TagCatalog.parseTags(tx.tags) }
+    val hasTagsRow = hasDiscountBreakdown || tx.duplicateSuspected || isRefundedExpense || isRefundOffset || tx.reimbursable || userTags.isNotEmpty()
 
     Row(
         modifier = Modifier
@@ -1411,17 +1417,17 @@ private fun ICostLedgerRow(
 
             if (hasTagsRow) {
                 Spacer(modifier = Modifier.height(5.dp))
-                Row(
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     if (hasDiscountBreakdown) {
                         val origCents = tx.amountCents + tx.discountCents
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFFFFF4EC),
-                            modifier = Modifier.weight(1f, fill = false)
+                            color = Color(0xFFFFF4EC)
                         ) {
                             Text(
                                 text = "原价${formatMoneyCents(origCents)} · 优惠${formatMoneyCents(tx.discountCents)}",
@@ -1480,6 +1486,18 @@ private fun ICostLedgerRow(
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
+                    }
+                    userTags.forEach { tagName ->
+                        val colorHex = remember(tagName, catalogTags) {
+                            TagCatalog.resolveTagColorHex(tagName)
+                        }
+                        ICostColorTagChip(
+                            tagName = tagName,
+                            colorHex = colorHex,
+                            fontSize = 10.sp,
+                            horizontalPadding = 6.dp,
+                            verticalPadding = 2.dp
+                        )
                     }
                 }
             }

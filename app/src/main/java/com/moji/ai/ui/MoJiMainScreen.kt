@@ -149,6 +149,7 @@ import com.moji.ai.ui.screens.CategoryManagementScreen
 import com.moji.ai.ui.screens.ICostAssetsScreen
 import com.moji.ai.ui.screens.ICostLedgerHomeScreen
 import com.moji.ai.ui.screens.ICostStatisticsScreen
+import com.moji.ai.ui.screens.TagManagementScreen
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
 import com.moji.ai.ui.theme.ICostAssetImage
@@ -204,6 +205,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val pendingOpenTxId by viewModel.pendingOpenTransactionId.collectAsState()
     val expenseCategories by viewModel.expenseCategories.collectAsState()
     val incomeCategories by viewModel.incomeCategories.collectAsState()
+    val tags by viewModel.tags.collectAsState()
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) } // 0: 账本, 1: 资产, 2: 统计
     // 每个 Tab 独立保存 rememberSaveable 状态（搜索词、折叠状态、统计周期等），切换 Tab 回来不丢失
@@ -237,13 +239,14 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var calcInitialSourceWalletId by remember { mutableStateOf<Long?>(null) }
     var calcInitialTargetWalletId by remember { mutableStateOf<Long?>(null) }
 
-    // 全屏二级页面状态：账单详情、收支日历、设置页、智能记账页、分类管理页、资产子页面
+    // 全屏二级页面状态：账单详情、收支日历、设置页、智能记账页、分类管理页、标签管理页、资产子页面
     var inspectingTx by remember { mutableStateOf<TransactionEntity?>(null) }
     var calendarMonthTxs by remember { mutableStateOf<List<TransactionEntity>?>(null) }
     var showSettingsPage by remember { mutableStateOf(false) }
     var showSmartBookkeepingPage by remember { mutableStateOf(false) }
     var showCategoryManagementPage by remember { mutableStateOf(false) }
     var categoryManagementInitialExpense by remember { mutableStateOf(true) }
+    var showTagManagementPage by remember { mutableStateOf(false) }
     var isAssetSubpageOpen by remember { mutableStateOf(false) }
 
     val hasFullScreenOverlay = inspectingTx != null ||
@@ -251,6 +254,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         showSettingsPage ||
         showSmartBookkeepingPage ||
         showCategoryManagementPage ||
+        showTagManagementPage ||
         isAssetSubpageOpen
 
     // AI 沙盒与模型配置弹窗状态
@@ -287,6 +291,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             showSettingsPage = false
             showSmartBookkeepingPage = false
             showCategoryManagementPage = false
+            showTagManagementPage = false
             calendarMonthTxs = null
             showCalculatorSheet = false
             editingTx = null
@@ -444,7 +449,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     initialMonth = selectedMonth,
                     currentLedger = currentLedger,
                     hideAmounts = hideAssetAmounts,
-                    onOpenSettingsPage = { showSettingsPage = true }
+                    onOpenSettingsPage = { showSettingsPage = true },
+                    onSelectTransaction = { tx -> inspectingTx = tx }
             )
         }
 
@@ -506,48 +512,6 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             )
         }
 
-        // 全屏账单详情页面（05_detail_full.png）—— 丝滑侧滑推入转场
-        AnimatedVisibility(
-            visible = activeTx != null,
-            enter = slideInHorizontally(
-                initialOffsetX = { it },
-                animationSpec = tween(280, easing = FastOutSlowInEasing)
-            ) + fadeIn(tween(200)),
-            exit = slideOutHorizontally(
-                targetOffsetX = { it },
-                animationSpec = tween(240, easing = FastOutSlowInEasing)
-            ) + fadeOut(tween(180))
-        ) {
-            cachedInspectingTx?.let { detailTx ->
-                TransactionDetailSheet(
-                    tx = detailTx,
-                    wallets = wallets,
-                    onDismiss = { inspectingTx = null },
-                    onEdit = { toEdit ->
-                        editingTx = toEdit
-                        showCalculatorSheet = true
-                    },
-                    onRefund = { expId, yuan, recvId, note ->
-                        viewModel.refundExpense(expId, yuan, recvId, note)
-                    },
-                    onSettleReimburse = { expId, recvId ->
-                        viewModel.settleReimbursement(expId, recvId)
-                    },
-                    onDelete = { txId ->
-                        viewModel.deleteTransaction(txId)
-                        inspectingTx = null
-                    },
-                    onSaveAsTemplate = { tplTx ->
-                        viewModel.saveTemplateFromTransaction(tplTx)
-                    },
-                    onSplitTransaction = { expId, catA, yuanA, catB, noteB ->
-                        viewModel.splitExpenseTransaction(expId, catA, yuanA, catB, noteB)
-                    },
-                    onDuplicate = { tx -> viewModel.duplicateTransactionNow(tx) }
-                )
-            }
-        }
-
         // 全屏「设置」页面（09_settings_full.png）—— 丝滑侧滑推入转场
         AnimatedVisibility(
             visible = showSettingsPage,
@@ -591,6 +555,10 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onOpenCategoryManagement = {
                     categoryManagementInitialExpense = true
                     showCategoryManagementPage = true
+                },
+                tagCount = tags.size,
+                onOpenTagManagement = {
+                    showTagManagementPage = true
                 }
             )
         }
@@ -645,6 +613,50 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             )
         }
 
+        // 全屏「标签管理」页面（对齐 setting_tag.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showTagManagementPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            TagManagementScreen(
+                tags = tags,
+                transactions = transactions,
+                wallets = wallets,
+                onBack = { showTagManagementPage = false },
+                onAddTag = { name, colorHex, groupName, onDone ->
+                    viewModel.addTag(name, colorHex, groupName, onDone)
+                },
+                onUpdateTag = { oldName, newName, colorHex, groupName, onDone ->
+                    viewModel.updateTag(oldName, newName, colorHex, groupName, onDone)
+                },
+                onMoveTag = { index, delta ->
+                    viewModel.moveTag(index, delta)
+                },
+                onMergeTag = { sourceName, targetName, onDone ->
+                    viewModel.mergeTag(sourceName, targetName, onDone)
+                },
+                onDeleteTag = { tagName, cascadeRemoveFromHistory, replacementTagName, onDone ->
+                    viewModel.deleteTag(tagName, cascadeRemoveFromHistory, replacementTagName, onDone)
+                },
+                onRestoreDefaults = { mergeOnly ->
+                    viewModel.restoreDefaultTags(mergeOnly)
+                },
+                onCountTagTransactions = { tagName ->
+                    viewModel.countTransactionsByTag(tagName)
+                },
+                onInspectTransaction = { tx ->
+                    inspectingTx = tx
+                }
+            )
+        }
+
         // 全屏「智能记账」页面（09_smart_bookkeeping.png）—— 二级侧滑推入转场
         AnimatedVisibility(
             visible = showSmartBookkeepingPage,
@@ -676,6 +688,50 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             )
         }
 
+        // 全屏账单详情页面（05_detail_full.png）—— 位于二级页面之上，支持从标签管理/统计/日历/首页直接下钻查看
+        AnimatedVisibility(
+            visible = activeTx != null,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            cachedInspectingTx?.let { detailTx ->
+                TransactionDetailSheet(
+                    tx = detailTx,
+                    wallets = wallets,
+                    onDismiss = { inspectingTx = null },
+                    onEdit = { toEdit ->
+                        showCategoryManagementPage = false
+                        showTagManagementPage = false
+                        editingTx = toEdit
+                        showCalculatorSheet = true
+                    },
+                    onRefund = { expId, yuan, recvId, note ->
+                        viewModel.refundExpense(expId, yuan, recvId, note)
+                    },
+                    onSettleReimburse = { expId, recvId ->
+                        viewModel.settleReimbursement(expId, recvId)
+                    },
+                    onDelete = { txId ->
+                        viewModel.deleteTransaction(txId)
+                        inspectingTx = null
+                    },
+                    onSaveAsTemplate = { tplTx ->
+                        viewModel.saveTemplateFromTransaction(tplTx)
+                    },
+                    onSplitTransaction = { expId, catA, yuanA, catB, noteB ->
+                        viewModel.splitExpenseTransaction(expId, catA, yuanA, catB, noteB)
+                    },
+                    onDuplicate = { tx -> viewModel.duplicateTransactionNow(tx) }
+                )
+            }
+        }
+
         // 1:1 iCost 分类+计算器记账面板（04_add_record_sheet.png，后台常驻 keepWarm 预热，点击「+」0ms 首帧 120Hz 上滑）
         if (wallets.isNotEmpty()) {
             ICostCalculatorSheet(
@@ -684,7 +740,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 ledgers = ledgers,
                 onSelectLedger = { viewModel.selectLedger(it) },
                 visible = showCalculatorSheet,
-                suspendedBySubpage = showCategoryManagementPage,
+                suspendedBySubpage = showCategoryManagementPage || showTagManagementPage,
                 editingTransaction = editingTx,
                 initialType = calcInitialType,
                 initialSourceWalletId = calcInitialSourceWalletId,
@@ -704,6 +760,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onOpenCategoryManagement = { isExpense ->
                     categoryManagementInitialExpense = isExpense
                     showCategoryManagementPage = true
+                },
+                onOpenTagManagement = {
+                    showTagManagementPage = true
                 }
             )
         }
@@ -1126,7 +1185,9 @@ private fun ICostSettingsFullScreen(
     onOpenAppUpdate: () -> Unit = {},
     expenseCategoryCount: Int = 24,
     incomeCategoryCount: Int = 10,
-    onOpenCategoryManagement: () -> Unit = {}
+    onOpenCategoryManagement: () -> Unit = {},
+    tagCount: Int = 8,
+    onOpenTagManagement: () -> Unit = {}
 ) {
     BackHandler(onBack = onBack)
 
@@ -1263,7 +1324,12 @@ private fun ICostSettingsFullScreen(
                             "${expenseCategoryCount + incomeCategoryCount} 个分类",
                             onClick = onOpenCategoryManagement
                         ),
-                        SettingRowDef("setting_tag.webp", "标签管理"),
+                        SettingRowDef(
+                            "setting_tag.webp",
+                            "标签管理",
+                            "$tagCount 个标签",
+                            onClick = onOpenTagManagement
+                        ),
                         SettingRowDef("setting_template.webp", "记账模板"),
                         SettingRowDef("setting_currency.webp", "货币和汇率"),
                         SettingRowDef("setting_password.webp", "密码保护"),
