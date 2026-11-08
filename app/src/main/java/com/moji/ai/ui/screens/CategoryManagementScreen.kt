@@ -70,6 +70,7 @@ import androidx.compose.ui.unit.sp
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.SubCategoryDef
+import com.moji.ai.ui.components.ICostConfirmDialog
 import com.moji.ai.ui.theme.ICostAssetImage
 import com.moji.ai.ui.theme.ICostBgGray
 import com.moji.ai.ui.theme.ICostBlueAccent
@@ -103,9 +104,11 @@ private data class CategoryDeleteTarget(
     val isExpense: Boolean,
     val isSubCategory: Boolean,
     val parentName: String? = null,
-    val categoryName: String,
+    val categoryName: String
+) {
     val displayFullName: String
-)
+        get() = if (isSubCategory && !parentName.isNullOrBlank()) "$parentName-$categoryName" else categoryName
+}
 
 /**
  * 1:1 iCost 全屏「分类管理」二级页面（对齐 setting_category.webp）
@@ -346,6 +349,15 @@ fun CategoryManagementScreen(
                 key = { _, item -> "${isExpenseTab}_${item.name}" }
             ) { index, cat ->
                 val canDeletePrimary = activeCategories.size > 1
+                val openEditPrimary = {
+                    editorTarget = CategoryEditorTarget(
+                        isExpense = isExpenseTab,
+                        isSubCategory = false,
+                        parentName = null,
+                        existingName = cat.name,
+                        initialIconAsset = cat.assetFile
+                    )
+                }
                 Surface(
                     shape = RoundedCornerShape(20.dp),
                     color = ICostCardWhite,
@@ -366,15 +378,7 @@ fun CategoryManagementScreen(
                                     .size(40.dp)
                                     .clip(CircleShape)
                                     .background(activeAccentColor)
-                                    .clickable {
-                                        editorTarget = CategoryEditorTarget(
-                                            isExpense = isExpenseTab,
-                                            isSubCategory = false,
-                                            parentName = null,
-                                            existingName = cat.name,
-                                            initialIconAsset = cat.assetFile
-                                        )
-                                    },
+                                    .clickable(onClick = openEditPrimary),
                                 contentAlignment = Alignment.Center
                             ) {
                                 ICostAssetImage(
@@ -389,15 +393,7 @@ fun CategoryManagementScreen(
                             Column(
                                 modifier = Modifier
                                     .weight(1f)
-                                    .clickable {
-                                        editorTarget = CategoryEditorTarget(
-                                            isExpense = isExpenseTab,
-                                            isSubCategory = false,
-                                            parentName = null,
-                                            existingName = cat.name,
-                                            initialIconAsset = cat.assetFile
-                                        )
-                                    }
+                                    .clickable(onClick = openEditPrimary)
                             ) {
                                 Text(
                                     text = cat.name,
@@ -438,15 +434,7 @@ fun CategoryManagementScreen(
                                 contentDescription = "编辑${cat.name}",
                                 enabled = true,
                                 tint = ICostBlueAccent,
-                                onClick = {
-                                    editorTarget = CategoryEditorTarget(
-                                        isExpense = isExpenseTab,
-                                        isSubCategory = false,
-                                        parentName = null,
-                                        existingName = cat.name,
-                                        initialIconAsset = cat.assetFile
-                                    )
-                                }
+                                onClick = openEditPrimary
                             )
                             // 删除一级分类
                             CategorySmallIconBtn(
@@ -460,8 +448,7 @@ fun CategoryManagementScreen(
                                             isExpense = isExpenseTab,
                                             isSubCategory = false,
                                             parentName = null,
-                                            categoryName = cat.name,
-                                            displayFullName = cat.name
+                                            categoryName = cat.name
                                         )
                                     }
                                 }
@@ -677,8 +664,7 @@ fun CategoryManagementScreen(
                                 isExpense = isExpenseTab,
                                 isSubCategory = true,
                                 parentName = parentName,
-                                categoryName = subDef.name,
-                                displayFullName = "$parentName-${subDef.name}"
+                                categoryName = subDef.name
                             )
                         }
                     ) {
@@ -724,26 +710,26 @@ fun CategoryManagementScreen(
             target = target,
             siblingNames = siblingNames,
             onDismiss = { editorTarget = null },
-            onSave = { finalName, finalAsset ->
+            onSave = { finalName, finalAsset, requestDismiss ->
                 if (!target.isSubCategory) {
                     if (target.existingName == null) {
                         onAddPrimaryCategory(target.isExpense, finalName, finalAsset) { res ->
-                            if (res.isSuccess) editorTarget = null
+                            if (res.isSuccess) requestDismiss()
                         }
                     } else {
                         onUpdatePrimaryCategory(target.isExpense, target.existingName, finalName, finalAsset) { res ->
-                            if (res.isSuccess) editorTarget = null
+                            if (res.isSuccess) requestDismiss()
                         }
                     }
                 } else {
                     val pName = target.parentName ?: return@CategoryEditorBottomSheet
                     if (target.existingName == null) {
                         onAddSubCategory(target.isExpense, pName, finalName, finalAsset) { res ->
-                            if (res.isSuccess) editorTarget = null
+                            if (res.isSuccess) requestDismiss()
                         }
                     } else {
                         onUpdateSubCategory(target.isExpense, pName, target.existingName, finalName, finalAsset) { res ->
-                            if (res.isSuccess) editorTarget = null
+                            if (res.isSuccess) requestDismiss()
                         }
                     }
                 }
@@ -774,32 +760,15 @@ fun CategoryManagementScreen(
     }
 
     if (showFullResetConfirm) {
-        AlertDialog(
-            onDismissRequest = { showFullResetConfirm = false },
-            containerColor = ICostCardWhite,
-            title = { Text("重置为出厂默认分类？", fontWeight = FontWeight.ExtraBold) },
-            text = {
-                Text(
-                    "重置将恢复初始的 24 个支出分类与 10 个收入分类，已录入的历史账单不会被删除。若只想找回误删的默认分类并保留自定义分类，请使用「补全缺失的默认分类」。",
-                    fontSize = 14.sp,
-                    color = ICostTextSecondary
-                )
+        ICostConfirmDialog(
+            title = "重置为出厂默认分类？",
+            message = "重置将恢复初始的 24 个支出分类与 10 个收入分类，已录入的历史账单不会被删除。若只想找回误删的默认分类并保留自定义分类，请使用「补全缺失的默认分类」。",
+            confirmText = "确认重置",
+            onConfirm = {
+                showFullResetConfirm = false
+                onRestoreDefaults(null, false)
             },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showFullResetConfirm = false
-                        onRestoreDefaults(null, false)
-                    }
-                ) {
-                    Text("确认重置", color = ICostCoralRed, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showFullResetConfirm = false }) {
-                    Text("取消", color = ICostTextSecondary)
-                }
-            }
+            onDismiss = { showFullResetConfirm = false }
         )
     }
 }
@@ -847,7 +816,7 @@ fun CategoryEditorBottomSheet(
     initialIconAsset: String = "cat_dining.webp",
     siblingNames: List<String>,
     onDismiss: () -> Unit,
-    onSave: (name: String, assetFile: String) -> Unit
+    onSave: (name: String, assetFile: String, requestDismiss: () -> Unit) -> Unit
 ) {
     CategoryEditorBottomSheet(
         target = CategoryEditorTarget(
@@ -868,7 +837,7 @@ private fun CategoryEditorBottomSheet(
     target: CategoryEditorTarget,
     siblingNames: List<String>,
     onDismiss: () -> Unit,
-    onSave: (name: String, assetFile: String) -> Unit
+    onSave: (name: String, assetFile: String, requestDismiss: () -> Unit) -> Unit
 ) {
     var nameInput by remember(target) { mutableStateOf(target.existingName.orEmpty()) }
     var selectedIcon by remember(target) { mutableStateOf(target.initialIconAsset) }
@@ -1012,9 +981,6 @@ private fun CategoryEditorBottomSheet(
                                                         }
                                                         .iCostPressScale(pressedScale = 0.88f) {
                                                             selectedIcon = option.assetFile
-                                                            if (nameInput.isBlank() && target.existingName == null) {
-                                                                // 若用户尚未输入名称，保留空白让用户自行输入，不强制填入
-                                                            }
                                                         }
                                                         .padding(vertical = 4.dp),
                                                     horizontalAlignment = Alignment.CenterHorizontally
@@ -1070,8 +1036,7 @@ private fun CategoryEditorBottomSheet(
                     onClick = {
                         nameTouched = true
                         if (canSubmit) {
-                            onSave(nameInput.trim(), selectedIcon)
-                            requestDismiss()
+                            onSave(nameInput.trim(), selectedIcon, requestDismiss)
                         }
                     },
                     enabled = canSubmit,

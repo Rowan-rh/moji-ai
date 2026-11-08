@@ -125,21 +125,16 @@ class MerchantMemoryManager(context: Context) {
         includeSubPrefix: Boolean,
         preserveSubSuffix: Boolean
     ) {
-        val prefix = "$oldCategory-"
         var changed = false
         val updated = _memoriesFlow.value.map { entry ->
-            val mapped = when {
-                entry.category == oldCategory -> newCategory
-                includeSubPrefix && entry.category.startsWith(prefix) -> {
-                    if (preserveSubSuffix) {
-                        "$newCategory-${entry.category.removePrefix(prefix)}"
-                    } else {
-                        newCategory
-                    }
-                }
-                else -> null
-            }
-            if (mapped != null && mapped != entry.category) {
+            val mapped = CategoryCatalog.remapCascadedCategory(
+                current = entry.category,
+                oldCategory = oldCategory,
+                newCategory = newCategory,
+                includeSubPrefix = includeSubPrefix,
+                preserveSubSuffix = preserveSubSuffix
+            )
+            if (mapped != null) {
                 changed = true
                 entry.copy(category = mapped, updatedAtMillis = System.currentTimeMillis())
             } else {

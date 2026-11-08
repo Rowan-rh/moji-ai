@@ -7,6 +7,7 @@ import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
 import kotlin.math.roundToLong
@@ -562,6 +563,12 @@ class LedgerRepository(private val db: AppDatabase) {
 
     suspend fun deleteRecurringRule(rule: RecurringRuleEntity) = db.recurringRuleDao().deleteRule(rule)
 
+    private fun TransactionType.matchesDirectionFilter(isExpense: Boolean?): Boolean = when (isExpense) {
+        true -> this == TransactionType.EXPENSE
+        false -> this == TransactionType.INCOME
+        null -> true
+    }
+
     /**
      * 统计指定分类（含可选二级分类前缀）关联的未删除历史账单数量
      */
@@ -570,15 +577,9 @@ class LedgerRepository(private val db: AppDatabase) {
         includeSubPrefix: Boolean,
         isExpense: Boolean? = null
     ): Int {
-        val allActive = db.transactionDao().getAllTransactions()
-        val prefix = "$category-"
-        return allActive.count { tx ->
-            val typeMatched = when (isExpense) {
-                true -> tx.type == TransactionType.EXPENSE
-                false -> tx.type == TransactionType.INCOME
-                null -> true
-            }
-            typeMatched && (tx.category == category || (includeSubPrefix && tx.category.startsWith(prefix)))
+        return db.transactionDao().getAllTransactions().count { tx ->
+            tx.type.matchesDirectionFilter(isExpense) &&
+                CategoryCatalog.matchesCategoryScope(tx.category, category, includeSubPrefix)
         }
     }
 
@@ -596,52 +597,33 @@ class LedgerRepository(private val db: AppDatabase) {
         val now = System.currentTimeMillis()
         val txDao = db.transactionDao()
         val ruleDao = db.recurringRuleDao()
-        val prefix = "$oldCategory-"
         var updatedTxCount = 0
 
         for (tx in txDao.getAllTransactions()) {
-            val typeMatched = when (isExpense) {
-                true -> tx.type == TransactionType.EXPENSE
-                false -> tx.type == TransactionType.INCOME
-                null -> true
-            }
-            if (!typeMatched) continue
-            val mapped = when {
-                tx.category == oldCategory -> newCategory
-                includeSubPrefix && tx.category.startsWith(prefix) -> {
-                    if (preserveSubSuffix) {
-                        "$newCategory-${tx.category.removePrefix(prefix)}"
-                    } else {
-                        newCategory
-                    }
-                }
-                else -> null
-            }
-            if (mapped != null && mapped != tx.category) {
+            if (!tx.type.matchesDirectionFilter(isExpense)) continue
+            val mapped = CategoryCatalog.remapCascadedCategory(
+                current = tx.category,
+                oldCategory = oldCategory,
+                newCategory = newCategory,
+                includeSubPrefix = includeSubPrefix,
+                preserveSubSuffix = preserveSubSuffix
+            )
+            if (mapped != null) {
                 txDao.updateTransactionCategoryById(tx.id, mapped, now)
                 updatedTxCount++
             }
         }
 
         for (rule in ruleDao.getAllRules()) {
-            val typeMatched = when (isExpense) {
-                true -> rule.type == TransactionType.EXPENSE
-                false -> rule.type == TransactionType.INCOME
-                null -> true
-            }
-            if (!typeMatched) continue
-            val mapped = when {
-                rule.category == oldCategory -> newCategory
-                includeSubPrefix && rule.category.startsWith(prefix) -> {
-                    if (preserveSubSuffix) {
-                        "$newCategory-${rule.category.removePrefix(prefix)}"
-                    } else {
-                        newCategory
-                    }
-                }
-                else -> null
-            }
-            if (mapped != null && mapped != rule.category) {
+            if (!rule.type.matchesDirectionFilter(isExpense)) continue
+            val mapped = CategoryCatalog.remapCascadedCategory(
+                current = rule.category,
+                oldCategory = oldCategory,
+                newCategory = newCategory,
+                includeSubPrefix = includeSubPrefix,
+                preserveSubSuffix = preserveSubSuffix
+            )
+            if (mapped != null) {
                 ruleDao.updateRuleCategoryById(rule.id, mapped, now)
             }
         }

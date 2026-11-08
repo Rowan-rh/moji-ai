@@ -200,9 +200,10 @@ fun ICostCalculatorSheet(
     }
 
     // 解析初始主分类与子分类
-    val initFullCategory = editingTransaction?.category ?: "餐饮"
+    val defaultExpName = expenseCategories.firstOrNull()?.name ?: "餐饮"
+    val initFullCategory = editingTransaction?.category ?: defaultExpName
     val initParts = initFullCategory.split("-")
-    var selectedMainCategory by remember { mutableStateOf(initParts.firstOrNull() ?: "餐饮") }
+    var selectedMainCategory by remember { mutableStateOf(initParts.firstOrNull() ?: defaultExpName) }
     var selectedSubCategory by remember { mutableStateOf(initParts.getOrNull(1) ?: "") }
 
     var expr by remember {
@@ -264,13 +265,14 @@ fun ICostCalculatorSheet(
         if (visible) {
             val raw = editingTransaction?.type ?: initialType
             txType = if (raw == TransactionType.REPAYMENT) TransactionType.TRANSFER else raw
+            val fallbackExpName = CategoryCatalog.expenseCategories.firstOrNull()?.name ?: "餐饮"
             val fullCat = editingTransaction?.category ?: if (raw == TransactionType.INCOME) {
                 CategoryCatalog.incomeCategories.first().name
             } else {
-                "餐饮"
+                fallbackExpName
             }
             val parts = fullCat.split("-")
-            selectedMainCategory = parts.firstOrNull() ?: "餐饮"
+            selectedMainCategory = parts.firstOrNull() ?: fallbackExpName
             selectedSubCategory = parts.getOrNull(1) ?: ""
             expr = if (editingTransaction != null) {
                 String.format(Locale.US, "%.2f", editingTransaction.amountCents / 100.0).trimEnd('0').trimEnd('.')
@@ -1665,7 +1667,7 @@ fun ICostCalculatorSheet(
             initialIconAsset = parentCat.assetFile,
             siblingNames = parentCat.subCategories.map { it.name },
             onDismiss = { quickAddSubParent = null },
-            onSave = { newSubName, newAsset ->
+            onSave = { newSubName, newAsset, requestDismiss ->
                 val res = CategoryCatalog.addSubCategory(
                     isExpense = isExp,
                     parentName = parentCat.name,
@@ -1675,7 +1677,7 @@ fun ICostCalculatorSheet(
                 if (res.isSuccess) {
                     selectedMainCategory = parentCat.name
                     selectedSubCategory = newSubName
-                    quickAddSubParent = null
+                    requestDismiss()
                 }
             }
         )

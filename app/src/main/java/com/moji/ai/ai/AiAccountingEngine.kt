@@ -3,6 +3,7 @@ package com.moji.ai.ai
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CategoryCatalog
+import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
 import kotlinx.coroutines.Dispatchers
@@ -521,20 +522,15 @@ class AiAccountingEngine(
         val memoryDesc = merchantMemoryManager?.memoriesFlow?.value?.take(25)?.joinToString("\n") { m ->
             "- 商户包含\"${m.merchantKeyword}\" -> 优先分类=\"${m.category}\", 常用钱包ID=${m.preferredWalletId ?: "自动"}"
         }.orEmpty().ifBlank { "暂无历史商户偏好" }
-        val expenseCategoryDesc = CategoryCatalog.expenseCategories.joinToString("；") { cat ->
+        fun List<CategoryDef>.formatPromptCatalog(): String = joinToString("；") { cat ->
             if (cat.subCategories.isEmpty()) {
                 cat.name
             } else {
                 "${cat.name}(${cat.subCategories.joinToString("/") { "${cat.name}-${it.name}" }})"
             }
         }
-        val incomeCategoryDesc = CategoryCatalog.incomeCategories.joinToString("；") { cat ->
-            if (cat.subCategories.isEmpty()) {
-                cat.name
-            } else {
-                "${cat.name}(${cat.subCategories.joinToString("/") { "${cat.name}-${it.name}" }})"
-            }
-        }
+        val expenseCategoryDesc = CategoryCatalog.expenseCategories.formatPromptCatalog()
+        val incomeCategoryDesc = CategoryCatalog.incomeCategories.formatPromptCatalog()
 
         return """
 你是一个专业的安卓全自动记账 AI 引擎。请分析用户手机通知栏、无障碍节点或截屏 OCR 抓取到的原始文本，判断是否为真实的已发生资金变动事件，并严格输出 JSON 对象。

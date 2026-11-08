@@ -371,23 +371,51 @@ object CategoryCatalog {
         return null
     }
 
-    fun updateCategories(isExpense: Boolean, newList: List<CategoryDef>) {
-        if (newList.isEmpty()) return
-        persist(isExpense, newList)
+    /**
+     * 判断分类字符串是否命中指定分类范围（支持仅精确匹配或包含 `一级-二级` 子分类前缀）
+     */
+    fun matchesCategoryScope(
+        current: String,
+        targetCategory: String,
+        includeSubPrefix: Boolean
+    ): Boolean = current == targetCategory || (includeSubPrefix && current.startsWith("$targetCategory-"))
+
+    /**
+     * 计算级联重命名或删除迁移后的新分类名；若未受影响或名称未变则返回 null
+     */
+    fun remapCascadedCategory(
+        current: String,
+        oldCategory: String,
+        newCategory: String,
+        includeSubPrefix: Boolean,
+        preserveSubSuffix: Boolean
+    ): String? {
+        val prefix = "$oldCategory-"
+        val mapped = when {
+            current == oldCategory -> newCategory
+            includeSubPrefix && current.startsWith(prefix) -> {
+                if (preserveSubSuffix) "$newCategory-${current.removePrefix(prefix)}" else newCategory
+            }
+            else -> null
+        }
+        return mapped?.takeIf { it != current }
     }
 
     fun replaceAllCategories(
         expenseList: List<CategoryDef>,
         incomeList: List<CategoryDef>
     ) {
+        if (expenseList.isEmpty() && incomeList.isEmpty()) return
+        val editor = prefs?.edit()
         if (expenseList.isNotEmpty()) {
             _expenseCategoriesFlow.value = expenseList
-            prefs?.edit()?.putString(KEY_EXPENSE_JSON, jsonCodec.encodeToString(expenseList))?.apply()
+            editor?.putString(KEY_EXPENSE_JSON, jsonCodec.encodeToString(expenseList))
         }
         if (incomeList.isNotEmpty()) {
             _incomeCategoriesFlow.value = incomeList
-            prefs?.edit()?.putString(KEY_INCOME_JSON, jsonCodec.encodeToString(incomeList))?.apply()
+            editor?.putString(KEY_INCOME_JSON, jsonCodec.encodeToString(incomeList))
         }
+        editor?.apply()
         _versionFlow.value += 1
     }
 
@@ -545,21 +573,20 @@ object CategoryCatalog {
      * @param mergeOnly true=补全缺失的默认分类（保留用户自建分类与自定义图标）, false=重置为出厂默认分类树
      */
     fun restoreDefaultCategories(isExpense: Boolean? = null, mergeOnly: Boolean = true) {
-        if (isExpense == null || isExpense == true) {
-            val nextExp = if (mergeOnly) {
-                mergeWithDefaults(expenseCategories, defaultExpenseCategories)
-            } else {
-                defaultExpenseCategories
-            }
-            persist(true, nextExp)
+        val nextExp = if (mergeOnly) {
+            mergeWithDefaults(expenseCategories, defaultExpenseCategories)
+        } else {
+            defaultExpenseCategories
         }
-        if (isExpense == null || isExpense == false) {
-            val nextInc = if (mergeOnly) {
-                mergeWithDefaults(incomeCategories, defaultIncomeCategories)
-            } else {
-                defaultIncomeCategories
-            }
-            persist(false, nextInc)
+        val nextInc = if (mergeOnly) {
+            mergeWithDefaults(incomeCategories, defaultIncomeCategories)
+        } else {
+            defaultIncomeCategories
+        }
+        when (isExpense) {
+            null -> replaceAllCategories(nextExp, nextInc)
+            true -> persist(true, nextExp)
+            false -> persist(false, nextInc)
         }
     }
 

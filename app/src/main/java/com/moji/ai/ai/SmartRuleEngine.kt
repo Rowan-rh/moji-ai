@@ -2,6 +2,7 @@ package com.moji.ai.ai
 
 import android.content.Context
 import com.moji.ai.data.local.TransactionEntity
+import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.TransactionType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -127,21 +128,16 @@ class SmartRuleEngine(context: Context) {
         includeSubPrefix: Boolean,
         preserveSubSuffix: Boolean
     ) {
-        val prefix = "$oldCategory-"
         var changed = false
         val updated = _rules.value.map { rule ->
-            val mapped = when {
-                rule.targetCategory == oldCategory -> newCategory
-                includeSubPrefix && rule.targetCategory.startsWith(prefix) -> {
-                    if (preserveSubSuffix) {
-                        "$newCategory-${rule.targetCategory.removePrefix(prefix)}"
-                    } else {
-                        newCategory
-                    }
-                }
-                else -> null
-            }
-            if (mapped != null && mapped != rule.targetCategory) {
+            val mapped = CategoryCatalog.remapCascadedCategory(
+                current = rule.targetCategory,
+                oldCategory = oldCategory,
+                newCategory = newCategory,
+                includeSubPrefix = includeSubPrefix,
+                preserveSubSuffix = preserveSubSuffix
+            )
+            if (mapped != null) {
                 changed = true
                 rule.copy(targetCategory = mapped)
             } else {

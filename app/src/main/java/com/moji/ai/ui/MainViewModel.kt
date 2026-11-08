@@ -895,18 +895,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             preserveSubSuffix = preserveSubSuffix,
             isExpense = isExpense
         )
-        val prefix = "$oldCategory-"
-
         var templatesChanged = false
         val updatedTemplates = _templates.value.map { tpl ->
-            val mapped = when {
-                tpl.category == oldCategory -> newCategory
-                includeSubPrefix && tpl.category.startsWith(prefix) -> {
-                    if (preserveSubSuffix) "$newCategory-${tpl.category.removePrefix(prefix)}" else newCategory
-                }
-                else -> null
-            }
-            if (mapped != null && mapped != tpl.category) {
+            val mapped = CategoryCatalog.remapCascadedCategory(
+                current = tpl.category,
+                oldCategory = oldCategory,
+                newCategory = newCategory,
+                includeSubPrefix = includeSubPrefix,
+                preserveSubSuffix = preserveSubSuffix
+            )
+            if (mapped != null) {
                 templatesChanged = true
                 tpl.copy(category = mapped)
             } else tpl
@@ -918,14 +916,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         var installmentsChanged = false
         val updatedInstallments = _installmentPlans.value.map { inst ->
-            val mapped = when {
-                inst.category == oldCategory -> newCategory
-                includeSubPrefix && inst.category.startsWith(prefix) -> {
-                    if (preserveSubSuffix) "$newCategory-${inst.category.removePrefix(prefix)}" else newCategory
-                }
-                else -> null
-            }
-            if (mapped != null && mapped != inst.category) {
+            val mapped = CategoryCatalog.remapCascadedCategory(
+                current = inst.category,
+                oldCategory = oldCategory,
+                newCategory = newCategory,
+                includeSubPrefix = includeSubPrefix,
+                preserveSubSuffix = preserveSubSuffix
+            )
+            if (mapped != null) {
                 installmentsChanged = true
                 inst.copy(category = mapped)
             } else inst
