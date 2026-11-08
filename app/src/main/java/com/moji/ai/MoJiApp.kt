@@ -78,7 +78,7 @@ class MoJiApp : Application() {
                     notifier.sendSilentRecordedNotification(tx, wallets)
                 }
             }
-            if (appUpdateManager.configFlow.value.autoCheckOnLaunch) {
+            if (!BuildConfig.IS_QA_BUILD && appUpdateManager.configFlow.value.autoCheckOnLaunch) {
                 appUpdateManager.checkForUpdate(isManual = false)
             }
         }

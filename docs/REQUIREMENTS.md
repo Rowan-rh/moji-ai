@@ -79,6 +79,7 @@
 - **可视化条件规则引擎 (`SmartRuleEngine`, `When -> Then`)**：支持按关键词、金额上下限、24 小时时间窗组合条件，自动改写分类/账本/附加标签、自动标为待报销或静默拦截非账单通知。
 - **WebDAV 自托管云同步 (`WebDavSyncClient`)**：支持连接坚果云、Nextcloud、群晖 Synology 等标准 WebDAV 服务，一键上传或下载恢复 `.mojibackup` 全量快照。
 - **GitHub 私有仓库 / 公开仓库 OTA 自动更新 (`AppUpdateManager`)**：支持通过单仓库只读 Fine-grained PAT（编译期 `local.properties` 注入或设置页动态配置）查询 GitHub Releases、通过 Release Asset API（`Accept: application/octet-stream`）流式下载私有仓库 APK、校验 `PK` 签名头并通过 `FileProvider` 调起系统安装器一键覆盖升级。
+- **独立包名测试包双包共存与全链路防串数据隔离 (`com.moji.ai.qa`)**：提供 `qa` 构建变体（`./gradlew assembleQa`，输出 `app/build/outputs/apk/qa/app-qa.apk`，使用 debug 签名），包名为 `com.moji.ai.qa`，可与手机上的正式包 `com.moji.ai` 同时安装共存。桌面与设置页采用「默记 QA」名称与晴空青蓝基底 + `QA` 角标专属自适应图标，通知监听/无障碍服务/快捷设置磁贴文案均带 `默记 QA` 标识；隔离沙盒数据库、`FileProvider`（`${applicationId}.fileprovider`）、通知渠道（`moji_silent_bookkeeping_qa_v2` / `moji_fluid_cloud_silent_qa_v2`）与显式包名广播 `PendingIntent`，并在 QA 通知正文附加防采集标记且双向忽略 `com.moji.ai*` 包名；QA 包默认禁用正式版 OTA 自动更新与覆盖安装，WebDAV 默认路径隔离为 `/dav/MoJi-QA/` 与 `moji_qa_latest.mojibackup` 并拦截向正式路径/文件名的上传操作。
 - **正式版公开分发**：release 构建从 `local.properties` / 环境变量读取正式签名证书（`MOJI_RELEASE_*`），未配置时不签名；`scripts/release.sh` 校验 `gh` 账号、`main` 分支与版本号高于最新 Release、构建并用 `apksigner` 校验签名（可选比对证书指纹），随后打 `v<versionName>` Tag 并创建附带固定名 `moji.apk` 的 GitHub Release，提供 `releases/latest/download/moji.apk` 公开直链。
 
 ### 5. 多币种自动换算与周期性固定收支

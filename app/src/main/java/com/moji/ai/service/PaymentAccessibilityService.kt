@@ -187,7 +187,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
 
         // 完全忽略我们自己的流体云悬浮窗视图及系统侧边栏/输入法/辅助工具产生的事件
         if (rawPkg in systemOverlayPackages) return
-        if (rawPkg == "com.moji.ai" && !rawCls.contains("MainActivity")) return
+        if ((rawPkg == packageName || rawPkg.startsWith("com.moji.ai")) && !rawCls.contains("MainActivity")) return
 
         if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             // 仅在真正的窗口切换事件（TYPE_WINDOW_STATE_CHANGED）时才更新当前前台应用包名

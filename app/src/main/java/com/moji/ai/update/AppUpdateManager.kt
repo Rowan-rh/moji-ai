@@ -30,7 +30,7 @@ import java.util.concurrent.TimeUnit
 data class AppUpdateConfig(
     val repoFullName: String = BuildConfig.GITHUB_UPDATE_REPO.ifBlank { "Rowan-rh/moji-ai" },
     val customGithubToken: String = "",
-    val autoCheckOnLaunch: Boolean = true,
+    val autoCheckOnLaunch: Boolean = !BuildConfig.IS_QA_BUILD,
     val includePrerelease: Boolean = false,
     val ignoredTag: String = ""
 ) {
@@ -118,7 +118,7 @@ class AppUpdateManager(context: Context) {
         return AppUpdateConfig(
             repoFullName = prefs.getString(KEY_REPO, defaultRepo)?.trim().takeUnless { it.isNullOrBlank() } ?: defaultRepo,
             customGithubToken = prefs.getString(KEY_TOKEN, "")?.trim().orEmpty(),
-            autoCheckOnLaunch = prefs.getBoolean(KEY_AUTO_CHECK, true),
+            autoCheckOnLaunch = !BuildConfig.IS_QA_BUILD && prefs.getBoolean(KEY_AUTO_CHECK, true),
             includePrerelease = prefs.getBoolean(KEY_INCLUDE_PRERELEASE, false),
             ignoredTag = prefs.getString(KEY_IGNORED_TAG, "")?.trim().orEmpty()
         )
@@ -161,6 +161,19 @@ class AppUpdateManager(context: Context) {
         val repo = cfg.repoFullName
         val token = cfg.effectiveToken
         val currentVersion = BuildConfig.VERSION_NAME
+
+        if (BuildConfig.IS_QA_BUILD) {
+            val qaUpToDate = UpdateCheckState.UpToDate(
+                currentVersion = currentVersion,
+                repoFullName = repo,
+                repoIsPrivate = false,
+                statusNote = "当前为 QA 独立测试包（com.moji.ai.qa），已禁用正式版 OTA 更新"
+            )
+            if (isManual) {
+                _stateFlow.value = qaUpToDate
+            }
+            return@withContext qaUpToDate
+        }
 
         if (isManual) {
             _stateFlow.value = UpdateCheckState.Checking
@@ -447,6 +460,10 @@ class AppUpdateManager(context: Context) {
      * 调起系统安装器安装已下载的 APK；若尚未授予“安装未知应用”权限则引导跳转授权页
      */
     fun triggerInstallApk(context: Context, apkFilePath: String): Boolean {
+        if (BuildConfig.IS_QA_BUILD) {
+            _stateFlow.value = UpdateCheckState.Error("当前为 QA 独立测试包（com.moji.ai.qa），禁止覆盖安装正式版")
+            return false
+        }
         val apkFile = File(apkFilePath)
         if (!apkFile.exists()) {
             _stateFlow.value = UpdateCheckState.Error("安装包文件不存在，请重新下载")

@@ -6,6 +6,7 @@ import android.provider.Settings
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.widget.Toast
+import com.moji.ai.R
 
 /**
  * 快捷设置磁贴「默记识屏记账」（参考 AutoAccounting OcrTileService）：
@@ -30,7 +31,11 @@ class OcrTileService : TileService() {
         super.onClick()
         val service = PaymentAccessibilityService.instance
         if (service == null) {
-            Toast.makeText(this, "请先开启「默记 · 支付页面无感识账」无障碍服务", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                "请先开启「${getString(R.string.accessibility_service_label)}」无障碍服务",
+                Toast.LENGTH_SHORT
+            ).show()
             val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }

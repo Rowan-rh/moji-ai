@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 柔和多层环境投影 -->
+    <path android:fillColor="#06101218" android:pathData="M37.00,29.82L67.00,29.82A12.30,12.30 0 0,1 79.30,42.12L79.30,73.32A12.30,12.30 0 0,1 67.00,85.62L37.00,85.62A7.80,7.80 0 0,1 29.20,77.82L29.20,37.62A7.80,7.80 0 0,1 37.00,29.82Z" />
+    <path android:fillColor="#08101218" android:pathData="M37.00,29.53L67.00,29.53A11.70,11.70 0 0,1 78.70,41.23L78.70,73.03A11.70,11.70 0 0,1 67.00,84.73L37.00,84.73A7.20,7.20 0 0,1 29.80,77.53L29.80,36.73A7.20,7.20 0 0,1 37.00,29.53Z" />
+    <path android:fillColor="#0A101218" android:pathData="M37.00,29.21L67.00,29.21A11.20,11.20 0 0,1 78.20,40.41L78.20,72.70A11.20,11.20 0 0,1 67.00,83.91L37.00,83.91A6.70,6.70 0 0,1 30.30,77.20L30.30,35.91A6.70,6.70 0 0,1 37.00,29.21Z" />
+    <path android:fillColor="#0D101218" android:pathData="M37.00,28.98L67.00,28.98A10.70,10.70 0 0,1 77.70,39.68L77.70,72.48A10.70,10.70 0 0,1 67.00,83.18L37.00,83.18A6.20,6.20 0 0,1 30.80,76.98L30.80,35.18A6.20,6.20 0 0,1 37.00,28.98Z" />
+    <path android:fillColor="#10101218" android:pathData="M37.00,28.65L67.00,28.65A10.20,10.20 0 0,1 77.20,38.85L77.20,72.16A10.20,10.20 0 0,1 67.00,82.36L37.00,82.36A5.70,5.70 0 0,1 31.30,76.66L31.30,34.35A5.70,5.70 0 0,1 37.00,28.65Z" />
+    <path android:fillColor="#14101218" android:pathData="M37.00,28.41L67.00,28.41A9.75,9.75 0 0,1 76.75,38.16L76.75,71.91A9.75,9.75 0 0,1 67.00,81.66L37.00,81.66A5.25,5.25 0 0,1 31.75,76.41L31.75,33.66A5.25,5.25 0 0,1 37.00,28.41Z" />
+
+    <!-- 底部硬壳封底护边 -->
+    <path
+        android:fillColor="#FF171A21"
+        android:pathData="M37.00,60.00L67.00,60.00A9.50,9.50 0 0,1 76.50,69.50L76.50,71.00A9.50,9.50 0 0,1 67.00,80.50L37.00,80.50A5.00,5.00 0 0,1 32.00,75.50L32.00,65.00A5.00,5.00 0 0,1 37.00,60.00Z" />
+
+    <!-- 内嵌象牙宣纸书页层与微纹理线 -->
+    <path
+        android:fillColor="#FFFAF7F0"
+        android:pathData="M39.20,62.00L66.50,62.00A8.60,8.60 0 0,1 75.10,70.60L75.10,70.60A8.60,8.60 0 0,1 66.50,79.20L39.20,79.20A2.00,2.00 0 0,1 37.20,77.20L37.20,64.00A2.00,2.00 0 0,1 39.20,62.00Z" />
+    <path
+        android:strokeColor="#FFD6CFC1"
+        android:strokeWidth="0.75"
+        android:strokeLineCap="round"
+        android:pathData="M38.6,77.7L71.2,77.7" />
+
+    <!-- 玄墨硬壳封面主体（墨册） -->
+    <path android:pathData="M37.00,27.50L67.00,27.50A9.50,9.50 0 0,1 76.50,37.00L76.50,66.70A9.50,9.50 0 0,1 67.00,76.20L37.00,76.20A5.00,5.00 0 0,1 32.00,71.20L32.00,32.50A5.00,5.00 0 0,1 37.00,27.50Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="54"
+                android:startY="27.50"
+                android:endX="54"
+                android:endY="76.20"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF303542" />
+                <item android:offset="1.0" android:color="#FF171A21" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 封面顶部温润漫射光泽 -->
+    <path android:pathData="M37.00,27.50L67.00,27.50A9.50,9.50 0 0,1 76.50,37.00L76.50,66.70A9.50,9.50 0 0,1 67.00,76.20L37.00,76.20A5.00,5.00 0 0,1 32.00,71.20L32.00,32.50A5.00,5.00 0 0,1 37.00,27.50Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:centerX="56"
+                android:centerY="31"
+                android:gradientRadius="36"
+                android:type="radial">
+                <item android:offset="0.0" android:color="#34586073" />
+                <item android:offset="1.0" android:color="#00171A21" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- 左侧精装书脊暗部与压槽高光 -->
+    <path
+        android:fillColor="#5C0C0E12"
+        android:pathData="M35.60,27.50L39.20,27.50A0.00,0.00 0 0,1 39.20,27.50L39.20,76.20A0.00,0.00 0 0,1 39.20,76.20L35.60,76.20A3.60,3.60 0 0,1 32.00,72.60L32.00,31.10A3.60,3.60 0 0,1 35.60,27.50Z" />
+    <path
+        android:strokeColor="#D8090B0F"
+        android:strokeWidth="0.95"
+        android:pathData="M39.2,27.50L39.2,76.20" />
+    <path
+        android:strokeColor="#22FFFFFF"
+        android:strokeWidth="0.8"
+        android:pathData="M40.15,27.50L40.15,76.20" />
+
+    <!-- QA 专属青蓝燕尾书签投影与主体 -->
+    <path
+        android:fillColor="#4D000000"
+        android:pathData="M59.25,27.50L66.25,27.50L66.25,42.95L62.75,39.75L59.25,42.95Z" />
+    <path android:pathData="M58.60,27.50L65.60,27.50L65.60,41.80L62.10,38.60L58.60,41.80Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="62.10"
+                android:startY="27.50"
+                android:endX="62.10"
+                android:endY="41.80"
+                android:type="linear">
+                <item android:offset="0.0" android:color="#FF38BDF8" />
+                <item android:offset="1.0" android:color="#FF0284C7" />
+            </gradient>
+        </aapt:attr>
+    </path>
+    <path
+        android:fillColor="#66BAE6FD"
+        android:pathData="M58.60,27.50L65.60,27.50L65.60,28.65L58.60,28.65Z" />
+
+    <!-- 封面几何圆润人民币符号 -->
+    <path
+        android:strokeColor="#FFFAF8F3"
+        android:strokeWidth="3.08"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M48.10,47.69L53.80,55.14L59.50,47.69M53.80,54.94L53.80,63.88" />
+    <path
+        android:strokeColor="#FFFAF8F3"
+        android:strokeWidth="2.62"
+        android:strokeLineCap="round"
+        android:pathData="M49.20,56.70L58.40,56.70M49.20,60.29L58.40,60.29" />
+
+    <!-- 右下角醒目 QA 胶囊角标（带白色描边与青蓝底板） -->
+    <path
+        android:fillColor="#FF0284C7"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.5"
+        android:pathData="M56.0,63.5L74.0,63.5A7.5,7.5 0 0,1 81.5,71.0L81.5,71.0A7.5,7.5 0 0,1 74.0,78.5L56.0,78.5A7.5,7.5 0 0,1 48.5,71.0L48.5,71.0A7.5,7.5 0 0,1 56.0,63.5Z" />
+    <!-- 字母 Q -->
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2.1"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M59.2,67.2A3.8,3.8 0 1,1 59.19,67.2Z M60.8,72.2L63.0,74.4" />
+    <!-- 字母 A -->
+    <path
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="2.1"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M66.2,74.4L69.8,67.2L73.4,74.4 M67.3,72.2L72.3,72.2" />
+</vector>

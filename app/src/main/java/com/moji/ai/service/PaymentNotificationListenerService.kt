@@ -14,6 +14,7 @@ class PaymentNotificationListenerService : NotificationListenerService() {
 
     private val ignoredPackages = setOf(
         "com.moji.ai",
+        "com.moji.ai.qa",
         "com.android.systemui",
         "android"
     )
@@ -22,7 +23,7 @@ class PaymentNotificationListenerService : NotificationListenerService() {
         super.onNotificationPosted(sbn)
         if (sbn == null) return
         val pkg = sbn.packageName ?: return
-        if (pkg in ignoredPackages) return
+        if (pkg == packageName || pkg in ignoredPackages || pkg.startsWith("com.moji.ai")) return
 
         val app = applicationContext as? MoJiApp ?: return
         if (!app.aiConfigManager.getConfig().enableNotificationCapture) return
