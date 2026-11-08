@@ -131,6 +131,7 @@ import com.moji.ai.ai.SmartConditionRule
 import com.moji.ai.data.backup.BackupAndCsvTransferEngine
 import com.moji.ai.data.backup.CsvParsePreviewResult
 import com.moji.ai.data.backup.WebDavConfig
+import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.TransactionType
@@ -1108,7 +1109,11 @@ private fun ICostSettingsFullScreen(
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "MoJi 默记 · v${BuildConfig.VERSION_NAME}",
+                                text = if (BuildConfig.IS_QA_BUILD) {
+                                    "默记 QA · v${BuildConfig.VERSION_NAME}"
+                                } else {
+                                    "MoJi 默记 · v${BuildConfig.VERSION_NAME}"
+                                },
                                 fontSize = 17.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = ICostTextPrimary
@@ -2739,7 +2744,7 @@ private fun BackupAndCsvTransferSheet(
                 item {
                     ICostFormCard {
                         Text(
-                            text = "支持坚果云、Nextcloud、群晖、Alist 等标准 WebDAV 服务。坚果云地址示例：https://dav.jianguoyun.com/dav/MoJi/",
+                            text = "支持坚果云、Nextcloud、群晖、Alist 等标准 WebDAV 服务。坚果云地址示例：${WebDavSyncClient.DEFAULT_SERVER_URL}",
                             fontSize = 12.sp,
                             color = ICostTextSecondary
                         )
@@ -2747,7 +2752,7 @@ private fun BackupAndCsvTransferSheet(
                             value = davUrl,
                             onValueChange = { davUrl = it },
                             label = "服务器地址",
-                            placeholder = "https://dav.jianguoyun.com/dav/MoJi/",
+                            placeholder = WebDavSyncClient.DEFAULT_SERVER_URL,
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                             singleLine = true
@@ -2786,7 +2791,7 @@ private fun BackupAndCsvTransferSheet(
                             value = davFileName,
                             onValueChange = { davFileName = it },
                             label = "备份文件名",
-                            placeholder = "moji_latest.mojibackup",
+                            placeholder = WebDavSyncClient.DEFAULT_REMOTE_FILE_NAME,
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -2797,7 +2802,7 @@ private fun BackupAndCsvTransferSheet(
                         serverUrl = davUrl.trim(),
                         username = davUser.trim(),
                         appPassword = davPassword.trim(),
-                        remoteFileName = davFileName.trim().ifBlank { "moji_latest.mojibackup" },
+                        remoteFileName = davFileName.trim().ifBlank { WebDavSyncClient.DEFAULT_REMOTE_FILE_NAME },
                         lastSyncTimeMillis = webDavConfig.lastSyncTimeMillis
                     )
                     Row(
@@ -2877,7 +2882,7 @@ private fun BackupAndCsvTransferSheet(
                                 serverUrl = davUrl.trim(),
                                 username = davUser.trim(),
                                 appPassword = davPassword.trim(),
-                                remoteFileName = davFileName.trim().ifBlank { "moji_latest.mojibackup" },
+                                remoteFileName = davFileName.trim().ifBlank { WebDavSyncClient.DEFAULT_REMOTE_FILE_NAME },
                                 lastSyncTimeMillis = webDavConfig.lastSyncTimeMillis
                             )
                         ) { msg -> localBanner = msg }
