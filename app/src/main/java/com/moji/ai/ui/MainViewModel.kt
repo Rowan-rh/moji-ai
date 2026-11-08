@@ -19,6 +19,9 @@ import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.service.CaptureObservabilityLogEntry
+import com.moji.ai.update.AppUpdateConfig
+import com.moji.ai.update.ReleaseUpdateInfo
+import com.moji.ai.update.UpdateCheckState
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -94,6 +97,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val smartRules: StateFlow<List<SmartConditionRule>> = app.smartRuleEngine.rules
 
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = app.captureCoordinator.observabilityLogs
+
+    val appUpdateConfig: StateFlow<AppUpdateConfig> = app.appUpdateManager.configFlow
+
+    val appUpdateState: StateFlow<UpdateCheckState> = app.appUpdateManager.stateFlow
 
     private val _webDavConfig = MutableStateFlow(WebDavSyncClient.loadConfig(application))
     val webDavConfig: StateFlow<WebDavConfig> = _webDavConfig.asStateFlow()
@@ -546,7 +553,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             rawCsv = rawCsv,
             defaultLedger = _currentLedger.value,
             wallets = wallets.value,
-            merchantMemoryManager = app.merchantMemoryManager
+            merchantMemoryManager = app.merchantMemoryManager,
+            existingLedgers = _ledgers.value
         )
     }
 
@@ -557,15 +565,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         viewModelScope.launch {
             val preview = previewCsvImport(rawCsv)
-            if (preview.parsedTransactions.isEmpty()) {
-                onResult("没有识别到可导入的账单（格式：${preview.detectedSourceFormat}）")
+            if (preview.parsedTransactions.isEmpty() &&
+                preview.newWalletsToCreate.isEmpty() &&
+                preview.existingWalletsToUpdate.isEmpty()
+            ) {
+                onResult("没有识别到可导入的账本、资产或账单（格式：${preview.detectedSourceFormat}）")
                 return@launch
             }
-            val importedCount = repository.importExternalTransactions(
-                candidates = preview.parsedTransactions,
+            preview.discoveredLedgers.forEach { createLedger(it) }
+            val summary = repository.importExternalBatch(
+                preview = preview,
                 applyToWalletBalance = applyToWalletBalance
             )
-            onResult("已导入 $importedCount 笔账单" + (preview.parsedTransactions.size - importedCount).let { if (it > 0) "，跳过 $it 笔重复账单" else "" })
+            val parts = mutableListOf<String>()
+            if (preview.newLedgers.isNotEmpty()) {
+                parts.add("新增 ${preview.newLedgers.size} 个账本（${preview.newLedgers.joinToString("、")}）")
+            }
+            if (summary.createdWalletCount > 0) {
+                parts.add("新建 ${summary.createdWalletCount} 个资产账户")
+            }
+            if (summary.updatedWalletCount > 0) {
+                parts.add("同步 ${summary.updatedWalletCount} 个账户余额")
+            }
+            if (summary.importedTxCount > 0) {
+                parts.add("导入 ${summary.importedTxCount} 笔账单")
+            }
+            if (summary.skippedDuplicateTxCount > 0) {
+                parts.add("跳过 ${summary.skippedDuplicateTxCount} 笔重复流水")
+            }
+            onResult(if (parts.isEmpty()) "无新增数据（全部已存在）" else "批量导入完成：${parts.joinToString(" · ")}")
         }
     }
 
@@ -802,5 +830,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repository.deleteRecurringRule(rule)
             postMessage("已删除周期账单「${rule.title}」")
         }
+    }
+
+    fun updateAppUpdateConfig(config: AppUpdateConfig) {
+        app.appUpdateManager.updateConfig(config)
+    }
+
+    fun checkForAppUpdate(isManual: Boolean = true) {
+        viewModelScope.launch {
+            app.appUpdateManager.checkForUpdate(isManual = isManual)
+        }
+    }
+
+    fun downloadAndInstallAppUpdate(context: Context, release: ReleaseUpdateInfo) {
+        viewModelScope.launch {
+            val resultState = app.appUpdateManager.downloadReleaseApk(release)
+            if (resultState is UpdateCheckState.ReadyToInstall) {
+                app.appUpdateManager.triggerInstallApk(context, resultState.apkFilePath)
+            }
+        }
+    }
+
+    fun triggerInstallDownloadedApk(context: Context, apkFilePath: String) {
+        app.appUpdateManager.triggerInstallApk(context, apkFilePath)
+    }
+
+    fun ignoreAppUpdateTag(tag: String) {
+        app.appUpdateManager.ignoreReleaseTag(tag)
+        postMessage("已忽略版本 $tag 的自动弹窗提醒")
     }
 }

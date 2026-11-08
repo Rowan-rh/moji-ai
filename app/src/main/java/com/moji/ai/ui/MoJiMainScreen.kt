@@ -5,8 +5,14 @@ import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import java.nio.ByteBuffer
+import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -62,6 +68,7 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
@@ -116,6 +123,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.moji.ai.BuildConfig
 import com.moji.ai.ai.AiConfig
 import com.moji.ai.ai.AiProviderType
 import com.moji.ai.ai.MerchantMemoryEntry
@@ -130,6 +138,9 @@ import com.moji.ai.service.CaptureEventOutcome
 import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.service.PaymentAccessibilityService
 import com.moji.ai.service.RomKeepAliveGuideHelper
+import com.moji.ai.update.AppUpdateConfig
+import com.moji.ai.update.ReleaseUpdateInfo
+import com.moji.ai.update.UpdateCheckState
 import com.moji.ai.ui.components.ICostCalculatorSheet
 import com.moji.ai.ui.components.MonthlyCalendarSheet
 import com.moji.ai.ui.components.TransactionDetailSheet
@@ -186,6 +197,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val smartRules by viewModel.smartRules.collectAsState()
     val observabilityLogs by viewModel.observabilityLogs.collectAsState()
     val webDavConfig by viewModel.webDavConfig.collectAsState()
+    val appUpdateConfig by viewModel.appUpdateConfig.collectAsState()
+    val appUpdateState by viewModel.appUpdateState.collectAsState()
     val pendingOpenTxId by viewModel.pendingOpenTransactionId.collectAsState()
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) } // 0: 账本, 1: 资产, 2: 统计
@@ -241,6 +254,14 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var backupInitialTab by remember { mutableIntStateOf(0) } // 0: 导入CSV, 1: 导出CSV, 2: 全量备份恢复, 3: WebDAV云同步
     var showKeepAliveGuideSheet by remember { mutableStateOf(false) }
     var showBatchReimburseSheet by remember { mutableStateOf(false) }
+    var showAppUpdateSheet by remember { mutableStateOf(false) }
+
+    // 启动后台自动检查若发现新版本，自动弹出更新面板提示用户
+    LaunchedEffect(appUpdateState) {
+        if (appUpdateState is UpdateCheckState.UpdateAvailable) {
+            showAppUpdateSheet = true
+        }
+    }
 
     // 缓存最后一次打开的账单详情数据，确保退出动画期间内容不闪空（日历直接读取实时账单列表）
     val activeTx = inspectingTx?.let { target -> transactions.firstOrNull { it.id == target.id } ?: target }
@@ -534,6 +555,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             ICostSettingsFullScreen(
                 currentLedger = currentLedger,
                 monthlyBudgetCents = monthlyBudgetCents,
+                updateState = appUpdateState,
+                updateConfig = appUpdateConfig,
                 onBack = { showSettingsPage = false },
                 onOpenSmartBookkeeping = { showSmartBookkeepingPage = true },
                 onOpenBudgetDialog = { showBudgetDialog = true },
@@ -551,6 +574,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 },
                 onOpenBatchReimburse = {
                     showBatchReimburseSheet = true
+                },
+                onOpenAppUpdate = {
+                    showAppUpdateSheet = true
                 }
             )
         }
@@ -701,6 +727,26 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 AiAndPermissionsSheetContent(
                     config = aiConfig,
                     onSaveConfig = { viewModel.updateAiConfig(it) },
+                    onClose = requestDismiss
+                )
+            }
+        }
+
+        // 版本与私有仓库 OTA 自动更新面板
+        if (showAppUpdateSheet) {
+            ICostSmoothBottomSheet(
+                onDismissRequest = { showAppUpdateSheet = false },
+                containerColor = ICostBgGray,
+                showDragHandle = false
+            ) { requestDismiss ->
+                AppUpdateSheetContent(
+                    config = appUpdateConfig,
+                    state = appUpdateState,
+                    onSaveConfig = { cfg -> viewModel.updateAppUpdateConfig(cfg) },
+                    onCheckNow = { viewModel.checkForAppUpdate(isManual = true) },
+                    onDownloadAndInstall = { rel -> viewModel.downloadAndInstallAppUpdate(appContext, rel) },
+                    onTriggerInstall = { path -> viewModel.triggerInstallDownloadedApk(appContext, path) },
+                    onIgnoreTag = { tag -> viewModel.ignoreAppUpdateTag(tag) },
                     onClose = requestDismiss
                 )
             }
@@ -999,15 +1045,31 @@ private fun SettingsSectionTitle(text: String, modifier: Modifier = Modifier, bo
 private fun ICostSettingsFullScreen(
     currentLedger: String,
     monthlyBudgetCents: Long,
+    updateState: UpdateCheckState = UpdateCheckState.Idle,
+    updateConfig: AppUpdateConfig = AppUpdateConfig(),
     onBack: () -> Unit,
     onOpenSmartBookkeeping: () -> Unit,
     onOpenBudgetDialog: () -> Unit,
     onOpenCsvImport: () -> Unit = {},
     onOpenCsvExport: () -> Unit = {},
     onOpenWebDavSync: () -> Unit = {},
-    onOpenBatchReimburse: () -> Unit = {}
+    onOpenBatchReimburse: () -> Unit = {},
+    onOpenAppUpdate: () -> Unit = {}
 ) {
     BackHandler(onBack = onBack)
+
+    val updateRowTrailing = when (updateState) {
+        is UpdateCheckState.UpdateAvailable -> "发现新版本 ${updateState.release.tagName}"
+        is UpdateCheckState.Downloading -> "正在下载 ${updateState.progressPercent}%"
+        is UpdateCheckState.ReadyToInstall -> "点击安装 ${updateState.release.tagName}"
+        is UpdateCheckState.Checking -> "正在检查…"
+        is UpdateCheckState.UpToDate -> "已是最新 v${BuildConfig.VERSION_NAME}"
+        else -> if (updateConfig.hasTokenConfigured) {
+            "v${BuildConfig.VERSION_NAME} · 私有源"
+        } else {
+            "v${BuildConfig.VERSION_NAME} · 检查更新"
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -1032,7 +1094,9 @@ private fun ICostSettingsFullScreen(
                 Surface(
                     shape = RoundedCornerShape(20.dp),
                     color = ICostCardWhite,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = onOpenAppUpdate)
                 ) {
                     Row(
                         modifier = Modifier
@@ -1040,11 +1104,11 @@ private fun ICostSettingsFullScreen(
                             .padding(horizontal = 16.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        ICostAvatarButton(onClick = {}, size = 46.dp)
+                        ICostAvatarButton(onClick = onOpenAppUpdate, size = 46.dp)
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "MoJi 默记",
+                                text = "MoJi 默记 · v${BuildConfig.VERSION_NAME}",
                                 fontSize = 17.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = ICostTextPrimary
@@ -1054,6 +1118,30 @@ private fun ICostSettingsFullScreen(
                                 text = "当前账本：$currentLedger",
                                 fontSize = 13.sp,
                                 color = ICostTextSecondary
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (updateState is UpdateCheckState.UpdateAvailable || updateState is UpdateCheckState.ReadyToInstall) {
+                                ICostCoralRed.copy(alpha = 0.12f)
+                            } else {
+                                ICostBlueAccent.copy(alpha = 0.10f)
+                            }
+                        ) {
+                            Text(
+                                text = if (updateState is UpdateCheckState.UpdateAvailable) {
+                                    "新版本 ${updateState.release.tagName}"
+                                } else {
+                                    "检查更新"
+                                },
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (updateState is UpdateCheckState.UpdateAvailable || updateState is UpdateCheckState.ReadyToInstall) {
+                                    ICostCoralRed
+                                } else {
+                                    ICostBlueAccent
+                                },
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                             )
                         }
                     }
@@ -1078,12 +1166,13 @@ private fun ICostSettingsFullScreen(
             }
 
             item {
-                SettingsSectionTitle("数据")
+                SettingsSectionTitle("数据与更新")
                 SettingsGroupCard(
                     rows = listOf(
-                        SettingRowDef("setting_import.webp", "账单导入", "微信 / 支付宝 / 钱迹", onClick = onOpenCsvImport),
-                        SettingRowDef("setting_export.webp", "账单导出", "CSV", onClick = onOpenCsvExport),
-                        SettingRowDef("setting_backup.webp", "备份与云同步", "快照 / WebDAV", onClick = onOpenWebDavSync)
+                        SettingRowDef("setting_import.webp", "数据导入", "iCost / 微信 / 支付宝", onClick = onOpenCsvImport),
+                        SettingRowDef("setting_export.webp", "数据导出", "CSV", onClick = onOpenCsvExport),
+                        SettingRowDef("setting_backup.webp", "备份与云同步", "快照 / WebDAV", onClick = onOpenWebDavSync),
+                        SettingRowDef("setting_vip.webp", "版本与自动更新", updateRowTrailing, onClick = onOpenAppUpdate)
                     )
                 )
             }
@@ -1138,6 +1227,7 @@ private fun SettingsGroupCard(
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Medium,
                         color = if (isComingSoon) ICostTextMuted else ICostTextPrimary,
+                        maxLines = 1,
                         modifier = Modifier.weight(1f)
                     )
                     val trailing = if (isComingSoon) "敬请期待" else row.trailingText
@@ -1145,6 +1235,7 @@ private fun SettingsGroupCard(
                         Text(
                             text = trailing,
                             fontSize = 13.sp,
+                            maxLines = 1,
                             color = if (action != null) ICostTextSecondary else ICostTextMuted
                         )
                     }
@@ -2164,8 +2255,15 @@ private fun isAccessibilityServiceEnabled(context: Context): Boolean {
     return RomKeepAliveGuideHelper.checkAccessibilityServiceEnabled(context)
 }
 
+private fun readUriTextWithAutoCharset(context: Context, uri: Uri): String? {
+    return runCatching {
+        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
+        BackupAndCsvTransferEngine.extractTextOrXlsxToCsv(bytes)
+    }.getOrNull()
+}
+
 /**
- * 账单 CSV 多源导入导出 + 全量快照备份恢复面板（对标 ezBookkeeping & AutoAccounting Schema Guard）
+ * 账单 Excel(.xlsx) / CSV 多源导入导出 + 全量快照备份恢复面板（支持 iCost 账本 + 资产账户 + 账单全量迁移）
  */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -2188,7 +2286,7 @@ private fun BackupAndCsvTransferSheet(
     var showDavPassword by remember { mutableStateOf(false) }
     var pendingRestoreKind by remember { mutableIntStateOf(0) }
     var previewResult by remember { mutableStateOf<CsvParsePreviewResult?>(null) }
-    var applyImportToWalletBalance by remember { mutableStateOf(true) }
+    var applyImportToWalletBalance by remember { mutableStateOf(false) }
     var exportedCsvText by remember { mutableStateOf("") }
     var backupJsonText by remember { mutableStateOf("") }
     var localBanner by remember { mutableStateOf<String?>(null) }
@@ -2202,6 +2300,22 @@ private fun BackupAndCsvTransferSheet(
         context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
     }
 
+    val csvFilePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val loaded = readUriTextWithAutoCharset(context, uri)
+            if (!loaded.isNullOrBlank()) {
+                csvText = loaded
+                val parsed = onPreviewCsv(loaded)
+                previewResult = parsed
+                localBanner = "已解析文件：${parsed.detectedSourceFormat}（共 ${parsed.parsedTransactions.size} 笔流水，新建 ${parsed.newWalletsToCreate.size} 个账户）"
+            } else {
+                localBanner = "文件无法解析，请选择有效的 iCost Excel(.xlsx) 或 CSV 文件"
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -2209,6 +2323,7 @@ private fun BackupAndCsvTransferSheet(
     ) {
         ICostSheetHeader(
             title = "导入、导出与备份",
+            subtitle = "支持 iCost Excel(.xlsx) / CSV 全量迁移",
             onClose = onClose
         )
 
@@ -2225,7 +2340,7 @@ private fun BackupAndCsvTransferSheet(
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     val tabs = listOf(
-                        0 to "导入 CSV",
+                        0 to "批量导入",
                         1 to "导出 CSV",
                         2 to "备份快照",
                         3 to "WebDAV 同步"
@@ -2247,7 +2362,7 @@ private fun BackupAndCsvTransferSheet(
                 item {
                     ICostFormCard {
                         Text(
-                            text = "支持微信、支付宝官方账单和钱迹 / iCost 导出的 CSV。先预览再导入，重复的账单会自动跳过。",
+                            text = "支持直接选择 iCost 导出的 Excel (.xlsx) 或微信、支付宝、钱迹 CSV 文件。自动提取并创建「多账本」与「资产/信用账户」，重复流水自动跳过。",
                             fontSize = 12.sp,
                             color = ICostTextSecondary
                         )
@@ -2255,6 +2370,20 @@ private fun BackupAndCsvTransferSheet(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
+                            AssistChip(
+                                onClick = {
+                                    csvFilePickerLauncher.launch(
+                                        arrayOf(
+                                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                            "application/vnd.ms-excel",
+                                            "text/*",
+                                            "application/csv",
+                                            "*/*"
+                                        )
+                                    )
+                                },
+                                label = { Text("选择 Excel / CSV 文件", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                            )
                             AssistChip(
                                 onClick = {
                                     val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
@@ -2270,22 +2399,39 @@ private fun BackupAndCsvTransferSheet(
                             )
                             AssistChip(
                                 onClick = {
+                                    csvText = BackupAndCsvTransferEngine.SAMPLE_ICOST_FULL_CSV
+                                    previewResult = onPreviewCsv(csvText)
+                                    localBanner = "已载入 iCost「多账本 + 资产账户 + 账单」全量迁移示例"
+                                },
+                                label = { Text("iCost 账本+资产示例", fontSize = 12.sp) }
+                            )
+                            AssistChip(
+                                onClick = {
                                     csvText = BackupAndCsvTransferEngine.SAMPLE_WECHAT_CSV
                                     previewResult = onPreviewCsv(csvText)
-                                    localBanner = "已填入示例，仅供查看格式，请勿直接导入"
+                                    localBanner = "已载入微信支付官方 CSV 示例"
                                 },
-                                label = { Text("查看示例格式", fontSize = 12.sp) }
+                                label = { Text("微信账单示例", fontSize = 12.sp) }
                             )
                         }
 
+                        val displayCsvPreview = remember(csvText) {
+                            val lines = csvText.lines()
+                            if (lines.size > 25) {
+                                lines.take(25).joinToString("\n") + "\n...（共 ${lines.size} 行，完整内容已载入内存）"
+                            } else {
+                                csvText
+                            }
+                        }
+
                         ICostFormField(
-                            value = csvText,
+                            value = displayCsvPreview,
                             onValueChange = {
                                 csvText = it
                                 previewResult = null
                             },
-                            label = "CSV 内容",
-                            placeholder = "把导出的 CSV 文本粘贴到这里",
+                            label = "表格内容（支持 .xlsx / CSV）",
+                            placeholder = "点击上方「选择 Excel / CSV 文件」或粘贴 CSV 文本",
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = false,
                             minLines = 4,
@@ -2299,12 +2445,19 @@ private fun BackupAndCsvTransferSheet(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                "导入时同步调整账户余额",
-                                fontSize = 13.sp,
-                                color = ICostTextPrimary,
-                                modifier = Modifier.weight(1f)
-                            )
+                            Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
+                                Text(
+                                    "历史流水联动增减当前账户余额",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = ICostTextPrimary
+                                )
+                                Text(
+                                    "导入历史账单建议关闭（保持现有真实余额不变，仅新建缺失账户与导入流水）",
+                                    fontSize = 11.sp,
+                                    color = ICostTextSecondary
+                                )
+                            }
                             Switch(
                                 checked = applyImportToWalletBalance,
                                 onCheckedChange = { applyImportToWalletBalance = it },
@@ -2315,6 +2468,22 @@ private fun BackupAndCsvTransferSheet(
                 }
 
                 item {
+                    val canCommit = previewResult?.let {
+                        it.parsedTransactions.isNotEmpty() ||
+                            it.newWalletsToCreate.isNotEmpty() ||
+                            it.existingWalletsToUpdate.isNotEmpty()
+                    } == true
+                    val commitLabel = previewResult?.let { p ->
+                        val assetTotal = p.newWalletsToCreate.size + p.existingWalletsToUpdate.size
+                        when {
+                            assetTotal > 0 && p.parsedTransactions.isNotEmpty() ->
+                                "导入 ${assetTotal}账户 + ${p.parsedTransactions.size}笔"
+                            assetTotal > 0 -> "导入 ${assetTotal} 个账户"
+                            p.parsedTransactions.isNotEmpty() -> "导入 ${p.parsedTransactions.size} 笔"
+                            else -> "导入"
+                        }
+                    } ?: "导入"
+
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -2327,25 +2496,23 @@ private fun BackupAndCsvTransferSheet(
                                 .weight(1f)
                                 .height(48.dp)
                         ) {
-                            Text("预览", fontWeight = FontWeight.Bold)
+                            Text("解析预览", fontWeight = FontWeight.Bold)
                         }
                         Button(
                             onClick = {
                                 onCommitCsvImport(csvText, applyImportToWalletBalance) { msg ->
                                     localBanner = msg
+                                    previewResult = onPreviewCsv(csvText)
                                 }
                             },
-                            enabled = previewResult?.parsedTransactions?.isNotEmpty() == true,
+                            enabled = canCommit,
                             colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
                             shape = RoundedCornerShape(16.dp),
                             modifier = Modifier
-                                .weight(1f)
+                                .weight(1.3f)
                                 .height(48.dp)
                         ) {
-                            Text(
-                                previewResult?.parsedTransactions?.size?.takeIf { it > 0 }?.let { "导入 $it 笔" } ?: "导入",
-                                fontWeight = FontWeight.Bold
-                            )
+                            Text(commitLabel, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -2354,18 +2521,87 @@ private fun BackupAndCsvTransferSheet(
                     item {
                         ICostFormCard {
                             Text(
-                                text = "识别为「${preview.detectedSourceFormat}」，共 ${preview.parsedTransactions.size} 笔账单" +
-                                    if (preview.skippedNonFinancialRows > 0) "，跳过 ${preview.skippedNonFinancialRows} 行无关内容" else "",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
+                                text = "识别为「${preview.detectedSourceFormat}」" +
+                                    if (preview.skippedNonFinancialRows > 0) "（跳过 ${preview.skippedNonFinancialRows} 行无关内容）" else "",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.ExtraBold,
                                 color = ICostBlueAccent
                             )
-                            preview.parsedTransactions.take(5).forEach { tx ->
+
+                            if (preview.discoveredLedgers.isNotEmpty()) {
+                                HorizontalDivider(color = ICostDivider)
                                 Text(
-                                    text = "${tx.type.displayName} · ${tx.category} · ${tx.merchant} · ${formatMoneyCents(tx.amountCnyCents, tx.currency)}",
+                                    text = "包含账本（${preview.discoveredLedgers.size} 个" +
+                                        (if (preview.newLedgers.isNotEmpty()) "，将自动新建 ${preview.newLedgers.size} 个" else "") + "）",
                                     fontSize = 12.sp,
-                                    color = ICostTextPrimary
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostTextSecondary
                                 )
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    preview.discoveredLedgers.forEach { ledger ->
+                                        val isNew = ledger in preview.newLedgers
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = if (isNew) ICostBlueAccent.copy(alpha = 0.12f) else ICostBgGray
+                                        ) {
+                                            Text(
+                                                text = if (isNew) "＋ 新建：$ledger" else "✓ 已有：$ledger",
+                                                fontSize = 11.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isNew) ICostBlueAccent else ICostTextPrimary,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            val allAssetChanges = preview.newWalletsToCreate.map { true to it } +
+                                preview.existingWalletsToUpdate.map { false to it }
+                            if (allAssetChanges.isNotEmpty()) {
+                                HorizontalDivider(color = ICostDivider)
+                                Text(
+                                    text = "资产与信用账户（新建 ${preview.newWalletsToCreate.size} 个 · 同步 ${preview.existingWalletsToUpdate.size} 个）",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostTextSecondary
+                                )
+                                allAssetChanges.forEach { (isNew, w) ->
+                                    val tailBadge = w.cardLast4?.let { "($it)" }.orEmpty()
+                                    val balLabel = if (w.type.isLiability) {
+                                        val limitPart = w.creditLimitCents?.let { " / 额度 ${formatMoneyCents(it, w.currency)}" }.orEmpty()
+                                        "待还 ${formatMoneyCents(w.balanceCents, w.currency)}$limitPart"
+                                    } else {
+                                        "余额 ${formatMoneyCents(w.balanceCents, w.currency)}"
+                                    }
+                                    Text(
+                                        text = "${if (isNew) "＋ 新建" else "↻ 同步"} · ${w.name}$tailBadge [${w.subTypeLabel}] · $balLabel",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = if (isNew) ICostBlueAccent else ICostTextPrimary
+                                    )
+                                }
+                            }
+
+                            if (preview.parsedTransactions.isNotEmpty()) {
+                                HorizontalDivider(color = ICostDivider)
+                                Text(
+                                    text = "账单流水预览（共 ${preview.parsedTransactions.size} 笔）",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostTextSecondary
+                                )
+                                preview.parsedTransactions.take(6).forEach { tx ->
+                                    val acctHint = tx.paymentMethodRaw.ifBlank { "默认账户" }
+                                    Text(
+                                        text = "[${tx.ledgerName}] ${tx.type.displayName} · ${tx.category} · ${tx.merchant} ($acctHint) · ${formatMoneyCents(tx.amountCnyCents, tx.currency)}",
+                                        fontSize = 12.sp,
+                                        color = ICostTextPrimary
+                                    )
+                                }
                             }
                         }
                     }
@@ -2979,3 +3215,448 @@ private fun BatchReimbursementSheet(
         }
     }
 }
+
+/**
+ * GitHub 私有仓库 / 公开仓库 OTA 自动检查更新与 APK 下载安装面板
+ */
+@Composable
+private fun AppUpdateSheetContent(
+    config: AppUpdateConfig,
+    state: UpdateCheckState,
+    onSaveConfig: (AppUpdateConfig) -> Unit,
+    onCheckNow: () -> Unit,
+    onDownloadAndInstall: (ReleaseUpdateInfo) -> Unit,
+    onTriggerInstall: (String) -> Unit,
+    onIgnoreTag: (String) -> Unit,
+    onClose: () -> Unit
+) {
+    val context = LocalContext.current
+    var repoInput by remember(config.repoFullName) { mutableStateOf(config.repoFullName) }
+    var tokenInput by remember(config.customGithubToken) { mutableStateOf(config.customGithubToken) }
+    var autoCheck by remember(config.autoCheckOnLaunch) { mutableStateOf(config.autoCheckOnLaunch) }
+    var includePre by remember(config.includePrerelease) { mutableStateOf(config.includePrerelease) }
+    var showTokenPlain by remember { mutableStateOf(false) }
+    var savedFeedback by remember { mutableStateOf<String?>(null) }
+
+    val hasBuildConfigToken = remember { BuildConfig.GITHUB_UPDATE_TOKEN.isNotBlank() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+    ) {
+        ICostSheetHeader(
+            title = "版本与自动更新",
+            subtitle = "当前 v${BuildConfig.VERSION_NAME} · 支持 GitHub 私有仓库 OTA",
+            onClose = onClose
+        )
+
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(bottom = 24.dp)
+        ) {
+            // 1. 实时状态与操作卡片
+            item {
+                ICostFormCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "当前已装版本：v${BuildConfig.VERSION_NAME}",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostTextPrimary
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "更新源：${repoInput.ifBlank { "Rowan-rh/moji-ai" }}",
+                                fontSize = 12.sp,
+                                color = ICostTextSecondary
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = if (tokenInput.isNotBlank() || hasBuildConfigToken) {
+                                ICostGreenIncome.copy(alpha = 0.12f)
+                            } else {
+                                ICostAmberGold.copy(alpha = 0.14f)
+                            }
+                        ) {
+                            Text(
+                                text = if (tokenInput.isNotBlank() || hasBuildConfigToken) "私有鉴权已就绪" else "公开模式 / 未配Token",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (tokenInput.isNotBlank() || hasBuildConfigToken) ICostGreenIncome else ICostAmberGold,
+                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+
+                    when (state) {
+                        is UpdateCheckState.Checking -> {
+                            HorizontalDivider(color = ICostDivider)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(18.dp),
+                                    strokeWidth = 2.2.dp,
+                                    color = ICostBlueAccent
+                                )
+                                Text("正在连接 GitHub 检查最新 Release…", fontSize = 13.sp, color = ICostTextSecondary)
+                            }
+                        }
+
+                        is UpdateCheckState.UpToDate -> {
+                            HorizontalDivider(color = ICostDivider)
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = null,
+                                    tint = ICostGreenIncome,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = state.statusNote,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = ICostTextPrimary
+                                )
+                            }
+                        }
+
+                        is UpdateCheckState.UpdateAvailable -> {
+                            val rel = state.release
+                            val sizeMb = String.format(Locale.US, "%.2f MB", rel.apkSizeBytes / (1024.0 * 1024.0))
+                            HorizontalDivider(color = ICostDivider)
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "发现新版本：${rel.title}",
+                                        fontSize = 15.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = ICostBlueAccent
+                                    )
+                                    Text(
+                                        text = "${rel.publishedAt} · $sizeMb",
+                                        fontSize = 12.sp,
+                                        color = ICostTextSecondary
+                                    )
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = ICostBgGray,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = rel.releaseNotes,
+                                        fontSize = 12.sp,
+                                        color = ICostTextPrimary,
+                                        modifier = Modifier.padding(12.dp)
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Button(
+                                        onClick = { onDownloadAndInstall(rel) },
+                                        colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                                        shape = RoundedCornerShape(14.dp),
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(44.dp)
+                                    ) {
+                                        Text("立即下载并安装", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                    }
+                                    OutlinedButton(
+                                        onClick = { onIgnoreTag(rel.tagName) },
+                                        shape = RoundedCornerShape(14.dp),
+                                        modifier = Modifier.height(44.dp)
+                                    ) {
+                                        Text("忽略此版", fontSize = 13.sp)
+                                    }
+                                }
+                            }
+                        }
+
+                        is UpdateCheckState.Downloading -> {
+                            val dlMb = String.format(Locale.US, "%.2f", state.downloadedBytes / (1024.0 * 1024.0))
+                            val totalMb = String.format(Locale.US, "%.2f MB", state.totalBytes / (1024.0 * 1024.0))
+                            HorizontalDivider(color = ICostDivider)
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "正在下载 ${state.release.apkFileName}…",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary
+                                    )
+                                    Text(
+                                        text = "${state.progressPercent}% ($dlMb / $totalMb)",
+                                        fontSize = 12.sp,
+                                        color = ICostBlueAccent,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                LinearProgressIndicator(
+                                    progress = { (state.progressPercent / 100f).coerceIn(0f, 1f) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(7.dp)
+                                        .clip(RoundedCornerShape(4.dp)),
+                                    color = ICostBlueAccent,
+                                    trackColor = ICostBgGray
+                                )
+                            }
+                        }
+
+                        is UpdateCheckState.ReadyToInstall -> {
+                            HorizontalDivider(color = ICostDivider)
+                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(
+                                    text = if (state.needsInstallPermission) {
+                                        "APK 已下载完成，请先在系统设置中开启「允许安装未知应用」，返回后点击下方按钮即可覆盖安装"
+                                    } else {
+                                        "新版本 ${state.release.tagName} 安装包已下载并通过签名头校验"
+                                    },
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = ICostGreenIncome
+                                )
+                                Button(
+                                    onClick = { onTriggerInstall(state.apkFilePath) },
+                                    colors = ButtonDefaults.buttonColors(containerColor = ICostGreenIncome),
+                                    shape = RoundedCornerShape(14.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(46.dp)
+                                ) {
+                                    Text("调起系统安装器覆盖升级", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                }
+                            }
+                        }
+
+                        is UpdateCheckState.Error -> {
+                            HorizontalDivider(color = ICostDivider)
+                            Row(verticalAlignment = Alignment.Top) {
+                                Icon(
+                                    imageVector = Icons.Default.WarningAmber,
+                                    contentDescription = null,
+                                    tint = ICostCoralRed,
+                                    modifier = Modifier
+                                        .padding(top = 1.dp)
+                                        .size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = state.message,
+                                    fontSize = 13.sp,
+                                    color = ICostCoralRed
+                                )
+                            }
+                        }
+
+                        UpdateCheckState.Idle -> Unit
+                    }
+
+                    Button(
+                        onClick = {
+                            onSaveConfig(
+                                config.copy(
+                                    repoFullName = repoInput.trim(),
+                                    customGithubToken = tokenInput.trim(),
+                                    autoCheckOnLaunch = autoCheck,
+                                    includePrerelease = includePre
+                                )
+                            )
+                            onCheckNow()
+                        },
+                        enabled = state !is UpdateCheckState.Checking && state !is UpdateCheckState.Downloading,
+                        colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(46.dp)
+                    ) {
+                        Text(
+                            text = if (state is UpdateCheckState.Checking) "正在检查…" else "立即检查更新",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp
+                        )
+                    }
+                }
+            }
+
+            // 2. 私有仓库与 Token 配置卡片
+            item {
+                ICostFormCard {
+                    Text(
+                        text = "GitHub 私有仓库 OTA 配置",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextPrimary
+                    )
+
+                    ICostFormField(
+                        value = repoInput,
+                        onValueChange = { repoInput = it },
+                        label = "GitHub 仓库（owner/repo）",
+                        placeholder = "Rowan-rh/moji-ai",
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    ICostFormField(
+                        value = tokenInput,
+                        onValueChange = { tokenInput = it },
+                        label = "私有仓库只读 Token（Fine-grained PAT）",
+                        placeholder = if (hasBuildConfigToken) "已内置 local.properties Token，留空即生效" else "github_pat_xxx（仅需 Contents: Read-only）",
+                        singleLine = true,
+                        visualTransformation = if (showTokenPlain) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingContent = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(end = 6.dp)
+                            ) {
+                                TextButton(
+                                    onClick = {
+                                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                        val clipText = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim().orEmpty()
+                                        if (clipText.isNotBlank()) {
+                                            tokenInput = clipText
+                                            savedFeedback = "已从剪贴板粘贴 Token"
+                                        }
+                                    }
+                                ) {
+                                    Text("粘贴", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = ICostBlueAccent)
+                                }
+                                TextButton(onClick = { showTokenPlain = !showTokenPlain }) {
+                                    Text(if (showTokenPlain) "隐藏" else "显示", fontSize = 12.sp, color = ICostTextSecondary)
+                                }
+                            }
+                        },
+                        supportingText = if (hasBuildConfigToken && tokenInput.isBlank()) {
+                            "当前已使用编译期注入的 GITHUB_UPDATE_TOKEN；在此输入可覆盖"
+                        } else {
+                            "私有仓库下载 Release 附件会通过 API Asset + octet-stream 鉴权直连，Token 仅保存在本机"
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    HorizontalDivider(color = ICostDivider)
+
+                    SmartSwitchRow(
+                        title = "启动 App 时自动检查更新",
+                        subtitle = "冷启动后台静默检测，发现新 Release 时自动弹窗提醒",
+                        checked = autoCheck,
+                        onCheckedChange = {
+                            autoCheck = it
+                            onSaveConfig(
+                                config.copy(
+                                    repoFullName = repoInput.trim(),
+                                    customGithubToken = tokenInput.trim(),
+                                    autoCheckOnLaunch = it,
+                                    includePrerelease = includePre
+                                )
+                            )
+                        }
+                    )
+
+                    HorizontalDivider(color = ICostDivider)
+
+                    SmartSwitchRow(
+                        title = "接收预发布版本 (Pre-release)",
+                        subtitle = "开启后可检测带体验版标记的 Release",
+                        checked = includePre,
+                        onCheckedChange = {
+                            includePre = it
+                            onSaveConfig(
+                                config.copy(
+                                    repoFullName = repoInput.trim(),
+                                    customGithubToken = tokenInput.trim(),
+                                    autoCheckOnLaunch = autoCheck,
+                                    includePrerelease = it
+                                )
+                            )
+                        }
+                    )
+
+                    Button(
+                        onClick = {
+                            onSaveConfig(
+                                config.copy(
+                                    repoFullName = repoInput.trim(),
+                                    customGithubToken = tokenInput.trim(),
+                                    autoCheckOnLaunch = autoCheck,
+                                    includePrerelease = includePre,
+                                    ignoredTag = ""
+                                )
+                            )
+                            savedFeedback = "已保存私有仓库更新配置"
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = ICostTextPrimary),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                    ) {
+                        Text("保存配置", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    }
+
+                    if (!savedFeedback.isNullOrBlank()) {
+                        Text(
+                            text = savedFeedback!!,
+                            fontSize = 12.sp,
+                            color = ICostGreenIncome,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+
+            // 3. 私有仓库发版与 Token 生成简明说明
+            item {
+                ICostFormCard {
+                    Text(
+                        text = "私有仓库 OTA 使用说明",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextPrimary
+                    )
+                    Text(
+                        text = "1. 生成只读 Token：GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens，Repository 选择 Rowan-rh/moji-ai，Permissions 仅开启 Contents: Read-only。",
+                        fontSize = 12.sp,
+                        color = ICostTextSecondary
+                    )
+                    Text(
+                        text = "2. 配置 Token：可填入上方输入框保存，或在本机 local.properties 中添加 GITHUB_UPDATE_TOKEN=github_pat_xxx。",
+                        fontSize = 12.sp,
+                        color = ICostTextSecondary
+                    )
+                    Text(
+                        text = "3. 发布更新包：在电脑执行 gh release create v1.0.1 app/build/outputs/apk/debug/app-debug.apk --repo Rowan-rh/moji-ai，手机端即可自动收到更新并一键覆盖安装。",
+                        fontSize = 12.sp,
+                        color = ICostTextSecondary
+                    )
+                }
+            }
+        }
+    }
+}
+

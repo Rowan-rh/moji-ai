@@ -6,6 +6,7 @@
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <queries>
         <package android:name="com.tencent.mm" />
@@ -94,6 +95,17 @@
                 <action android:name="com.moji.ai.ACTION_MARK_REIMBURSABLE" />
             </intent-filter>
         </receiver>
+
+        <!-- 5. 应用内 OTA 更新 APK 安装 FileProvider（支持私有仓库下载 APK 后调起系统安装器） -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 
