@@ -28,9 +28,20 @@
 
 ## 构建与安装
 
+### 常规 Debug 包（`com.moji.ai`）
+
 ```bash
 ./gradlew assembleDebug
 adb install -r -g app/build/outputs/apk/debug/app-debug.apk
+```
+
+### QA 独立测试包（`com.moji.ai.qa`，与正式包共存）
+
+用于在已安装正式版 `com.moji.ai` 的手机上安全执行真机测试，拥有独立的青蓝 QA 图标、独立数据库与 `FileProvider`、独立通知渠道、独立 WebDAV 默认路径（`/dav/MoJi-QA/moji_qa_latest.mojibackup`），并默认禁用正式版 OTA 更新：
+
+```bash
+./gradlew assembleQa
+adb install -r -g app/build/outputs/apk/qa/app-qa.apk
 ```
 
 ## 发布正式版（公开下载与应用内更新）
