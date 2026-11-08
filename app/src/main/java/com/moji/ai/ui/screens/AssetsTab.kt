@@ -64,6 +64,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -1819,7 +1820,8 @@ private fun AddRecurringRuleSheet(
     onDismiss: () -> Unit,
     onConfirm: (title: String, amountYuan: Double, currency: String, category: String, walletId: Long, frequency: RecurrenceFrequency) -> Unit
 ) {
-    val categories = remember { CategoryCatalog.expenseCategories.map { it.name } }
+    val expenseCategories by CategoryCatalog.expenseCategoriesFlow.collectAsState()
+    val categories = remember(expenseCategories) { expenseCategories.map { it.name } }
     var title by remember { mutableStateOf("") }
     var amountStr by remember { mutableStateOf("") }
     var walletId by remember { mutableStateOf(wallets.firstOrNull()?.id) }
