@@ -72,6 +72,15 @@ class SilentBookkeepingNotifier(private val context: Context) {
         }
     }
 
+    private val standardChannelId: String
+        get() = if (BuildConfig.IS_QA_BUILD) QA_CHANNEL_ID else CHANNEL_ID
+
+    private val fluidChannelId: String
+        get() = if (BuildConfig.IS_QA_BUILD) QA_FLUID_CLOUD_CHANNEL_ID else FLUID_CLOUD_CHANNEL_ID
+
+    private fun activeChannelId(isOnePlus: Boolean): String =
+        if (isOnePlus) fluidChannelId else standardChannelId
+
     init {
         createChannelIfNeeded()
     }
@@ -85,7 +94,6 @@ class SilentBookkeepingNotifier(private val context: Context) {
             nm.deleteNotificationChannel("moji_fluid_cloud_live")
         }
 
-        val standardChannelId = if (BuildConfig.IS_QA_BUILD) QA_CHANNEL_ID else CHANNEL_ID
         val standardChannelName = if (BuildConfig.IS_QA_BUILD) {
             "【QA测试】AI 自动静默入账提醒"
         } else {
@@ -102,7 +110,6 @@ class SilentBookkeepingNotifier(private val context: Context) {
         }
         nm.createNotificationChannel(standardChannel)
 
-        val fluidChannelId = if (BuildConfig.IS_QA_BUILD) QA_FLUID_CLOUD_CHANNEL_ID else FLUID_CLOUD_CHANNEL_ID
         val fluidChannelName = if (BuildConfig.IS_QA_BUILD) {
             "【QA测试】一加流体云 · 自动记账通知中心卡片"
         } else {
@@ -135,11 +142,7 @@ class SilentBookkeepingNotifier(private val context: Context) {
         }
 
         val isOnePlus = isOnePlusFluidCloudSupported()
-        val activeChannelId = if (BuildConfig.IS_QA_BUILD) {
-            if (isOnePlus) QA_FLUID_CLOUD_CHANNEL_ID else QA_CHANNEL_ID
-        } else {
-            if (isOnePlus) FLUID_CLOUD_CHANNEL_ID else CHANNEL_ID
-        }
+        val activeChannelId = activeChannelId(isOnePlus)
 
         val walletMap = wallets.associateBy { it.id }
         val currencySymbol = CurrencyCode.fromCode(tx.currency).symbol
@@ -323,11 +326,7 @@ class SilentBookkeepingNotifier(private val context: Context) {
         }
 
         val isOnePlus = isOnePlusFluidCloudSupported()
-        val activeChannelId = if (BuildConfig.IS_QA_BUILD) {
-            if (isOnePlus) QA_FLUID_CLOUD_CHANNEL_ID else QA_CHANNEL_ID
-        } else {
-            if (isOnePlus) FLUID_CLOUD_CHANNEL_ID else CHANNEL_ID
-        }
+        val activeChannelId = activeChannelId(isOnePlus)
         val walletMap = wallets.associateBy { it.id }
         val sourceWallet = tx.sourceWalletId?.let { walletMap[it] }
         val walletLabel = sourceWallet?.let { w ->

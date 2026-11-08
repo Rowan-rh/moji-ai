@@ -69,22 +69,21 @@ object WebDavSyncClient {
         prefs.edit().putString("webdav_config_json", jsonCodec.encodeToString(config)).apply()
     }
 
-    private fun buildNormalizedTargetUrl(config: WebDavConfig): Pair<String, String> {
+    private fun buildNormalizedTargetUrl(config: WebDavConfig): Triple<String, String, String> {
         val dirUrl = if (config.serverUrl.trim().endsWith("/")) {
             config.serverUrl.trim()
         } else {
             "${config.serverUrl.trim()}/"
         }
         val fileName = config.remoteFileName.trim().ifBlank { DEFAULT_REMOTE_FILE_NAME }
-        return dirUrl to "$dirUrl$fileName"
+        return Triple(dirUrl, "$dirUrl$fileName", fileName)
     }
 
     suspend fun uploadSnapshot(
         config: WebDavConfig,
         backupJson: String
     ): Result<String> = withContext(Dispatchers.IO) {
-        val (dirUrl, fileUrl) = buildNormalizedTargetUrl(config)
-        val resolvedFileName = config.remoteFileName.trim().ifBlank { DEFAULT_REMOTE_FILE_NAME }
+        val (dirUrl, fileUrl, resolvedFileName) = buildNormalizedTargetUrl(config)
         if (BuildConfig.IS_QA_BUILD) {
             val pointsToProdDir = dirUrl.contains("/MoJi/", ignoreCase = true) &&
                 !dirUrl.contains("QA", ignoreCase = true)
@@ -135,7 +134,7 @@ object WebDavSyncClient {
         }
         try {
             val authHeader = Credentials.basic(config.username.trim(), config.appPassword.trim())
-            val (_, fileUrl) = buildNormalizedTargetUrl(config)
+            val (_, fileUrl, _) = buildNormalizedTargetUrl(config)
 
             val getReq = Request.Builder()
                 .url(fileUrl)

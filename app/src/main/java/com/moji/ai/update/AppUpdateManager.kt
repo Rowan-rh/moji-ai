@@ -115,11 +115,10 @@ class AppUpdateManager(context: Context) {
 
     private fun loadConfig(): AppUpdateConfig {
         val defaultRepo = BuildConfig.GITHUB_UPDATE_REPO.ifBlank { "Rowan-rh/moji-ai" }
-        val defaultAutoCheck = !BuildConfig.IS_QA_BUILD
         return AppUpdateConfig(
             repoFullName = prefs.getString(KEY_REPO, defaultRepo)?.trim().takeUnless { it.isNullOrBlank() } ?: defaultRepo,
             customGithubToken = prefs.getString(KEY_TOKEN, "")?.trim().orEmpty(),
-            autoCheckOnLaunch = if (BuildConfig.IS_QA_BUILD) false else prefs.getBoolean(KEY_AUTO_CHECK, defaultAutoCheck),
+            autoCheckOnLaunch = !BuildConfig.IS_QA_BUILD && prefs.getBoolean(KEY_AUTO_CHECK, true),
             includePrerelease = prefs.getBoolean(KEY_INCLUDE_PRERELEASE, false),
             ignoredTag = prefs.getString(KEY_IGNORED_TAG, "")?.trim().orEmpty()
         )
