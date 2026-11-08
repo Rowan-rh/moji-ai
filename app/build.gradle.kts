@@ -19,6 +19,18 @@ val githubUpdateToken: String = localProps.getProperty("GITHUB_UPDATE_TOKEN", ""
 fun escapeForBuildConfig(value: String): String =
     value.replace("\\", "\\\\").replace("\"", "\\\"")
 
+// 正式签名：从 local.properties 或同名环境变量读取，证书与密码绝不提交进仓库。
+// 四项齐全时 release 包使用该证书签名；缺任一项时 release 包不签名，scripts/release.sh 会拒绝发布。
+fun releaseSigningValue(key: String): String =
+    (localProps.getProperty(key) ?: System.getenv(key)).orEmpty().trim()
+val releaseStoreFile: String = releaseSigningValue("MOJI_RELEASE_STORE_FILE")
+val releaseStorePassword: String = releaseSigningValue("MOJI_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias: String = releaseSigningValue("MOJI_RELEASE_KEY_ALIAS")
+val releaseKeyPassword: String = releaseSigningValue("MOJI_RELEASE_KEY_PASSWORD")
+val hasReleaseSigning: Boolean = listOf(
+    releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword
+).all { it.isNotEmpty() }
+
 android {
     namespace = "com.moji.ai"
     compileSdk = 35
@@ -38,8 +50,22 @@ android {
         }
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(releaseStoreFile)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

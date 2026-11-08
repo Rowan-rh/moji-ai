@@ -79,6 +79,7 @@
 - **可视化条件规则引擎 (`SmartRuleEngine`, `When -> Then`)**：支持按关键词、金额上下限、24 小时时间窗组合条件，自动改写分类/账本/附加标签、自动标为待报销或静默拦截非账单通知。
 - **WebDAV 自托管云同步 (`WebDavSyncClient`)**：支持连接坚果云、Nextcloud、群晖 Synology 等标准 WebDAV 服务，一键上传或下载恢复 `.mojibackup` 全量快照。
 - **GitHub 私有仓库 / 公开仓库 OTA 自动更新 (`AppUpdateManager`)**：支持通过单仓库只读 Fine-grained PAT（编译期 `local.properties` 注入或设置页动态配置）查询 GitHub Releases、通过 Release Asset API（`Accept: application/octet-stream`）流式下载私有仓库 APK、校验 `PK` 签名头并通过 `FileProvider` 调起系统安装器一键覆盖升级。
+- **正式版公开分发**：release 构建从 `local.properties` / 环境变量读取正式签名证书（`MOJI_RELEASE_*`），未配置时不签名；`scripts/release.sh` 校验 `gh` 账号、`main` 分支与版本号高于最新 Release、构建并用 `apksigner` 校验签名（可选比对证书指纹），随后打 `v<versionName>` Tag 并创建附带固定名 `moji.apk` 的 GitHub Release，提供 `releases/latest/download/moji.apk` 公开直链。
 
 ### 5. 多币种自动换算与周期性固定收支
 - **多币种支持**：内置 `CNY` (人民币)、`USD` (美元)、`HKD` (港币)、`EUR` (欧元)、`JPY` (日元)、`GBP` (英镑) 等币种及汇率折算。海外刷卡或外币订阅（如 `$20.00 USD`）自动按汇率折算本位币入账并联动外币卡/全币种信用卡。

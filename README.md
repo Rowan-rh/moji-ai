@@ -33,6 +33,43 @@
 adb install -r -g app/build/outputs/apk/debug/app-debug.apk
 ```
 
+## 发布正式版（公开下载与应用内更新）
+
+仓库公开时，每次发布 GitHub Release 并附上 `moji.apk`，就同时提供了公开下载链接和应用内 OTA 更新（无需 Token）：
+
+- 最新版直链：`https://github.com/Rowan-rh/moji-ai/releases/latest/download/moji.apk`
+- 发布页：`https://github.com/Rowan-rh/moji-ai/releases`
+
+**一次性准备：正式签名证书**。所有版本必须用同一张证书签名，证书丢失后老用户无法覆盖升级，请离线备份证书与密码：
+
+```bash
+keytool -genkey -v -keystore ~/keys/moji-release.jks -alias moji -keyalg RSA -keysize 2048 -validity 36500
+```
+
+在 `local.properties`（不入库）中配置，也可用同名环境变量：
+
+```properties
+MOJI_RELEASE_STORE_FILE=/Users/你/keys/moji-release.jks
+MOJI_RELEASE_STORE_PASSWORD=******
+MOJI_RELEASE_KEY_ALIAS=moji
+MOJI_RELEASE_KEY_PASSWORD=******
+# 可选：首次 dry-run 输出的证书指纹，之后发布会校验，防止误用其他证书
+MOJI_RELEASE_CERT_SHA256=
+```
+
+`local.properties` 中不要配置 `GITHUB_UPDATE_TOKEN`：它会编译进 APK，公开分发时任何人都能提取。
+
+**每次发布**：
+
+1. 在功能 PR 中把 `app/build.gradle.kts` 的 `versionCode` 加 1，并提升 `versionName`（Tag 即 `v<versionName>`，两者须一致，否则应用会反复提示更新）。
+2. `develop` → `main` 提 `[release]` 发布 PR 并以 merge commit 合并。
+3. 在与 `origin/main` 一致的干净 `main` 上运行：
+
+```bash
+scripts/release.sh --dry-run   # 可在任意分支先验证构建与签名
+scripts/release.sh             # 校验版本 → 构建正式签名包 → 打 Tag → 创建 Release 并上传 moji.apk
+```
+
 ## 文档导航
 
 - **产品需求与技术规格**：[`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md)
