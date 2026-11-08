@@ -1,6 +1,8 @@
 package com.moji.ai.data.repository
 
 import androidx.room.withTransaction
+import com.moji.ai.data.backup.BackupAndCsvTransferEngine
+import com.moji.ai.data.backup.CsvParsePreviewResult
 import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
@@ -8,6 +10,13 @@ import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
 import kotlin.math.roundToLong
+
+data class BatchImportCommitSummary(
+    val createdWalletCount: Int,
+    val updatedWalletCount: Int,
+    val importedTxCount: Int,
+    val skippedDuplicateTxCount: Int
+)
 
 class LedgerRepository(private val db: AppDatabase) {
 
@@ -23,6 +32,47 @@ class LedgerRepository(private val db: AppDatabase) {
 
     suspend fun getRecentRefundableExpenses(limit: Int = 15): List<TransactionEntity> =
         db.transactionDao().getRecentRefundableExpenses(limit)
+
+    suspend fun getTransactionById(id: Long): TransactionEntity? =
+        if (id <= 0L) null else db.transactionDao().getTransactionById(id)
+
+    suspend fun findTransactionByOrderKey(orderKey: String): TransactionEntity? =
+        if (orderKey.isBlank()) null else db.transactionDao().findByOrderKey(orderKey)
+
+    suspend fun findTransactionByNo(txNo: String): TransactionEntity? =
+        if (txNo.isBlank()) null else db.transactionDao().findByTransactionNo(txNo)
+
+    suspend fun findTransactionByMerchantOrderNo(orderNo: String): TransactionEntity? =
+        if (orderNo.isBlank()) null else db.transactionDao().findByMerchantOrderNo(orderNo)
+
+    suspend fun findTransactionByScreenshotSha256(sha256: String): TransactionEntity? =
+        if (sha256.isBlank()) null else db.transactionDao().findByScreenshotSha256(sha256)
+
+    suspend fun findTransactionsByAmountAndOccurredWindow(
+        amountCents: Long,
+        occurredAtMillis: Long,
+        toleranceMillis: Long = 60_000L
+    ): List<TransactionEntity> =
+        db.transactionDao().findByAmountAndOccurredWindow(amountCents, occurredAtMillis, toleranceMillis)
+
+    suspend fun findTransactionsByAmountAndTimeOrCapturedWindow(
+        amountCents: Long,
+        occurredAtMillis: Long,
+        capturedAtMillis: Long,
+        toleranceMillis: Long = 65_000L
+    ): List<TransactionEntity> =
+        db.transactionDao().findByAmountAndTimeOrCapturedWindow(
+            amountCents = amountCents,
+            occurredAtMillis = occurredAtMillis,
+            capturedAtMillis = capturedAtMillis,
+            toleranceMillis = toleranceMillis
+        )
+
+    suspend fun insertCaptureEvidence(evidence: com.moji.ai.data.local.CaptureEvidenceEntity): Long =
+        db.captureEvidenceDao().insertEvidence(evidence)
+
+    suspend fun getEvidencesForTransaction(txId: Long): List<com.moji.ai.data.local.CaptureEvidenceEntity> =
+        db.captureEvidenceDao().getEvidencesForTransaction(txId)
 
     /**
      * 账户真实余额锚点登记 + 差额自动生成平账流水（对标 blue-whale-keeper 与 moneywallet）：
@@ -124,6 +174,88 @@ class LedgerRepository(private val db: AppDatabase) {
 
         val id = recordTransaction(adjustmentTx)
         adjustmentTx.copy(id = id)
+    }
+
+    /**
+     * 批量导入 iCost / 微信 / 支付宝 / 钱迹 CSV（支持原子化创建新资产账户、更新已有资产余额、绑定新建账户 ID 并去重入账）
+     */
+    suspend fun importExternalBatch(
+        preview: CsvParsePreviewResult,
+        applyToWalletBalance: Boolean = false
+    ): BatchImportCommitSummary = db.withTransaction {
+        val walletDao = db.walletDao()
+        val txDao = db.transactionDao()
+
+        val walletKeyToId = mutableMapOf<String, Long>()
+        val walletsWithExplicitSnapshotBalance = mutableSetOf<Long>()
+
+        for (w in walletDao.getAllWallets()) {
+            walletKeyToId[BackupAndCsvTransferEngine.normalizeAccountKey(w.name, w.cardLast4)] = w.id
+            walletKeyToId[BackupAndCsvTransferEngine.normalizeAccountKey(w.name, null)] = w.id
+        }
+
+        var updatedWalletCount = 0
+        for (toUpdate in preview.existingWalletsToUpdate) {
+            walletDao.updateWallet(toUpdate.copy(updatedAtMillis = System.currentTimeMillis()))
+            walletKeyToId[BackupAndCsvTransferEngine.normalizeAccountKey(toUpdate.name, toUpdate.cardLast4)] = toUpdate.id
+            walletKeyToId[BackupAndCsvTransferEngine.normalizeAccountKey(toUpdate.name, null)] = toUpdate.id
+            walletsWithExplicitSnapshotBalance.add(toUpdate.id)
+            updatedWalletCount++
+        }
+
+        var createdWalletCount = 0
+        for (toCreate in preview.newWalletsToCreate) {
+            val newId = walletDao.insertWallet(toCreate.copy(id = 0L, updatedAtMillis = System.currentTimeMillis()))
+            walletKeyToId[BackupAndCsvTransferEngine.normalizeAccountKey(toCreate.name, toCreate.cardLast4)] = newId
+            walletKeyToId[BackupAndCsvTransferEngine.normalizeAccountKey(toCreate.name, null)] = newId
+            if (toCreate.balanceCents != 0L) {
+                walletsWithExplicitSnapshotBalance.add(newId)
+            }
+            createdWalletCount++
+        }
+
+        val existing = txDao.getAllTransactions()
+        val existingKeys = existing.map {
+            "${it.timestamp / 60_000L}_${it.type.name}_${it.amountCents}"
+        }.toMutableSet()
+
+        var importedCount = 0
+        var skippedDuplicates = 0
+
+        for ((idx, item) in preview.parsedTransactions.withIndex()) {
+            val resolvedSrcId = item.sourceWalletId ?: preview.sourceWalletNameByIndex[idx]?.let { walletKeyToId[it] }
+            val resolvedDstId = item.targetWalletId ?: preview.targetWalletNameByIndex[idx]?.let { walletKeyToId[it] }
+
+            val boundTx = item.copy(
+                id = 0L,
+                sourceWalletId = resolvedSrcId,
+                targetWalletId = resolvedDstId
+            )
+
+            val dedupKey = "${boundTx.timestamp / 60_000L}_${boundTx.type.name}_${boundTx.amountCents}"
+            if (dedupKey in existingKeys) {
+                skippedDuplicates++
+                continue
+            }
+            existingKeys.add(dedupKey)
+
+            val touchesExplicitBalanceWallet = (resolvedSrcId != null && resolvedSrcId in walletsWithExplicitSnapshotBalance) ||
+                (resolvedDstId != null && resolvedDstId in walletsWithExplicitSnapshotBalance)
+
+            if (applyToWalletBalance && !touchesExplicitBalanceWallet) {
+                recordTransaction(boundTx)
+            } else {
+                txDao.insertTransaction(boundTx)
+            }
+            importedCount++
+        }
+
+        BatchImportCommitSummary(
+            createdWalletCount = createdWalletCount,
+            updatedWalletCount = updatedWalletCount,
+            importedTxCount = importedCount,
+            skippedDuplicateTxCount = skippedDuplicates
+        )
     }
 
     /**
@@ -330,12 +462,42 @@ class LedgerRepository(private val db: AppDatabase) {
         true
     }
 
-    suspend fun undoAndDeleteTransaction(transactionId: Long): Boolean = db.withTransaction {
-        val txDao = db.transactionDao()
-        val tx = txDao.getTransactionById(transactionId) ?: return@withTransaction false
-        revertWalletImpact(tx)
-        txDao.deleteTransaction(tx)
-        true
+    suspend fun undoAndDeleteTransaction(transactionId: Long): Boolean {
+        var screenshotToDelete: String? = null
+        val deleted = db.withTransaction {
+            val txDao = db.transactionDao()
+            val tx = txDao.getTransactionById(transactionId) ?: return@withTransaction false
+            revertWalletImpact(tx)
+            txDao.deleteTransaction(tx)
+            if (tx.screenshotPath.isNotBlank()) {
+                val stillReferenced = txDao.getAllTransactions().any {
+                    it.id != tx.id && it.screenshotPath == tx.screenshotPath
+                }
+                if (!stillReferenced) {
+                    screenshotToDelete = tx.screenshotPath
+                }
+            }
+            true
+        }
+        if (deleted && !screenshotToDelete.isNullOrBlank()) {
+            com.moji.ai.service.BillScreenshotStorage.deleteIfExists(screenshotToDelete)
+        }
+        return deleted
+    }
+
+    suspend fun clearAllTransactionsAndEvidences() = db.withTransaction {
+        db.transactionDao().deleteAllTransactions()
+        db.captureEvidenceDao().deleteAllEvidences()
+        val walletDao = db.walletDao()
+        val currentWallets = walletDao.getAllWallets()
+        for (w in currentWallets) {
+            walletDao.updateWallet(
+                w.copy(
+                    balanceCents = 0L,
+                    updatedAtMillis = System.currentTimeMillis()
+                )
+            )
+        }
     }
 
     suspend fun saveWallet(wallet: WalletEntity): Long = db.walletDao().insertWallet(wallet)
@@ -343,6 +505,58 @@ class LedgerRepository(private val db: AppDatabase) {
     suspend fun updateWallet(wallet: WalletEntity) = db.walletDao().updateWallet(wallet)
 
     suspend fun deleteWallet(wallet: WalletEntity) = db.walletDao().deleteWallet(wallet)
+
+    /**
+     * 1:1 同步 iCost 全部 11 个资产账户（7 个信用账户 + 4 个资金账户）及余额、总额度、尾号与还款日，
+     * 同时重映射已有流水的关联账户 ID，清理旧版演示用的“招商银行储蓄卡(8848)”及演示周期规则。
+     */
+    suspend fun syncICostAllAccounts() = db.withTransaction {
+        val walletDao = db.walletDao()
+        val txDao = db.transactionDao()
+        val ruleDao = db.recurringRuleDao()
+
+        val oldWallets = walletDao.getAllWallets()
+        val oldAlipayId = oldWallets.firstOrNull { it.brandCode == "ALIPAY" || it.name.contains("账户余额") }?.id ?: 4L
+        val oldWechatId = oldWallets.firstOrNull { it.brandCode == "WECHAT" || it.name.contains("微信零钱") }?.id ?: 5L
+
+        walletDao.deleteAllWallets()
+        walletDao.insertAll(AppDatabase.defaultWallets())
+
+        val allTxs = txDao.getAllTransactions()
+        for (tx in allTxs) {
+            val pm = tx.paymentMethodRaw
+            val newSourceId = when {
+                pm.contains("3625") -> 11L
+                pm.contains("5021") -> 10L
+                pm.contains("3354") -> 1L
+                tx.sourceWalletId == 1L -> 1L
+                tx.sourceWalletId == oldAlipayId -> 8L
+                tx.sourceWalletId == oldWechatId -> 9L
+                else -> tx.sourceWalletId
+            }
+            val newTargetId = when {
+                tx.targetWalletId == oldAlipayId -> 8L
+                tx.targetWalletId == oldWechatId -> 9L
+                else -> tx.targetWalletId
+            }
+            if (newSourceId != tx.sourceWalletId || newTargetId != tx.targetWalletId) {
+                txDao.updateTransaction(
+                    tx.copy(
+                        sourceWalletId = newSourceId,
+                        targetWalletId = newTargetId,
+                        updatedAtMillis = System.currentTimeMillis()
+                    )
+                )
+            }
+        }
+
+        // 清理旧版绑定在演示卡 8848 上的「每月房租」演示周期规则
+        for (rule in ruleDao.getAllRules()) {
+            if (rule.title == "每月房租" && rule.walletId == 6L) {
+                ruleDao.deleteRule(rule)
+            }
+        }
+    }
 
     suspend fun saveRecurringRule(rule: RecurringRuleEntity): Long = db.recurringRuleDao().insertRule(rule)
 
@@ -532,13 +746,34 @@ class LedgerRepository(private val db: AppDatabase) {
     }
 
     private suspend fun findBestMatchingExpenseForRefund(refundTx: TransactionEntity): TransactionEntity? {
-        val candidates = db.transactionDao().getRecentRefundableExpenses(15)
-        return candidates.firstOrNull {
-            val remaining = it.amountCnyCents - it.refundedAmountCents
-            remaining >= refundTx.amountCnyCents &&
-                (it.category == refundTx.category ||
-                    (refundTx.merchant.isNotBlank() && it.merchant.contains(refundTx.merchant, ignoreCase = true)))
-        } ?: candidates.firstOrNull { (it.amountCnyCents - it.refundedAmountCents) >= refundTx.amountCnyCents }
+        val candidates = db.transactionDao().getRecentRefundableExpenses(30)
+        val refundKeys = listOf(refundTx.orderKey, refundTx.transactionNo, refundTx.merchantOrderNo)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        // 1. 优先匹配相同订单号/交易单号/商户单号的原消费账单
+        if (refundKeys.isNotEmpty()) {
+            candidates.firstOrNull { exp ->
+                val expKeys = listOf(exp.orderKey, exp.transactionNo, exp.merchantOrderNo)
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                (exp.amountCnyCents - exp.refundedAmountCents) >= refundTx.amountCnyCents &&
+                    refundKeys.any { it in expKeys }
+            }?.let { return it }
+        }
+        // 2. 无单号匹配时，仅匹配消费时间不晚于退款时间（允许同日误差）、金额完全一致且商户或商品名一致的原账单
+        val refundGoods = refundTx.note.substringAfter("| ", "").substringBefore(" · ").trim()
+        return candidates.firstOrNull { exp ->
+            val expGoods = exp.note.substringAfter("| ", "").substringBefore(" · ").trim()
+            val sameMerchant = refundTx.merchant.isNotBlank() && exp.merchant.isNotBlank() &&
+                (exp.merchant.contains(refundTx.merchant, ignoreCase = true) ||
+                    refundTx.merchant.contains(exp.merchant, ignoreCase = true))
+            val sameGoods = refundGoods.length >= 4 && expGoods.length >= 4 &&
+                (expGoods.startsWith(refundGoods.take(8)) || refundGoods.startsWith(expGoods.take(8)))
+            exp.refundedAmountCents == 0L &&
+                exp.amountCnyCents == refundTx.amountCnyCents &&
+                exp.timestamp <= refundTx.timestamp + 86_400_000L &&
+                (sameMerchant || sameGoods)
+        }
     }
 
     private fun convertCentsBetweenCurrencies(

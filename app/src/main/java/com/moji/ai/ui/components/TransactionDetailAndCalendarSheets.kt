@@ -1,10 +1,18 @@
 package com.moji.ai.ui.components
 
+import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import java.io.File
+import kotlin.math.abs
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,13 +51,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -75,6 +87,7 @@ import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
+import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
@@ -155,8 +168,29 @@ fun TransactionDetailSheet(
     val badgeColor = resolveTransactionBadgeColor(tx.type)
 
     val fullTimeStr = remember(tx.timestamp) {
-        SimpleDateFormat("yyyy年MM月dd日 HH:mm", Locale.CHINA).format(Date(tx.timestamp))
+        val cal = Calendar.getInstance().apply { timeInMillis = tx.timestamp }
+        val pattern = if (cal.get(Calendar.SECOND) != 0) "yyyy-MM-dd HH:mm:ss" else "yyyy-MM-dd HH:mm"
+        SimpleDateFormat(pattern, Locale.CHINA).format(Date(tx.timestamp))
     }
+    val capturedTimeStr = remember(tx.capturedAtMillis, tx.timestamp, tx.captureSource) {
+        if (tx.captureSource != "MANUAL" && tx.capturedAtMillis > 0L) {
+            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date(tx.capturedAtMillis))
+        } else {
+            null
+        }
+    }
+    val screenshotBitmap = produceState<ImageBitmap?>(initialValue = null, key1 = tx.screenshotPath) {
+        value = if (tx.screenshotPath.isNotBlank()) {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val f = File(tx.screenshotPath)
+                    if (f.exists()) BitmapFactory.decodeFile(f.absolutePath)?.asImageBitmap() else null
+                }.getOrNull()
+            }
+        } else {
+            null
+        }
+    }.value
 
     val remainingRefundableCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
     val canRefund = tx.type == TransactionType.EXPENSE && remainingRefundableCents > 0L
@@ -165,6 +199,7 @@ fun TransactionDetailSheet(
     var showSplitDialog by remember { mutableStateOf(false) }
     var showDeleteConfirm by remember { mutableStateOf(false) }
     var showSettleDialog by remember { mutableStateOf(false) }
+    var showScreenshotFullscreen by remember { mutableStateOf(false) }
 
     Column(
         modifier = Modifier
@@ -251,6 +286,26 @@ fun TransactionDetailSheet(
                     color = amountColor
                 )
 
+                if (tx.type == TransactionType.EXPENSE && tx.discountCents > 0L) {
+                    val origCents = tx.amountCents + tx.discountCents
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFFFFF4EC)
+                    ) {
+                        Text(
+                            text = "原价 ${formatMoneyCents(origCents, tx.currency)}  ·  优惠 ${formatMoneyCents(tx.discountCents, tx.currency)}  ·  实扣 ${formatMoneyCents(tx.amountCents, tx.currency)}",
+                            fontSize = 12.sp,
+                            color = Color(0xFFD96B27),
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+
                 if (tx.refundedAmountCents > 0L) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
@@ -263,8 +318,47 @@ fun TransactionDetailSheet(
 
                 Spacer(modifier = Modifier.height(22.dp))
 
-                DetailKeyValueRow("记录时间", fullTimeStr)
-                DetailKeyValueRow("账本", tx.ledgerName)
+                if (tx.duplicateSuspected) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xFFFFEFEA),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                            Text(
+                                text = "⚠️ 疑似重复（已手动确认录入）",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostCoralRed
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "该笔账单在识别时曾触发重复保护（订单Key或交易时间+金额一致），由您点击「录入」后手动写入账本。",
+                                fontSize = 12.sp,
+                                color = Color(0xFF8C2D19)
+                            )
+                        }
+                    }
+                }
+
+                if (tx.type == TransactionType.EXPENSE && tx.discountCents > 0L) {
+                    val origCents = tx.amountCents + tx.discountCents
+                    DetailKeyValueRow("商品原价", formatMoneyCents(origCents, tx.currency), singleLine = true)
+                    DetailKeyValueRow("优惠立减", "-${formatMoneyCents(tx.discountCents, tx.currency)}", singleLine = true)
+                    DetailKeyValueRow("实扣金额", formatMoneyCents(tx.amountCents, tx.currency), singleLine = true)
+                }
+                DetailKeyValueRow("实际购物时间", fullTimeStr, singleLine = true)
+                if (capturedTimeStr != null && abs(tx.capturedAtMillis - tx.timestamp) >= 1_000L) {
+                    DetailKeyValueRow("截图/识账时间", capturedTimeStr, singleLine = true)
+                }
+                DetailKeyValueRow("商品数量", tx.quantityDesc.ifBlank { "${tx.itemQuantity}件" }, singleLine = true)
+                val effectiveOrderKey = tx.orderKey.ifBlank { tx.transactionNo }.ifBlank { tx.merchantOrderNo }
+                if (effectiveOrderKey.isNotBlank()) {
+                    DetailKeyValueRow("订单唯一Key", effectiveOrderKey, singleLine = true, compactFont = true)
+                }
+                DetailKeyValueRow("账本", tx.ledgerName, singleLine = true)
                 DetailKeyValueRow(
                     "资金账户",
                     when (tx.type) {
@@ -273,27 +367,109 @@ fun TransactionDetailSheet(
                         TransactionType.INCOME, TransactionType.REFUND_OFFSET ->
                             formatWalletDisplayName(targetWallet ?: sourceWallet)
                         else -> formatWalletDisplayName(sourceWallet)
-                    }
+                    },
+                    singleLine = true
                 )
-                if (tx.discountCents > 0L) {
-                    DetailKeyValueRow("优惠金额", formatMoneyCents(tx.discountCents))
+                if (tx.paymentMethodRaw.isNotBlank()) {
+                    DetailKeyValueRow("账单支付方式", tx.paymentMethodRaw, singleLine = true)
+                }
+                if (tx.transactionNo.isNotBlank() && tx.transactionNo != effectiveOrderKey) {
+                    DetailKeyValueRow("交易流水号", tx.transactionNo, singleLine = true, compactFont = true)
+                }
+                if (tx.merchantOrderNo.isNotBlank() && tx.merchantOrderNo != effectiveOrderKey) {
+                    DetailKeyValueRow("商户单号", tx.merchantOrderNo, singleLine = true, compactFont = true)
+                }
+                if (tx.type != TransactionType.EXPENSE && tx.discountCents > 0L) {
+                    DetailKeyValueRow("优惠金额", formatMoneyCents(tx.discountCents), singleLine = true)
                 }
                 if (tx.feeCents > 0L) {
-                    DetailKeyValueRow("手续费", formatMoneyCents(tx.feeCents))
+                    DetailKeyValueRow("手续费", formatMoneyCents(tx.feeCents), singleLine = true)
                 }
                 if (tx.reimbursable) {
-                    DetailKeyValueRow("报销状态", if (tx.reimbursed) "已报销" else "待报销")
+                    DetailKeyValueRow("报销状态", if (tx.reimbursed) "已报销" else "待报销", singleLine = true)
                 }
                 if (tx.tags.isNotBlank()) {
-                    DetailKeyValueRow("标签", "#${tx.tags}")
+                    DetailKeyValueRow("标签", "#${tx.tags}", singleLine = true)
                 }
                 val merchant = tx.merchant.trim()
-                val note = tx.note.trim()
-                if (merchant.isNotEmpty() && note.isNotEmpty() && merchant != note) {
+                val cleanedNote = tx.note
+                    .let { n -> if (n.startsWith("原价¥") && n.contains("| ")) n.substringAfter("| ").trim() else if (n.startsWith("原价¥")) "" else n.trim() }
+                    .let { n ->
+                        if (tx.paymentMethodRaw.isNotBlank() && n.endsWith(" · ${tx.paymentMethodRaw}")) {
+                            n.removeSuffix(" · ${tx.paymentMethodRaw}").trim()
+                        } else {
+                            n.replace(Regex("""\s*·\s*(?:账户余额|微信零钱|零钱|支付宝|微信支付|花呗|京东白条|[^·]*(?:信用卡|储蓄卡|银行卡))(?:\([^)]*\))?\s*$"""), "").trim()
+                        }
+                    }
+                if (merchant.isNotEmpty()) {
                     DetailKeyValueRow("商户", merchant)
-                    DetailKeyValueRow("备注", note)
-                } else if (merchant.isNotEmpty() || note.isNotEmpty()) {
-                    DetailKeyValueRow("备注", merchant.ifEmpty { note })
+                }
+                if (cleanedNote.isNotEmpty() && cleanedNote != merchant) {
+                    DetailKeyValueRow("商品/备注", cleanedNote)
+                }
+                if (tx.captureSource != "MANUAL") {
+                    val sourceLabel = when (tx.captureSource) {
+                        "AI_ACCESSIBILITY" -> "无障碍页面自动识账"
+                        "AI_OCR" -> "端侧截屏 OCR 识账"
+                        "AI_NOTIFICATION" -> "通知栏静默识账"
+                        "AI_FUSED", "AI_MERGED" -> "多通道证据融合识账"
+                        else -> tx.captureSource
+                    }
+                    DetailKeyValueRow("识账来源", sourceLabel, singleLine = true)
+                }
+            }
+        }
+
+        if (screenshotBitmap != null) {
+            Spacer(modifier = Modifier.height(14.dp))
+            Surface(
+                shape = RoundedCornerShape(22.dp),
+                color = ICostCardWhite,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .iCostPressScale(pressedScale = 0.98f) { showScreenshotFullscreen = true }
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "识账原图留证",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ICostTextPrimary
+                        )
+                        Text(
+                            text = "点击查看大图",
+                            fontSize = 12.sp,
+                            color = ICostBlueAccent,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = if (tx.transactionNo.isNotBlank()) {
+                            "已绑定订单流水号 (${tx.transactionNo.takeLast(8)}) 与金额防重校验"
+                        } else {
+                            "已绑定图像 SHA-256 指纹 (${tx.screenshotSha256.take(8)}) 防重校验"
+                        },
+                        fontSize = 11.sp,
+                        color = ICostTextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Image(
+                        bitmap = screenshotBitmap,
+                        contentDescription = "账单原图截图",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(210.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                    )
                 }
             }
         }
@@ -374,6 +550,31 @@ fun TransactionDetailSheet(
             },
             onDismiss = { showDeleteConfirm = false }
         )
+    }
+
+    if (showScreenshotFullscreen && screenshotBitmap != null) {
+        Dialog(
+            onDismissRequest = { showScreenshotFullscreen = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xEB000000))
+                    .clickable { showScreenshotFullscreen = false }
+                    .padding(16.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Image(
+                    bitmap = screenshotBitmap,
+                    contentDescription = "账单原图大图",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(16.dp))
+                )
+            }
+        }
     }
 
     if (showSettleDialog) {
@@ -474,20 +675,24 @@ fun TransactionDetailSheet(
                         fontSize = 13.sp,
                         color = ICostTextSecondary
                     )
-                    OutlinedTextField(
+                    ICostFormField(
                         value = refundYuanStr,
                         onValueChange = { refundYuanStr = sanitizeMoneyInput(it) },
-                        label = { Text("退款金额（元）") },
+                        label = "退款金额（元）",
+                        placeholder = "0.00",
                         isError = refundError != null && refundYuanStr.isNotBlank(),
-                        supportingText = refundError?.let { msg -> { Text(msg) } },
+                        supportingText = refundError,
                         singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth()
                     )
-                    OutlinedTextField(
+                    ICostFormField(
                         value = refundNote,
                         onValueChange = { refundNote = it },
-                        label = { Text("备注（选填）") },
-                        singleLine = true
+                        label = "备注（选填）",
+                        placeholder = "如：商品部分退款",
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             },
@@ -555,15 +760,17 @@ fun TransactionDetailSheet(
                         value = categoryA,
                         onValueChange = { categoryA = it }
                     )
-                    OutlinedTextField(
+                    ICostFormField(
                         value = amountAStr,
                         onValueChange = { amountAStr = sanitizeMoneyInput(it) },
-                        label = { Text("金额（元）") },
+                        label = "金额（元）",
+                        placeholder = "0.00",
                         isError = splitError != null && amountAStr.isNotBlank() && amountACents != null &&
                             (amountACents <= 0L || amountACents >= totalCents),
-                        supportingText = splitError?.let { msg -> { Text(msg) } },
+                        supportingText = splitError,
                         singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth()
                     )
                     Text(
                         "第二笔 · 自动分配剩余 ${formatMoneyCents(remainBCents.coerceAtLeast(0L), tx.currency)}",
@@ -576,11 +783,13 @@ fun TransactionDetailSheet(
                         value = categoryB,
                         onValueChange = { categoryB = it }
                     )
-                    OutlinedTextField(
+                    ICostFormField(
                         value = noteB,
                         onValueChange = { noteB = it },
-                        label = { Text("备注（选填）") },
-                        singleLine = true
+                        label = "备注（选填）",
+                        placeholder = "如：分摊项目",
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
                     )
                 }
             },
@@ -793,7 +1002,12 @@ private fun DetailWideActionButton(
 }
 
 @Composable
-private fun DetailKeyValueRow(label: String, value: String) {
+private fun DetailKeyValueRow(
+    label: String,
+    value: String,
+    singleLine: Boolean = false,
+    compactFont: Boolean = false
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -801,14 +1015,23 @@ private fun DetailKeyValueRow(label: String, value: String) {
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, fontSize = 14.sp, color = ICostTextSecondary)
-        Spacer(modifier = Modifier.width(16.dp))
         Text(
-            value,
+            text = label,
             fontSize = 14.sp,
+            color = ICostTextSecondary,
+            maxLines = 1,
+            softWrap = false
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = value,
+            fontSize = if (compactFont) 12.sp else 14.sp,
             color = ICostTextPrimary,
             fontWeight = FontWeight.Medium,
             textAlign = TextAlign.End,
+            maxLines = if (singleLine) 1 else 3,
+            softWrap = !singleLine,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
     }
@@ -1173,7 +1396,16 @@ fun MonthlyCalendarSheet(
                             val sym = CurrencyCode.fromCode(item.currency).symbol
                             val isRefunded = item.type == TransactionType.EXPENSE && item.refundedAmountCents > 0L
                             val netExp = (item.amountCnyCents - item.refundedAmountCents).coerceAtLeast(0L)
-                            val subtitleExtra = item.merchant.ifBlank { item.note }
+                            val cleanedNote = item.note
+                                .let { n -> if (n.startsWith("原价¥") && n.contains("| ")) n.substringAfter("| ").trim() else if (n.startsWith("原价¥")) "" else n.trim() }
+                                .let { n ->
+                                    if (item.paymentMethodRaw.isNotBlank() && n.endsWith(" · ${item.paymentMethodRaw}")) {
+                                        n.removeSuffix(" · ${item.paymentMethodRaw}").trim()
+                                    } else {
+                                        n.replace(Regex("""\s*·\s*(?:账户余额|微信零钱|零钱|支付宝|微信支付|花呗|京东白条|[^·]*(?:信用卡|储蓄卡|银行卡))(?:\([^)]*\))?\s*$"""), "").trim()
+                                    }
+                                }
+                            val subtitleExtra = item.merchant.ifBlank { cleanedNote }
 
                             Row(
                                 modifier = Modifier

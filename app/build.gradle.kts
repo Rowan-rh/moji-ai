@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -5,6 +7,17 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.ksp)
 }
+
+val localProps = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        file.inputStream().use { load(it) }
+    }
+}
+val githubUpdateRepo: String = localProps.getProperty("GITHUB_UPDATE_REPO", "Rowan-rh/moji-ai").trim()
+val githubUpdateToken: String = localProps.getProperty("GITHUB_UPDATE_TOKEN", "").trim()
+fun escapeForBuildConfig(value: String): String =
+    value.replace("\\", "\\\\").replace("\"", "\\\"")
 
 android {
     namespace = "com.moji.ai"
@@ -16,6 +29,9 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0.0"
+
+        buildConfigField("String", "GITHUB_UPDATE_REPO", "\"${escapeForBuildConfig(githubUpdateRepo)}\"")
+        buildConfigField("String", "GITHUB_UPDATE_TOKEN", "\"${escapeForBuildConfig(githubUpdateToken)}\"")
 
         vectorDrawables {
             useSupportLibrary = true
@@ -68,6 +84,9 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.kotlinx.serialization.json)
     implementation(libs.kotlinx.coroutines.android)
+
+    // Bundled Offline Chinese OCR for Android 11+ Accessibility takeScreenshot fallback
+    implementation(libs.mlkit.text.recognition.chinese)
 
     debugImplementation(libs.androidx.ui.tooling)
 }

@@ -2,5 +2,6 @@
     <string name="app_name">默记 MoJi</string>
     <string name="notification_service_label">默记 MoJi · 通知栏静默识账</string>
     <string name="accessibility_service_label">默记 MoJi · 支付页面无感识账</string>
-    <string name="accessibility_service_description">用于在微信、支付宝、云闪付、银行 App 付款或转账完成时，自动提取页面金额、商户与支付钱包信息并由 AI 静默记账。所有数据仅保存在本地并发送至您配置的 AI 接口。</string>
+    <string name="accessibility_service_description">用于在微信、支付宝、云闪付、银行 App 付款完成或打开账单详情时，自动提取页面金额、商户与支付方式并静默入账；遇到自绘页面时支持免 Root 截屏端侧离线 OCR 兜底。所有数据仅保存在本地。</string>
+    <string name="ocr_tile_label">默记识屏记账</string>
 </resources>

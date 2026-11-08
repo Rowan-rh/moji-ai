@@ -15,6 +15,7 @@
   - `app/src/main/java/com/moji/ai/ai/`：OpenAI 兼容接口 / Gemini 官方接口双协议识账引擎、`MerchantMemoryManager` 商户记忆自学习、`WeightedCategoryClassifier` 带排除词权重离线分类器与 `SmartRuleEngine` 可视化条件规则引擎（`When -> Then`）
   - `app/src/main/java/com/moji/ai/service/`：通知监听、无障碍节点采集、`CapturePipelineCoordinator`（1.1s 滑动窗口聚合 + 30s 跨通道事后证据融合 + 采集可观测日志）与 `RomKeepAliveGuideHelper` 国产 ROM 保活及 Android 13+ 受限设置诊断向导
   - `app/src/main/java/com/moji/ai/notification/`：静默入账系统通知与一键原子撤销/切换常用分类/标为待报销广播 (`TransactionActionReceiver`)
+  - `app/src/main/java/com/moji/ai/update/`：支持 GitHub 私有仓库（Fine-grained PAT + `Accept: application/octet-stream` Release Asset API）与公开仓库的 OTA 自动检查更新及 `FileProvider` 安装引擎 (`AppUpdateManager`)
   - `app/src/main/java/com/moji/ai/ui/`：账本首页、记账计算器面板、资产管理、多维统计与设置页
 - **需求与设计文档**：功能或数据模型发生变更时，需在同一 PR 中同步更新 `README.md` 与 `docs/REQUIREMENTS.md`。
 

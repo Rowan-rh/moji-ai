@@ -99,6 +99,7 @@ import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
+import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
 import com.moji.ai.ui.theme.ICostSearchBg
 import com.moji.ai.ui.theme.ICostSwipeActionRow
@@ -171,33 +172,45 @@ fun ICostLedgerHomeScreen(
         }
     }
     val trimmedQuery = searchQuery.trim()
-    // 列表展示用：再叠加搜索词
+    // 列表展示用：再叠加搜索词（支持搜分类、商户、备注、标签、交易单号、商户单号、支付方式）
     val monthTransactions = remember(allMonthTransactions, trimmedQuery) {
         if (trimmedQuery.isEmpty()) allMonthTransactions else allMonthTransactions.filter { tx ->
             tx.category.contains(trimmedQuery, ignoreCase = true) ||
                 tx.merchant.contains(trimmedQuery, ignoreCase = true) ||
                 tx.note.contains(trimmedQuery, ignoreCase = true) ||
-                tx.tags.contains(trimmedQuery, ignoreCase = true)
+                tx.tags.contains(trimmedQuery, ignoreCase = true) ||
+                tx.transactionNo.contains(trimmedQuery, ignoreCase = true) ||
+                tx.merchantOrderNo.contains(trimmedQuery, ignoreCase = true) ||
+                tx.paymentMethodRaw.contains(trimmedQuery, ignoreCase = true)
         }
     }
 
-    val monthExpenseCents = allMonthTransactions
-        .filter { it.type == TransactionType.EXPENSE }
-        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+    val monthExpenseCents = remember(allMonthTransactions) {
+        allMonthTransactions
+            .filter { it.type == TransactionType.EXPENSE && it.category != "平账" }
+            .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+    }
 
-    val monthIncomeCents = allMonthTransactions
-        .filter { it.type == TransactionType.INCOME }
-        .sumOf { it.amountCnyCents }
+    val monthIncomeCents = remember(allMonthTransactions) {
+        allMonthTransactions
+            .filter { it.type == TransactionType.INCOME && it.category != "平账" }
+            .sumOf { it.amountCnyCents }
+    }
 
     val monthBalanceCents = monthIncomeCents - monthExpenseCents
 
     // 报销统计
-    val pendingReimburseList = allMonthTransactions.filter { it.reimbursable && !it.reimbursed }
-    val pendingReimburseCents = pendingReimburseList
-        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
-    val settledReimburseCents = allMonthTransactions
-        .filter { it.reimbursable && it.reimbursed }
-        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+    val pendingReimburseList = remember(allMonthTransactions) {
+        allMonthTransactions.filter { it.reimbursable && !it.reimbursed }
+    }
+    val pendingReimburseCents = remember(pendingReimburseList) {
+        pendingReimburseList.sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+    }
+    val settledReimburseCents = remember(allMonthTransactions) {
+        allMonthTransactions
+            .filter { it.reimbursable && it.reimbursed }
+            .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+    }
 
     // 分组 key 带年份，避免跨年同月同日的折叠状态串用；标题单独展示
     val groupedByDay = remember(monthTransactions) {
@@ -1092,16 +1105,16 @@ fun ICostLedgerHomeScreen(
             containerColor = ICostCardWhite,
             title = { Text("设置月预算", fontWeight = FontWeight.Bold) },
             text = {
-                OutlinedTextField(
+                ICostFormField(
                     value = budgetText,
                     onValueChange = { budgetText = sanitizeMoneyInput(it) },
-                    label = { Text("每月预算（元）") },
-                    supportingText = {
-                        Text(if (isInvalid) "请输入正确的金额" else "留空或填 0 表示不设预算")
-                    },
+                    label = "每月预算（元）",
+                    placeholder = "0.00",
+                    supportingText = if (isInvalid) "请输入正确的金额" else "留空或填 0 表示不设预算",
                     isError = isInvalid,
                     singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
                 )
             },
             confirmButton = {
@@ -1156,10 +1169,11 @@ fun ICostLedgerHomeScreen(
                         }
                     }
                     Spacer(modifier = Modifier.height(4.dp))
-                    OutlinedTextField(
+                    ICostFormField(
                         value = newLedgerName,
                         onValueChange = { newLedgerName = it },
-                        label = { Text("新建账本名称") },
+                        label = "新建账本名称",
+                        placeholder = "如：家庭账本、旅行账本",
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -1237,26 +1251,49 @@ private fun ICostLedgerRow(
     }
 
     val titleText = when (tx.type) {
-        TransactionType.REFUND_OFFSET -> "退款入账"
+        TransactionType.REFUND_OFFSET -> if (tx.category.isNotBlank() && tx.category != "退款") tx.category else "退款入账"
         TransactionType.REPAYMENT -> "转至${targetWallet?.name ?: "信用账户"}"
         TransactionType.TRANSFER -> "转至${targetWallet?.name ?: "目标账户"}"
         else -> tx.category
     }
+
+    val rawGoods = tx.note.substringAfter("| ", "").trim()
+    val cleanedGoods = rawGoods
+        .let { g ->
+            if (tx.paymentMethodRaw.isNotBlank() && g.endsWith(" · ${tx.paymentMethodRaw}")) {
+                g.removeSuffix(" · ${tx.paymentMethodRaw}").trim()
+            } else {
+                g.replace(Regex("""\s*·\s*(?:账户余额|微信零钱|零钱|支付宝|微信支付|花呗|京东白条|[^·]*(?:信用卡|储蓄卡|银行卡))(?:\([^)]*\))?\s*$"""), "").trim()
+            }
+        }
+        .let { g ->
+            if (tx.merchant.isNotBlank() && g.startsWith("${tx.merchant} ")) {
+                g.removePrefix("${tx.merchant} ").trim()
+            } else {
+                g
+            }
+        }
 
     val subtitleText = buildString {
         append(timeStr)
         if (tx.merchant.isNotBlank()) {
             append(" · ")
             append(tx.merchant)
-        } else if (tx.note.isNotBlank()) {
+        }
+        if (cleanedGoods.isNotBlank() && cleanedGoods != tx.merchant) {
+            append(" · ")
+            append(cleanedGoods)
+        } else if (tx.merchant.isBlank() && tx.note.isNotBlank() && !tx.note.startsWith("原价¥")) {
             append(" · ")
             append(tx.note)
         }
     }
 
     val isRefundedExpense = tx.type == TransactionType.EXPENSE && tx.refundedAmountCents > 0L
-    val isFullRefund = isRefundedExpense && tx.refundedAmountCents >= tx.amountCnyCents
+    val isRefundOffset = tx.type == TransactionType.REFUND_OFFSET
     val netExpenseCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
+    val hasDiscountBreakdown = (tx.type == TransactionType.EXPENSE || isRefundOffset) && tx.discountCents > 0L
+    val hasTagsRow = hasDiscountBreakdown || tx.duplicateSuspected || isRefundedExpense || isRefundOffset || tx.reimbursable
 
     Row(
         modifier = Modifier
@@ -1267,7 +1304,7 @@ private fun ICostLedgerRow(
                 onClick = onClick
             )
             .padding(horizontal = 16.dp, vertical = 13.dp),
-        verticalAlignment = Alignment.Top
+        verticalAlignment = if (hasTagsRow) Alignment.Top else Alignment.CenterVertically
     ) {
         ICostCategoryBadge(
             category = tx.category,
@@ -1277,41 +1314,154 @@ private fun ICostLedgerRow(
 
         Spacer(modifier = Modifier.width(12.dp))
 
-        // 中间标题与副标题（严格单行省略，不挤压右侧）
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .padding(end = 10.dp)
-        ) {
-            Text(
-                text = titleText,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-                color = ICostTextPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = subtitleText,
-                fontSize = 12.sp,
-                color = ICostTextSecondary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+        // 右侧主内容列：第一行（分类标题 <-> 金额）、第二行（时间·商户·商品 <-> 账户名）、第三行（标签胶囊）
+        Column(modifier = Modifier.weight(1f)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = titleText,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = ICostTextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp)
+                )
 
-            if (isRefundedExpense || tx.reimbursable) {
-                Spacer(modifier = Modifier.height(5.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
                     if (isRefundedExpense) {
+                        Text(
+                            text = String.format(Locale.US, "%s%,.2f", sym, tx.amountCents / 100.0),
+                            fontSize = 12.sp,
+                            color = ICostTextSecondary,
+                            textDecoration = TextDecoration.LineThrough,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = String.format(Locale.US, "-¥%,.2f", netExpenseCents / 100.0),
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = ICostCoralRed,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    } else {
+                        val amountText = when (tx.type) {
+                            TransactionType.EXPENSE, TransactionType.LOAN_OUT ->
+                                String.format(Locale.US, "-%s%,.2f", sym, tx.amountCents / 100.0)
+                            TransactionType.REFUND_OFFSET ->
+                                String.format(Locale.US, "%s%,.2f", sym, tx.amountCents / 100.0)
+                            TransactionType.INCOME, TransactionType.LOAN_IN ->
+                                String.format(Locale.US, "+%s%,.2f", sym, tx.amountCents / 100.0)
+                            TransactionType.TRANSFER, TransactionType.REPAYMENT ->
+                                String.format(Locale.US, "%s%,.2f", sym, tx.amountCents / 100.0)
+                        }
+                        val amountColor = when (tx.type) {
+                            TransactionType.EXPENSE, TransactionType.LOAN_OUT -> ICostCoralRed
+                            TransactionType.REFUND_OFFSET -> ICostAmberGold
+                            TransactionType.INCOME, TransactionType.LOAN_IN -> ICostGreenIncome
+                            TransactionType.TRANSFER, TransactionType.REPAYMENT -> ICostTextPrimary
+                        }
+                        Text(
+                            text = amountText,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = amountColor,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(2.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = subtitleText,
+                    fontSize = 12.sp,
+                    color = ICostTextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 8.dp)
+                )
+
+                Text(
+                    text = walletLabel,
+                    fontSize = 11.sp,
+                    color = ICostTextSecondary,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            if (hasTagsRow) {
+                Spacer(modifier = Modifier.height(5.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (hasDiscountBreakdown) {
+                        val origCents = tx.amountCents + tx.discountCents
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFFFFF4EC),
+                            modifier = Modifier.weight(1f, fill = false)
+                        ) {
+                            Text(
+                                text = "原价${formatMoneyCents(origCents)} · 优惠${formatMoneyCents(tx.discountCents)}",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = Color(0xFFD96B27),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    if (tx.duplicateSuspected) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = Color(0xFFFFEFEA)
+                        ) {
+                            Text(
+                                text = "⚠️ 疑似重复",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostCoralRed,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    if (isRefundedExpense || isRefundOffset) {
                         Surface(
                             shape = RoundedCornerShape(6.dp),
                             color = Color(0xFFF0F0F0)
                         ) {
                             Text(
-                                text = if (isFullRefund) "全额退款" else "已退 ${formatMoneyCents(tx.refundedAmountCents)}",
+                                text = "已退",
                                 fontSize = 10.sp,
                                 color = ICostTextSecondary,
+                                maxLines = 1,
+                                softWrap = false,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
@@ -1325,72 +1475,14 @@ private fun ICostLedgerRow(
                                 text = if (tx.reimbursed) "已报销" else "待报销",
                                 fontSize = 10.sp,
                                 color = if (tx.reimbursed) ICostGreenIncome else ICostBlueAccent,
+                                maxLines = 1,
+                                softWrap = false,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
                     }
                 }
             }
-        }
-
-        // 右侧金额与账户名（严格 softWrap = false，绝不竖向折行）
-        Column(horizontalAlignment = Alignment.End) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (isRefundedExpense) {
-                    Text(
-                        text = String.format(Locale.US, "%s%,.2f", sym, tx.amountCents / 100.0),
-                        fontSize = 12.sp,
-                        color = ICostTextSecondary,
-                        textDecoration = TextDecoration.LineThrough,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = String.format(Locale.US, "-¥%,.2f", netExpenseCents / 100.0),
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = ICostCoralRed,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                } else {
-                    val amountText = when (tx.type) {
-                        TransactionType.EXPENSE, TransactionType.LOAN_OUT ->
-                            String.format(Locale.US, "-%s%,.2f", sym, tx.amountCents / 100.0)
-                        TransactionType.REFUND_OFFSET ->
-                            String.format(Locale.US, "%s%,.2f", sym, tx.amountCents / 100.0)
-                        TransactionType.INCOME, TransactionType.LOAN_IN ->
-                            String.format(Locale.US, "+%s%,.2f", sym, tx.amountCents / 100.0)
-                        TransactionType.TRANSFER, TransactionType.REPAYMENT ->
-                            String.format(Locale.US, "%s%,.2f", sym, tx.amountCents / 100.0)
-                    }
-                    val amountColor = when (tx.type) {
-                        TransactionType.EXPENSE, TransactionType.LOAN_OUT -> ICostCoralRed
-                        TransactionType.REFUND_OFFSET -> ICostAmberGold
-                        TransactionType.INCOME, TransactionType.LOAN_IN -> ICostGreenIncome
-                        TransactionType.TRANSFER, TransactionType.REPAYMENT -> ICostTextPrimary
-                    }
-                    Text(
-                        text = amountText,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = amountColor,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = walletLabel,
-                fontSize = 11.sp,
-                color = ICostTextSecondary,
-                maxLines = 1,
-                softWrap = false,
-                overflow = TextOverflow.Ellipsis
-            )
         }
     }
 }

@@ -3,7 +3,25 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <queries>
+        <package android:name="com.tencent.mm" />
+        <package android:name="com.eg.android.AlipayGphone" />
+        <package android:name="com.unionpay" />
+        <package android:name="com.xunmeng.pinduoduo" />
+        <package android:name="com.jingdong.app.mall" />
+        <package android:name="com.ss.android.ugc.aweme" />
+        <package android:name="com.ss.android.ugc.aweme.lite" />
+        <package android:name="com.taobao.taobao" />
+        <package android:name="com.tmall.wireless" />
+        <package android:name="com.sankuai.meituan" />
+        <package android:name="com.sankuai.meituan.takeoutnew" />
+        <package android:name="me.ele" />
+    </queries>
 
     <application
         android:name=".MoJiApp"
@@ -12,9 +30,17 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="ocr" />
+        <meta-data
+            android:name="oplus.fluid_cloud.support"
+            android:value="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -33,9 +59,9 @@
             </intent-filter>
         </service>
 
-        <!-- 2. 无障碍辅助服务：捕获付款完成页、红包/转账详情页的屏幕文本节点树 -->
+        <!-- 2. 无障碍辅助服务（SelectToSpeakService 兼容入口）：突破微信支付/账单详情节点屏蔽并支持 Android 11+ 免 Root 截屏 OCR -->
         <service
-            android:name=".service.PaymentAccessibilityService"
+            android:name="com.google.android.accessibility.selecttospeak.SelectToSpeakService"
             android:exported="true"
             android:label="@string/accessibility_service_label"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
@@ -47,14 +73,39 @@
                 android:resource="@xml/accessibility_service_config" />
         </service>
 
-        <!-- 3. 静默记账通知栏操作广播接收器（支持在通知栏直接点击“撤销入账”） -->
+        <!-- 3. 快捷设置控制中心磁贴：一键触发当前屏幕微信/支付宝账单识别 -->
+        <service
+            android:name=".service.OcrTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_ocr_tile"
+            android:label="@string/ocr_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- 4. 静默记账与流体云通知操作广播接收器（支持在通知栏/流体云直接点击“撤销入账/切换分类/标为待报销”） -->
         <receiver
             android:name=".notification.TransactionActionReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.moji.ai.ACTION_UNDO_TRANSACTION" />
+                <action android:name="com.moji.ai.ACTION_CYCLE_CATEGORY" />
+                <action android:name="com.moji.ai.ACTION_MARK_REIMBURSABLE" />
             </intent-filter>
         </receiver>
+
+        <!-- 5. 应用内 OTA 更新 APK 安装 FileProvider（支持私有仓库下载 APK 后调起系统安装器） -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 

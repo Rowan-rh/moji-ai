@@ -245,7 +245,8 @@ object WeightedCategoryClassifier {
             category = "交通-火车",
             strongKeywords = listOf("火车票", "高铁", "动车", "铁路"),
             brandKeywords = listOf("12306", "中铁网络", "铁路12306"),
-            itemKeywords = listOf("二等座", "一等座", "候补购票", "改签费")
+            itemKeywords = listOf("二等座", "一等座", "候补购票", "改签费"),
+            excludeKeywords = listOf("电动车", "充气宝", "充气泵", "打气筒", "轮胎", "车载")
         ),
         WeightedCategoryRule(
             category = "交通-飞机",
@@ -302,9 +303,9 @@ object WeightedCategoryClassifier {
         ),
         WeightedCategoryRule(
             category = "数码",
-            strongKeywords = listOf("数码", "电子产品", "手机配件", "电脑配件"),
+            strongKeywords = listOf("数码", "电子产品", "手机配件", "电脑配件", "充气宝", "充气泵", "智能门锁", "指纹锁"),
             brandKeywords = listOf("Apple Store", "小米之家", "华为授权体验店", "大疆", "DJI", "绿联", "安克", "Anker"),
-            itemKeywords = listOf("数据线", "充电器", "耳机", "AirPods", "键盘", "鼠标", "显示器", "硬盘")
+            itemKeywords = listOf("数据线", "充电器", "无线充", "手机支架", "快充", "耳机", "AirPods", "键盘", "鼠标", "显示器", "硬盘", "智能锁", "电子锁", "路由器")
         ),
         WeightedCategoryRule(
             category = "应用软件",
@@ -340,8 +341,9 @@ object WeightedCategoryClassifier {
         ),
         WeightedCategoryRule(
             category = "服饰",
-            strongKeywords = listOf("服装", "女装", "男装", "运动鞋", "羽绒服"),
-            brandKeywords = listOf("优衣库", "UNIQLO", "ZARA", "Nike", "耐克", "Adidas", "阿迪达斯", "安踏", "李宁", "迪卡侬", "UR", "波司登")
+            strongKeywords = listOf("服装", "女装", "男装", "运动鞋", "羽绒服", "跑鞋", "跑步鞋"),
+            brandKeywords = listOf("优衣库", "UNIQLO", "ZARA", "Nike", "耐克", "Adidas", "阿迪达斯", "安踏", "李宁", "迪卡侬", "UR", "波司登"),
+            itemKeywords = listOf("球鞋", "休闲鞋", "板鞋", "拖鞋", "凉鞋", "T恤", "裤子", "外套", "卫衣", "夹克", "衬衫", "连衣裙", "短袖", "袜子")
         ),
         WeightedCategoryRule(
             category = "护肤",
@@ -366,9 +368,9 @@ object WeightedCategoryClassifier {
         ),
         WeightedCategoryRule(
             category = "日用",
-            strongKeywords = listOf("日用百货", "共享充电宝", "干洗", "家政", "快递费"),
-            brandKeywords = listOf("名创优品", "MINISO", "无印良品", "MUJI", "怪兽充电", "街电", "小电", "顺丰速运", "京东快递", "菜鸟"),
-            itemKeywords = listOf("纸巾", "洗衣液", "牙膏", "洗发水", "充电宝租借")
+            strongKeywords = listOf("日用百货", "共享充电宝", "干洗", "家政", "快递费", "垃圾袋", "马桶垫", "破窗器", "安全锤", "茶仓杯", "保温杯", "洗衣液", "纸巾", "抽纸", "洗发", "护发", "沐浴露"),
+            brandKeywords = listOf("名创优品", "MINISO", "无印良品", "MUJI", "怪兽充电", "街电", "小电", "顺丰速运", "京东快递", "菜鸟", "多芬", "宝洁", "海飞丝"),
+            itemKeywords = listOf("牙膏", "洗发水", "身体乳", "洗手液", "茶杯", "水杯", "收纳", "保鲜膜", "充电宝租借")
         )
     )
 

@@ -98,6 +98,7 @@ import com.moji.ai.ui.theme.ICostCardWhite
 import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
+import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
 import com.moji.ai.ui.theme.ICostSlateIcon
 import com.moji.ai.ui.theme.ICostSmoothBottomSheet
@@ -608,14 +609,14 @@ fun ICostCalculatorSheet(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .fillMaxHeight(0.93f)
+                .fillMaxHeight(0.94f)
                 .navigationBarsPadding()
         ) {
             // 1. 顶部栏：左侧 40dp 白色圆形 `✕` + 中间白色胶囊 [支出 | 收入 | 转账] + 右侧蓝色账本名
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -772,12 +773,12 @@ fun ICostCalculatorSheet(
                                                 horizontalAlignment = Alignment.CenterHorizontally
                                             ) {
                                                 Box(
-                                                    modifier = Modifier.size(52.dp),
+                                                    modifier = Modifier.size(48.dp),
                                                     contentAlignment = Alignment.Center
                                                 ) {
                                                     Box(
                                                         modifier = Modifier
-                                                            .size(48.dp)
+                                                            .size(44.dp)
                                                             .clip(CircleShape)
                                                             .background(circleBg),
                                                         contentAlignment = Alignment.Center
@@ -785,7 +786,7 @@ fun ICostCalculatorSheet(
                                                         ICostAssetImage(
                                                             assetFile = cat.assetFile,
                                                             tint = if (isSelected) Color.White else ICostSlateIcon,
-                                                            modifier = Modifier.size(26.dp)
+                                                            modifier = Modifier.size(24.dp)
                                                         )
                                                     }
                                                     // 拥有二级分类的类别在右上角显示 14dp 浅灰 `•••` 小圆角标
@@ -793,7 +794,7 @@ fun ICostCalculatorSheet(
                                                         Box(
                                                             modifier = Modifier
                                                                 .align(Alignment.TopEnd)
-                                                                .size(15.dp)
+                                                                .size(14.dp)
                                                                 .clip(CircleShape)
                                                                 .background(if (isSelected) activeColor else Color(0xFFE0E0E4)),
                                                             contentAlignment = Alignment.Center
@@ -807,7 +808,7 @@ fun ICostCalculatorSheet(
                                                         }
                                                     }
                                                 }
-                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Spacer(modifier = Modifier.height(3.dp))
                                                 Text(
                                                     text = cat.name,
                                                     fontSize = 12.sp,
@@ -837,16 +838,16 @@ fun ICostCalculatorSheet(
                                     ) {
                                         if (expandedCat != null) {
                                             Column {
-                                                Spacer(modifier = Modifier.height(10.dp))
+                                                Spacer(modifier = Modifier.height(5.dp))
                                                 Surface(
-                                                    shape = RoundedCornerShape(18.dp),
+                                                    shape = RoundedCornerShape(16.dp),
                                                     color = Color(0xFFECECEE),
                                                     modifier = Modifier.fillMaxWidth()
                                                 ) {
                                                     val subRows = expandedCat.subCategories.chunked(5)
                                                     Column(
-                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 12.dp),
-                                                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                                        verticalArrangement = Arrangement.spacedBy(4.dp)
                                                     ) {
                                                         subRows.forEach { subRow ->
                                                             Row(
@@ -865,7 +866,7 @@ fun ICostCalculatorSheet(
                                                                     ) {
                                                                         Box(
                                                                             modifier = Modifier
-                                                                                .size(40.dp)
+                                                                                .size(30.dp)
                                                                                 .clip(CircleShape)
                                                                                 .background(if (subSelected) activeColor else Color.Transparent),
                                                                             contentAlignment = Alignment.Center
@@ -873,10 +874,10 @@ fun ICostCalculatorSheet(
                                                                             ICostAssetImage(
                                                                                 assetFile = sub.assetFile,
                                                                                 tint = if (subSelected) Color.White else ICostSlateIcon,
-                                                                                modifier = Modifier.size(23.dp)
+                                                                                modifier = Modifier.size(18.dp)
                                                                             )
                                                                         }
-                                                                        Spacer(modifier = Modifier.height(3.dp))
+                                                                        Spacer(modifier = Modifier.height(1.dp))
                                                                         Text(
                                                                             text = sub.name,
                                                                             fontSize = 11.sp,
@@ -1113,9 +1114,9 @@ fun ICostCalculatorSheet(
                 color = ICostCardWhite,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 4.dp)
+                    .padding(horizontal = 14.dp, vertical = 3.dp)
             ) {
-                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
                     val amountColor = when (txType) {
                         TransactionType.EXPENSE -> ICostCoralRed
                         TransactionType.INCOME -> ICostGreenIncome
@@ -1146,9 +1147,9 @@ fun ICostCalculatorSheet(
                         )
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                     HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFF0F0F0))
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
 
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -1553,11 +1554,13 @@ fun ICostCalculatorSheet(
             containerColor = ICostCardWhite,
             title = { Text("添加标签", fontWeight = FontWeight.Bold) },
             text = {
-                OutlinedTextField(
+                ICostFormField(
                     value = tagText,
                     onValueChange = { tagText = it },
-                    label = { Text("如：聚餐、出差、固定开支") },
-                    singleLine = true
+                    label = "标签名称",
+                    placeholder = "如：聚餐、出差、固定开支",
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
                 )
             },
             confirmButton = {
@@ -1587,14 +1590,16 @@ private fun MoneyInputDialog(
         containerColor = ICostCardWhite,
         title = { Text(title, fontWeight = FontWeight.Bold) },
         text = {
-            OutlinedTextField(
+            ICostFormField(
                 value = text,
                 onValueChange = { text = sanitizeMoneyInput(it) },
-                label = { Text(label) },
-                supportingText = { Text(if (isError) "请输入正确的金额" else supporting) },
+                label = label,
+                placeholder = "0.00",
+                supportingText = if (isError) "请输入正确的金额" else supporting,
                 isError = isError,
                 singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                modifier = Modifier.fillMaxWidth()
             )
         },
         confirmButton = {
