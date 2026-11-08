@@ -1,6 +1,8 @@
 package com.moji.ai.data.repository
 
 import androidx.room.withTransaction
+import com.moji.ai.data.backup.BackupAndCsvTransferEngine
+import com.moji.ai.data.backup.CsvParsePreviewResult
 import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
@@ -8,6 +10,13 @@ import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
 import kotlin.math.roundToLong
+
+data class BatchImportCommitSummary(
+    val createdWalletCount: Int,
+    val updatedWalletCount: Int,
+    val importedTxCount: Int,
+    val skippedDuplicateTxCount: Int
+)
 
 class LedgerRepository(private val db: AppDatabase) {
 
@@ -45,6 +54,19 @@ class LedgerRepository(private val db: AppDatabase) {
         toleranceMillis: Long = 60_000L
     ): List<TransactionEntity> =
         db.transactionDao().findByAmountAndOccurredWindow(amountCents, occurredAtMillis, toleranceMillis)
+
+    suspend fun findTransactionsByAmountAndTimeOrCapturedWindow(
+        amountCents: Long,
+        occurredAtMillis: Long,
+        capturedAtMillis: Long,
+        toleranceMillis: Long = 65_000L
+    ): List<TransactionEntity> =
+        db.transactionDao().findByAmountAndTimeOrCapturedWindow(
+            amountCents = amountCents,
+            occurredAtMillis = occurredAtMillis,
+            capturedAtMillis = capturedAtMillis,
+            toleranceMillis = toleranceMillis
+        )
 
     suspend fun insertCaptureEvidence(evidence: com.moji.ai.data.local.CaptureEvidenceEntity): Long =
         db.captureEvidenceDao().insertEvidence(evidence)
@@ -152,6 +174,88 @@ class LedgerRepository(private val db: AppDatabase) {
 
         val id = recordTransaction(adjustmentTx)
         adjustmentTx.copy(id = id)
+    }
+
+    /**
+     * 批量导入 iCost / 微信 / 支付宝 / 钱迹 CSV（支持原子化创建新资产账户、更新已有资产余额、绑定新建账户 ID 并去重入账）
+     */
+    suspend fun importExternalBatch(
+        preview: CsvParsePreviewResult,
+        applyToWalletBalance: Boolean = false
+    ): BatchImportCommitSummary = db.withTransaction {
+        val walletDao = db.walletDao()
+        val txDao = db.transactionDao()
+
+        val walletKeyToId = mutableMapOf<String, Long>()
+        val walletsWithExplicitSnapshotBalance = mutableSetOf<Long>()
+
+        for (w in walletDao.getAllWallets()) {
+            walletKeyToId[BackupAndCsvTransferEngine.normalizeAccountKey(w.name, w.cardLast4)] = w.id
+            walletKeyToId[BackupAndCsvTransferEngine.normalizeAccountKey(w.name, null)] = w.id
+        }
+
+        var updatedWalletCount = 0
+        for (toUpdate in preview.existingWalletsToUpdate) {
+            walletDao.updateWallet(toUpdate.copy(updatedAtMillis = System.currentTimeMillis()))
+            walletKeyToId[BackupAndCsvTransferEngine.normalizeAccountKey(toUpdate.name, toUpdate.cardLast4)] = toUpdate.id
+            walletKeyToId[BackupAndCsvTransferEngine.normalizeAccountKey(toUpdate.name, null)] = toUpdate.id
+            walletsWithExplicitSnapshotBalance.add(toUpdate.id)
+            updatedWalletCount++
+        }
+
+        var createdWalletCount = 0
+        for (toCreate in preview.newWalletsToCreate) {
+            val newId = walletDao.insertWallet(toCreate.copy(id = 0L, updatedAtMillis = System.currentTimeMillis()))
+            walletKeyToId[BackupAndCsvTransferEngine.normalizeAccountKey(toCreate.name, toCreate.cardLast4)] = newId
+            walletKeyToId[BackupAndCsvTransferEngine.normalizeAccountKey(toCreate.name, null)] = newId
+            if (toCreate.balanceCents != 0L) {
+                walletsWithExplicitSnapshotBalance.add(newId)
+            }
+            createdWalletCount++
+        }
+
+        val existing = txDao.getAllTransactions()
+        val existingKeys = existing.map {
+            "${it.timestamp / 60_000L}_${it.type.name}_${it.amountCents}"
+        }.toMutableSet()
+
+        var importedCount = 0
+        var skippedDuplicates = 0
+
+        for ((idx, item) in preview.parsedTransactions.withIndex()) {
+            val resolvedSrcId = item.sourceWalletId ?: preview.sourceWalletNameByIndex[idx]?.let { walletKeyToId[it] }
+            val resolvedDstId = item.targetWalletId ?: preview.targetWalletNameByIndex[idx]?.let { walletKeyToId[it] }
+
+            val boundTx = item.copy(
+                id = 0L,
+                sourceWalletId = resolvedSrcId,
+                targetWalletId = resolvedDstId
+            )
+
+            val dedupKey = "${boundTx.timestamp / 60_000L}_${boundTx.type.name}_${boundTx.amountCents}"
+            if (dedupKey in existingKeys) {
+                skippedDuplicates++
+                continue
+            }
+            existingKeys.add(dedupKey)
+
+            val touchesExplicitBalanceWallet = (resolvedSrcId != null && resolvedSrcId in walletsWithExplicitSnapshotBalance) ||
+                (resolvedDstId != null && resolvedDstId in walletsWithExplicitSnapshotBalance)
+
+            if (applyToWalletBalance && !touchesExplicitBalanceWallet) {
+                recordTransaction(boundTx)
+            } else {
+                txDao.insertTransaction(boundTx)
+            }
+            importedCount++
+        }
+
+        BatchImportCommitSummary(
+            createdWalletCount = createdWalletCount,
+            updatedWalletCount = updatedWalletCount,
+            importedTxCount = importedCount,
+            skippedDuplicateTxCount = skippedDuplicates
+        )
     }
 
     /**
@@ -386,19 +490,10 @@ class LedgerRepository(private val db: AppDatabase) {
         db.captureEvidenceDao().deleteAllEvidences()
         val walletDao = db.walletDao()
         val currentWallets = walletDao.getAllWallets()
-        val defaultBalances = mapOf(
-            1L to 0L,
-            2L to 0L,
-            3L to 0L,
-            4L to 352000L,
-            5L to 124922L,
-            6L to 230000L
-        )
         for (w in currentWallets) {
-            val resetBalance = defaultBalances[w.id] ?: if (w.type.isLiability) 0L else w.balanceCents.coerceAtLeast(0L)
             walletDao.updateWallet(
                 w.copy(
-                    balanceCents = resetBalance,
+                    balanceCents = 0L,
                     updatedAtMillis = System.currentTimeMillis()
                 )
             )
@@ -410,6 +505,58 @@ class LedgerRepository(private val db: AppDatabase) {
     suspend fun updateWallet(wallet: WalletEntity) = db.walletDao().updateWallet(wallet)
 
     suspend fun deleteWallet(wallet: WalletEntity) = db.walletDao().deleteWallet(wallet)
+
+    /**
+     * 1:1 同步 iCost 全部 11 个资产账户（7 个信用账户 + 4 个资金账户）及余额、总额度、尾号与还款日，
+     * 同时重映射已有流水的关联账户 ID，清理旧版演示用的“招商银行储蓄卡(8848)”及演示周期规则。
+     */
+    suspend fun syncICostAllAccounts() = db.withTransaction {
+        val walletDao = db.walletDao()
+        val txDao = db.transactionDao()
+        val ruleDao = db.recurringRuleDao()
+
+        val oldWallets = walletDao.getAllWallets()
+        val oldAlipayId = oldWallets.firstOrNull { it.brandCode == "ALIPAY" || it.name.contains("账户余额") }?.id ?: 4L
+        val oldWechatId = oldWallets.firstOrNull { it.brandCode == "WECHAT" || it.name.contains("微信零钱") }?.id ?: 5L
+
+        walletDao.deleteAllWallets()
+        walletDao.insertAll(AppDatabase.defaultWallets())
+
+        val allTxs = txDao.getAllTransactions()
+        for (tx in allTxs) {
+            val pm = tx.paymentMethodRaw
+            val newSourceId = when {
+                pm.contains("3625") -> 11L
+                pm.contains("5021") -> 10L
+                pm.contains("3354") -> 1L
+                tx.sourceWalletId == 1L -> 1L
+                tx.sourceWalletId == oldAlipayId -> 8L
+                tx.sourceWalletId == oldWechatId -> 9L
+                else -> tx.sourceWalletId
+            }
+            val newTargetId = when {
+                tx.targetWalletId == oldAlipayId -> 8L
+                tx.targetWalletId == oldWechatId -> 9L
+                else -> tx.targetWalletId
+            }
+            if (newSourceId != tx.sourceWalletId || newTargetId != tx.targetWalletId) {
+                txDao.updateTransaction(
+                    tx.copy(
+                        sourceWalletId = newSourceId,
+                        targetWalletId = newTargetId,
+                        updatedAtMillis = System.currentTimeMillis()
+                    )
+                )
+            }
+        }
+
+        // 清理旧版绑定在演示卡 8848 上的「每月房租」演示周期规则
+        for (rule in ruleDao.getAllRules()) {
+            if (rule.title == "每月房租" && rule.walletId == 6L) {
+                ruleDao.deleteRule(rule)
+            }
+        }
+    }
 
     suspend fun saveRecurringRule(rule: RecurringRuleEntity): Long = db.recurringRuleDao().insertRule(rule)
 

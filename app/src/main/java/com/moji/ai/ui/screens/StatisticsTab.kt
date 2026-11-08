@@ -389,12 +389,12 @@ fun ICostStatisticsScreen(
         StatsRangeMode.ALL -> "全部账单"
     }
 
-    // 核心统计指标计算（remember 缓存，避免图表动画期间重复遍历账单列表）
+    // 核心统计指标计算（remember 缓存，避免图表动画期间重复遍历账单列表；平账校准流水不计入日常收支统计）
     val netExpenseCents = remember(filteredTxs) {
-        filteredTxs.filter { it.type == TransactionType.EXPENSE }.sumOf { netExpenseOf(it) }
+        filteredTxs.filter { it.type == TransactionType.EXPENSE && it.category != "平账" }.sumOf { netExpenseOf(it) }
     }
     val totalIncomeCents = remember(filteredTxs) {
-        filteredTxs.filter { it.type == TransactionType.INCOME }.sumOf { it.amountCnyCents }
+        filteredTxs.filter { it.type == TransactionType.INCOME && it.category != "平账" }.sumOf { it.amountCnyCents }
     }
     val balanceCents = totalIncomeCents - netExpenseCents
 

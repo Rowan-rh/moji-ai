@@ -228,7 +228,7 @@ fun ICostAssetsScreen(
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 110.dp),
+            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 148.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // 1. 顶部栏：右侧 `+` 白色圆钮 + `•••` 白色圆钮 + 薄荷绿插画头像（对齐 07_assets_tab.png）
@@ -2037,7 +2037,12 @@ private fun ICostAccountItemRow(
 
     val leftSubtitle = remember(wallet) {
         if (wallet.type.isLiability) {
-            daysUntilRepaymentText(wallet.repaymentDay)
+            val sub = wallet.subTypeLabel.ifBlank { wallet.type.displayName }
+            if (wallet.repaymentDay != null && wallet.repaymentDay in 1..31) {
+                "[$sub] ${daysUntilRepaymentText(wallet.repaymentDay)}"
+            } else {
+                sub
+            }
         } else {
             wallet.subTypeLabel.ifBlank { wallet.type.displayName }
         }
@@ -2051,74 +2056,111 @@ private fun ICostAccountItemRow(
                 indication = null,
                 onClick = onClick
             )
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = 14.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        WalletBrandAvatar(wallet = wallet, size = 40.dp)
+        WalletBrandAvatar(wallet = wallet, size = 38.dp)
 
-        Spacer(modifier = Modifier.width(12.dp))
+        Spacer(modifier = Modifier.width(10.dp))
 
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .padding(end = 10.dp)
-        ) {
-            Text(
-                text = fullTitle,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-                color = ICostTextPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = leftSubtitle,
-                fontSize = 12.sp,
-                color = ICostTextSecondary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+        // 对齐 iCost：上下两行独立 Row，首行「账户名 ↔ 余额/欠款」，次行「[子类型] X天后还款 ↔ 可用额度」，互不挤压截断
+        val primaryRightText = if (wallet.type.isLiability) {
+            val debt = wallet.balanceCents.coerceAtLeast(0L)
+            formatMoneyCents(if (debt > 0L) -debt else 0L, wallet.currency, hideAmounts)
+        } else {
+            formatMoneyCents(wallet.balanceCents, wallet.currency, hideAmounts)
+        }
+        val secondaryRightText: String? = when {
+            wallet.type.isLiability && wallet.creditLimitCents != null -> {
+                val availableCents = (wallet.creditLimitCents - wallet.balanceCents).coerceAtLeast(0L)
+                "可用额度: ${formatMoneyCents(availableCents, wallet.currency, hideAmounts)}"
+            }
+            wallet.currency != "CNY" -> {
+                val cnyCents = (wallet.balanceCents * CurrencyCode.fromCode(wallet.currency).defaultRateToCny).roundToLong()
+                "约 ${formatMoneyCents(cnyCents, "CNY", hideAmounts)}"
+            }
+            else -> null
         }
 
-        Column(horizontalAlignment = Alignment.End) {
-            // 信用账户统一以正数展示欠款（分组标题已标明「欠款」）
-            val primaryRightText = if (wallet.type.isLiability) {
-                formatMoneyCents(wallet.balanceCents.coerceAtLeast(0L), wallet.currency, hideAmounts)
-            } else {
-                formatMoneyCents(wallet.balanceCents, wallet.currency, hideAmounts)
-            }
+        if (secondaryRightText != null) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = fullTitle,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).padding(end = 6.dp)
+                    )
+                    Text(
+                        text = primaryRightText,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = ICostTextPrimary,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
 
+                Spacer(modifier = Modifier.height(3.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = leftSubtitle,
+                        fontSize = 11.sp,
+                        letterSpacing = (-0.2).sp,
+                        color = ICostTextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).padding(end = 4.dp)
+                    )
+                    Text(
+                        text = secondaryRightText,
+                        fontSize = 11.sp,
+                        letterSpacing = (-0.2).sp,
+                        color = ICostTextSecondary,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+        } else {
+            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                Text(
+                    text = fullTitle,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = ICostTextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    text = leftSubtitle,
+                    fontSize = 11.sp,
+                    color = ICostTextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
             Text(
                 text = primaryRightText,
-                fontSize = 16.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = ICostTextPrimary,
                 maxLines = 1,
                 softWrap = false
             )
-
-            if (wallet.type.isLiability && wallet.creditLimitCents != null) {
-                Spacer(modifier = Modifier.height(2.dp))
-                val availableCents = (wallet.creditLimitCents - wallet.balanceCents).coerceAtLeast(0L)
-                Text(
-                    text = "可用额度: ${formatMoneyCents(availableCents, wallet.currency, hideAmounts)}",
-                    fontSize = 11.sp,
-                    color = ICostTextSecondary,
-                    maxLines = 1,
-                    softWrap = false
-                )
-            } else if (wallet.currency != "CNY") {
-                Spacer(modifier = Modifier.height(2.dp))
-                val cnyCents = (wallet.balanceCents * CurrencyCode.fromCode(wallet.currency).defaultRateToCny).roundToLong()
-                Text(
-                    text = "约 ${formatMoneyCents(cnyCents, "CNY", hideAmounts)}",
-                    fontSize = 11.sp,
-                    color = ICostTextSecondary,
-                    maxLines = 1,
-                    softWrap = false
-                )
-            }
         }
     }
 }
@@ -2234,7 +2276,7 @@ private fun ICostWalletDetailFullScreen(
                 }
             }
 
-            // 主账户白卡（含右下方淡银联水印 asset_bill_bank.webp）
+            // 主账户白卡
             item {
                 Surface(
                     shape = RoundedCornerShape(22.dp),
@@ -2242,14 +2284,6 @@ private fun ICostWalletDetailFullScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Box(modifier = Modifier.fillMaxWidth()) {
-                        ICostAssetImage(
-                            assetFile = "asset_bill_bank.webp",
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(end = 12.dp, bottom = 8.dp)
-                                .size(76.dp)
-                        )
-
                         Column(modifier = Modifier.padding(20.dp)) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),

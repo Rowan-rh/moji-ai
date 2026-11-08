@@ -187,13 +187,13 @@ fun ICostLedgerHomeScreen(
 
     val monthExpenseCents = remember(allMonthTransactions) {
         allMonthTransactions
-            .filter { it.type == TransactionType.EXPENSE }
+            .filter { it.type == TransactionType.EXPENSE && it.category != "平账" }
             .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
     }
 
     val monthIncomeCents = remember(allMonthTransactions) {
         allMonthTransactions
-            .filter { it.type == TransactionType.INCOME }
+            .filter { it.type == TransactionType.INCOME && it.category != "平账" }
             .sumOf { it.amountCnyCents }
     }
 

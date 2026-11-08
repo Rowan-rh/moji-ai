@@ -974,10 +974,11 @@ val ICostAccountBrandCatalog: List<AccountBrandOption> = listOf(
     AccountBrandOption("UNIONPAY", "云闪付", "acc_unionpay.webp", WalletType.DIGITAL_WALLET, "云闪付"),
     // 信用账户
     AccountBrandOption("HUABEI", "花呗", "acc_huabei.webp", WalletType.CREDIT, "蚂蚁花呗"),
-    AccountBrandOption("JIEBEI", "借呗", "acc_jiebei.webp", WalletType.CREDIT, "蚂蚁借呗"),
+    AccountBrandOption("JIEBEI", "借呗", "acc_jiebei.webp", WalletType.CREDIT, "借呗"),
     AccountBrandOption("JD", "京东白条", "acc_baitiao.webp", WalletType.CREDIT, "京东白条"),
     AccountBrandOption("JINTIAO", "京东金条", "acc_jintiao.webp", WalletType.CREDIT, "京东金条"),
     AccountBrandOption("WEILIDAI", "微粒贷", "acc_weilidai.webp", WalletType.CREDIT, "微粒贷"),
+    AccountBrandOption("OTHER_CREDIT", "度小满 / 其他信用", "acc_other_credit.webp", WalletType.CREDIT, "其他信用"),
     AccountBrandOption("MEITUAN_MONTHLY", "美团月付", "acc_meituan_monthly.webp", WalletType.CREDIT, "美团月付"),
     AccountBrandOption("CREDIT_CARD", "通用信用卡", "acc_credit_card.webp", WalletType.CREDIT, "信用卡"),
     // 银行卡（储蓄卡/信用卡皆可绑定）
@@ -1021,6 +1022,7 @@ fun resolveWalletAssetFile(wallet: WalletEntity): Pair<String, Boolean> {
         name.contains("金条") -> "acc_jintiao.webp" to false
         name.contains("花呗") -> "acc_huabei.webp" to false
         name.contains("借呗") -> "acc_jiebei.webp" to false
+        name.contains("度小满") -> "acc_other_credit.webp" to false
         name.contains("微粒贷") -> "acc_weilidai.webp" to false
         name.contains("美团月付") -> "acc_meituan_monthly.webp" to false
         name.contains("美团") -> "acc_meituan.webp" to false
@@ -1057,34 +1059,52 @@ fun resolveWalletAssetFile(wallet: WalletEntity): Pair<String, Boolean> {
     }
 }
 
+private fun resolveGlyphCircleBgColor(assetFile: String): Color? = when (assetFile) {
+    "acc_other_credit.webp", "acc_cash.webp" -> Color(0xFFF5B400)
+    "acc_credit_card.webp", "acc_fund.webp", "acc_stock.webp" -> Color(0xFFE65540)
+    "acc_debit_card.webp", "acc_saving.webp" -> Color(0xFF22B573)
+    "acc_provident.webp", "acc_medical_card.webp", "acc_transit_card.webp" -> Color(0xFF1677FF)
+    "acc_meal_card.webp", "acc_member_card.webp", "acc_other_asset.webp" -> Color(0xFF8E74F1)
+    else -> null
+}
+
 /**
- * 1:1 iCost 真实品牌圆形图标（招行葵花标、京东白条红底标、花呗蓝标、支付宝、微信等）
+ * 1:1 iCost 真实品牌圆形图标（招行葵花标、京东白条红底标、花呗蓝标、度小满黄底星章、支付宝、微信等）
  */
 @Composable
 fun WalletBrandAvatar(wallet: WalletEntity, size: Dp = 40.dp) {
     val (assetFile, hasWhiteBg) = resolveWalletAssetFile(wallet)
+    val glyphBgColor = resolveGlyphCircleBgColor(assetFile)
     Box(
         modifier = Modifier
             .size(size)
             .clip(CircleShape)
             .then(
-                if (hasWhiteBg) {
-                    Modifier
+                when {
+                    glyphBgColor != null -> Modifier.background(glyphBgColor)
+                    hasWhiteBg -> Modifier
                         .background(Color.White)
                         .border(0.8.dp, Color(0xFFEDEDED), CircleShape)
-                } else {
-                    Modifier
+                    else -> Modifier
                 }
             ),
         contentAlignment = Alignment.Center
     ) {
-        ICostAssetImage(
-            assetFile = assetFile,
-            modifier = Modifier
-                .size(size)
-                .clip(CircleShape),
-            contentScale = ContentScale.Crop
-        )
+        if (glyphBgColor != null) {
+            ICostAssetImage(
+                assetFile = assetFile,
+                modifier = Modifier.size(size * 0.54f),
+                contentScale = ContentScale.Fit
+            )
+        } else {
+            ICostAssetImage(
+                assetFile = assetFile,
+                modifier = Modifier
+                    .size(size)
+                    .clip(CircleShape),
+                contentScale = ContentScale.Crop
+            )
+        }
     }
 }
 
