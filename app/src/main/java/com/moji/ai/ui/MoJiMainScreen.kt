@@ -1104,7 +1104,7 @@ private fun ICostSettingsFullScreen(
                             .padding(horizontal = 16.dp, vertical = 14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        ICostAvatarButton(onClick = onOpenAppUpdate, size = 46.dp)
+                        com.moji.ai.ui.theme.MoJiBrandIconBadge(onClick = onOpenAppUpdate, size = 48.dp)
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
