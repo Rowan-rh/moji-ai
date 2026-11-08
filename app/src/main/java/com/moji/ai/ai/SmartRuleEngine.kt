@@ -3,6 +3,7 @@ package com.moji.ai.ai
 import android.content.Context
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.model.CategoryCatalog
+import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -153,6 +154,29 @@ class SmartRuleEngine(context: Context) {
     }
 
     /**
+     * 当标签被重命名、合并或从规则中移除时，精确按 Token 级联更新条件规则中的 appendTag
+     */
+    fun migrateTagCascade(
+        oldTag: String,
+        newTag: String?
+    ) {
+        var changed = false
+        val updated = _rules.value.map { rule ->
+            val mapped = TagCatalog.remapTagsString(rule.appendTag, oldTag, newTag)
+            if (mapped != null && mapped != rule.appendTag) {
+                changed = true
+                rule.copy(appendTag = mapped)
+            } else {
+                rule
+            }
+        }
+        if (changed) {
+            _rules.value = updated
+            saveInternal(updated)
+        }
+    }
+
+    /**
      * 对 AI 或离线引擎产出的候选账单执行用户自定义 When -> Then 规则管道
      */
     fun evaluateAndApply(
@@ -209,7 +233,7 @@ class SmartRuleEngine(context: Context) {
 
             hitRules.add(rule)
             val newTags = if (rule.appendTag.isNotBlank()) {
-                listOf(currentTx.tags, rule.appendTag).filter { it.isNotBlank() }.distinct().joinToString(",")
+                TagCatalog.joinTags(TagCatalog.parseTags(currentTx.tags) + TagCatalog.parseTags(rule.appendTag))
             } else {
                 currentTx.tags
             }

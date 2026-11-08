@@ -7,6 +7,7 @@ import com.moji.ai.ai.MerchantMemoryManager
 import com.moji.ai.ai.SmartRuleEngine
 import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.model.CategoryCatalog
+import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.SilentBookkeepingNotifier
 import com.moji.ai.service.CapturePipelineCoordinator
@@ -50,6 +51,7 @@ class MoJiApp : Application() {
     override fun onCreate() {
         super.onCreate()
         CategoryCatalog.init(this)
+        TagCatalog.init(this)
         database = AppDatabase.getInstance(this)
         repository = LedgerRepository(database)
         aiConfigManager = AiConfigManager(this)
@@ -73,6 +75,10 @@ class MoJiApp : Application() {
                 captureCoordinator.repairLegacyEcommerceRecordsIfNeeded()
                 prefs.edit().putBoolean("repaired_legacy_ecommerce_v20261108_3", true).apply()
             }
+            val existingTagStrings = repository.getAllTransactions().map { it.tags } +
+                smartRuleEngine.rules.value.map { it.appendTag }
+            TagCatalog.syncDiscoveredTagsFromHistory(existingTagStrings)
+
             val createdList = repository.processDueRecurringRules()
             if (createdList.isNotEmpty()) {
                 val wallets = repository.getAllWallets()

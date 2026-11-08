@@ -20,6 +20,8 @@ import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.SubCategoryDef
+import com.moji.ai.data.model.TagCatalog
+import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.update.AppUpdateConfig
@@ -48,7 +50,8 @@ data class QuickBookkeepingTemplate(
     val amountCents: Long,
     val currency: String = "CNY",
     val walletId: Long? = 4L,
-    val note: String = ""
+    val note: String = "",
+    val tags: String = ""
 )
 
 @Serializable
@@ -102,6 +105,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val expenseCategories: StateFlow<List<CategoryDef>> = CategoryCatalog.expenseCategoriesFlow
 
     val incomeCategories: StateFlow<List<CategoryDef>> = CategoryCatalog.incomeCategoriesFlow
+
+    val tags: StateFlow<List<TagDef>> = TagCatalog.tagsFlow
 
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = app.captureCoordinator.observabilityLogs
 
@@ -228,7 +233,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             amountCents = tx.amountCents,
             currency = tx.currency,
             walletId = tx.sourceWalletId ?: tx.targetWalletId,
-            note = tx.merchant.ifBlank { tx.note }
+            note = tx.merchant.ifBlank { tx.note },
+            tags = tx.tags
         )
         val duplicated = _templates.value.any {
             it.title == newItem.title && it.category == newItem.category &&
@@ -282,6 +288,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 category = tpl.category,
                 merchant = tpl.title,
                 note = tpl.note,
+                tags = tpl.tags,
                 sourceWalletId = if (type == TransactionType.INCOME) null else tpl.walletId,
                 targetWalletId = if (type == TransactionType.INCOME) tpl.walletId else null,
                 captureSource = "TEMPLATE"
@@ -546,7 +553,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             recurringRules = recurringRules.value,
             merchantMemories = merchantMemories.value,
             customExpenseCategories = CategoryCatalog.expenseCategories,
-            customIncomeCategories = CategoryCatalog.incomeCategories
+            customIncomeCategories = CategoryCatalog.incomeCategories,
+            customTags = TagCatalog.tags
         )
     }
 
@@ -586,6 +594,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 preview = preview,
                 applyToWalletBalance = applyToWalletBalance
             )
+            TagCatalog.syncDiscoveredTagsFromHistory(preview.parsedTransactions.map { it.tags })
             val parts = mutableListOf<String>()
             if (preview.newLedgers.isNotEmpty()) {
                 parts.add("新增 ${preview.newLedgers.size} 个账本（${preview.newLedgers.joinToString("、")}）")
@@ -625,6 +634,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     incomeList = snapshot.customIncomeCategories
                 )
             }
+            if (snapshot.customTags.isNotEmpty()) {
+                TagCatalog.replaceAllTags(snapshot.customTags)
+            }
+            TagCatalog.syncDiscoveredTagsFromHistory(backupTxs.map { it.tags })
             snapshot.merchantMemories.forEach { m ->
                 app.merchantMemoryManager.upsertMemory(m.merchantKeyword, m.category, m.preferredWalletId)
             }
@@ -1122,5 +1135,142 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun restoreDefaultCategories(isExpense: Boolean? = null, mergeOnly: Boolean = true) {
         CategoryCatalog.restoreDefaultCategories(isExpense = isExpense, mergeOnly = mergeOnly)
         postMessage(if (mergeOnly) "已补全缺失的默认分类" else "已重置为默认分类树")
+    }
+
+    suspend fun countTransactionsByTag(tagName: String): Int =
+        repository.countTransactionsByTag(tagName)
+
+    private suspend fun cascadeTagEverywhere(
+        oldTag: String,
+        newTag: String?
+    ): Int {
+        val updatedTxCount = repository.migrateTagCascade(oldTag = oldTag, newTag = newTag)
+
+        var templatesChanged = false
+        val updatedTemplates = _templates.value.map { tpl ->
+            val mapped = TagCatalog.remapTagsString(tpl.tags, oldTag, newTag)
+            if (mapped != null && mapped != tpl.tags) {
+                templatesChanged = true
+                tpl.copy(tags = mapped)
+            } else {
+                tpl
+            }
+        }
+        if (templatesChanged) {
+            _templates.value = updatedTemplates
+            uiPrefs.edit().putString("saved_templates_json", jsonCodec.encodeToString(updatedTemplates)).apply()
+        }
+
+        app.smartRuleEngine.migrateTagCascade(oldTag = oldTag, newTag = newTag)
+        TagCatalog.recordTagRemap(oldTag = oldTag, newTag = newTag)
+        return updatedTxCount
+    }
+
+    fun addTag(
+        name: String,
+        colorHex: Long,
+        groupName: String = "日常",
+        onDone: (Result<TagDef>) -> Unit = {}
+    ) {
+        val res = TagCatalog.addTag(name = name, colorHex = colorHex, groupName = groupName)
+        res.onSuccess { created ->
+            postMessage("已新增标签「#${created.name}」")
+        }
+        onDone(res)
+    }
+
+    fun updateTag(
+        oldName: String,
+        newName: String,
+        colorHex: Long,
+        groupName: String = "日常",
+        onDone: (Result<TagDef>) -> Unit = {}
+    ) {
+        val res = TagCatalog.updateTag(
+            oldName = oldName,
+            newName = newName,
+            colorHex = colorHex,
+            groupName = groupName
+        )
+        res.onSuccess { updated ->
+            if (oldName != updated.name) {
+                viewModelScope.launch {
+                    val cnt = cascadeTagEverywhere(oldTag = oldName, newTag = updated.name)
+                    postMessage(
+                        if (cnt > 0) "已将「#$oldName」重命名为「#${updated.name}」（同步更新 $cnt 笔历史账单）"
+                        else "已将「#$oldName」重命名为「#${updated.name}」"
+                    )
+                    onDone(res)
+                }
+            } else {
+                postMessage("已更新标签「#${updated.name}」")
+                onDone(res)
+            }
+        }.onFailure {
+            onDone(res)
+        }
+    }
+
+    fun moveTag(index: Int, delta: Int) {
+        TagCatalog.moveTag(index, delta)
+    }
+
+    fun mergeTag(
+        sourceName: String,
+        targetName: String,
+        onDone: (Result<TagDef>) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val res = TagCatalog.mergeTagInCatalog(sourceName = sourceName, targetName = targetName)
+            res.onSuccess { targetDef ->
+                val cnt = cascadeTagEverywhere(oldTag = sourceName, newTag = targetDef.name)
+                postMessage(
+                    if (cnt > 0) "已将「#$sourceName」合并入「#${targetDef.name}」（同步合并 $cnt 笔历史账单并自动去重）"
+                    else "已将「#$sourceName」合并入「#${targetDef.name}」"
+                )
+            }
+            onDone(res)
+        }
+    }
+
+    fun deleteTag(
+        tagName: String,
+        cascadeRemoveFromHistory: Boolean,
+        replacementTagName: String? = null,
+        onDone: (Result<Unit>) -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val muteDiscovery = !cascadeRemoveFromHistory
+            val res = TagCatalog.deleteTagFromCatalog(
+                name = tagName,
+                muteDiscoveryIfKeptInHistory = muteDiscovery
+            )
+            res.onSuccess {
+                if (cascadeRemoveFromHistory) {
+                    val cleanReplacement = replacementTagName?.trim()?.takeIf { it.isNotEmpty() && it != tagName }
+                    val cnt = cascadeTagEverywhere(oldTag = tagName, newTag = cleanReplacement)
+                    if (cleanReplacement != null) {
+                        postMessage(
+                            if (cnt > 0) "已删除「#$tagName」，并将 $cnt 笔历史账单替换为「#$cleanReplacement」"
+                            else "已删除标签「#$tagName」"
+                        )
+                    } else {
+                        postMessage(
+                            if (cnt > 0) "已删除「#$tagName」，并从 $cnt 笔历史账单及规则中移除该标签"
+                            else "已删除标签「#$tagName」"
+                        )
+                    }
+                } else {
+                    TagCatalog.recordTagRemap(oldTag = tagName, newTag = null)
+                    postMessage("已从标签列表中移除「#$tagName」（保留历史账单上的标签记录）")
+                }
+            }
+            onDone(res)
+        }
+    }
+
+    fun restoreDefaultTags(mergeOnly: Boolean = true) {
+        TagCatalog.restoreDefaultTags(mergeOnly = mergeOnly)
+        postMessage(if (mergeOnly) "已补全缺失的默认标签" else "已重置为默认标签列表")
     }
 }

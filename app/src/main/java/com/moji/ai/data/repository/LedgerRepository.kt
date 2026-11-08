@@ -9,6 +9,7 @@ import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import kotlin.math.roundToLong
 
@@ -309,7 +310,11 @@ class LedgerRepository(private val db: AppDatabase) {
     suspend fun recordTransaction(tx: TransactionEntity): Long = db.withTransaction {
         val txDao = db.transactionDao()
         val finalTx = applyWalletImpact(tx)
-        txDao.insertTransaction(finalTx)
+        val id = txDao.insertTransaction(finalTx)
+        if (!finalTx.isSystemBalanceAnchor() && finalTx.tags.isNotBlank()) {
+            TagCatalog.syncDiscoveredTagsFromHistory(listOf(finalTx.tags))
+        }
+        id
     }
 
     /**
@@ -321,6 +326,9 @@ class LedgerRepository(private val db: AppDatabase) {
         revertWalletImpact(oldTx)
         val applied = applyWalletImpact(updatedTx)
         txDao.updateTransaction(applied)
+        if (!applied.isSystemBalanceAnchor() && applied.tags.isNotBlank()) {
+            TagCatalog.syncDiscoveredTagsFromHistory(listOf(applied.tags))
+        }
         true
     }
 
@@ -630,6 +638,40 @@ class LedgerRepository(private val db: AppDatabase) {
             )
             if (mapped != null) {
                 ruleDao.updateRuleCategoryById(rule.id, mapped, now)
+            }
+        }
+        updatedTxCount
+    }
+
+    /**
+     * 统计包含指定标签 Token 的未删除历史账单数量（排除系统平账流水）
+     */
+    suspend fun countTransactionsByTag(tagName: String): Int {
+        return db.transactionDao().getAllTransactions().count { tx ->
+            !tx.isSystemBalanceAnchor() && TagCatalog.containsTag(tx.tags, tagName)
+        }
+    }
+
+    /**
+     * 在 Room 事务中按精确标签 Token 拆分并级联替换或移除历史账单中的标签（自动去重并刷新 updatedAtMillis / syncRevision / syncDirty）
+     * @param oldTag 原标签名称
+     * @param newTag 新标签名称（传入 null 或空串表示从账单标签中移除 oldTag）
+     * @return 实际受影响更新的历史账单笔数
+     */
+    suspend fun migrateTagCascade(
+        oldTag: String,
+        newTag: String?
+    ): Int = db.withTransaction {
+        val now = System.currentTimeMillis()
+        val txDao = db.transactionDao()
+        var updatedTxCount = 0
+
+        for (tx in txDao.getAllTransactions()) {
+            if (tx.isSystemBalanceAnchor()) continue
+            val mapped = TagCatalog.remapTagsString(tx.tags, oldTag, newTag)
+            if (mapped != null) {
+                txDao.updateTransactionTagsById(tx.id, mapped, now)
+                updatedTxCount++
             }
         }
         updatedTxCount
