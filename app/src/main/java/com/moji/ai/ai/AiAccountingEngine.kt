@@ -167,6 +167,104 @@ class AiAccountingEngine(
             }
             return if (cutPos < rawText.length) rawText.substring(0, cutPos).trim() else rawText
         }
+
+        /**
+         * 判断采集文本中是否包含明确的支付/交易/下单时间（如 `2026-11-08 14:54:50`、`2026年11月08日 14:54:50`、`昨天 21:18`、`11-05 20:23`）。
+         * 没有任何时间的页面（如仅显示“支付成功 + 商户 + 金额 + 完成”的过渡页）一律不予入账。
+         */
+        fun hasExplicitOccurredTime(
+            text: String,
+            referenceMillis: Long = System.currentTimeMillis()
+        ): Boolean = extractOccurredTimeMillis(text = text, referenceMillis = referenceMillis) != null
+
+        /**
+         * 从账单文本提取「实际购物/交易发生时间（毫秒）」：
+         * 支持 `2026-11-06 21:18:53`、`2026年11月5日 18:24:25`、`2026年11月01日 15时56分23秒`、`昨天 21:18`、`11-05 20:23` 等格式。
+         * 注意：
+         * 1. 自动剔除「物流轨迹：... 时间：...」中的快递签收时间，防止把快递签收时间误当成下单时间；
+         * 2. 严禁使用当前截图时间或订单号前缀伪造时间，无明确时间时返回 `null`。
+         */
+        fun extractOccurredTimeMillis(
+            text: String,
+            referenceMillis: Long = System.currentTimeMillis(),
+            @Suppress("UNUSED_PARAMETER") orderKey: String = ""
+        ): Long? {
+            val textWithoutLogistics = text.replace(
+                Regex("""物流轨迹[:：][^|]*"""),
+                " "
+            )
+            val normalized = textWithoutLogistics
+                .replace(
+                    Regex("""(\d{1,2})时(\d{1,2})分(?:(\d{1,2})秒)?"""),
+                    "$1:$2:$3"
+                )
+                .replace(":|", "00|")
+                .replace(Regex(""":(?=\s|$)"""), ":00")
+                .replace(
+                    Regex("""(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?)\s*\|\s*(\d{1,2}:\d{2}(?::\d{2})?)"""),
+                    "$1 $2"
+                )
+                .replace(
+                    Regex("""(20\d{2}年\d{1,2}月\d{1,2}日)(\d{1,2}:\d{2}(?::\d{2})?)"""),
+                    "$1 $2"
+                )
+            val fullDateRegex = Regex(
+                """(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?\s+\d{1,2}:\d{2}(?::\d{2})?)"""
+            )
+            fullDateRegex.find(normalized)?.groupValues?.getOrNull(1)?.trim()?.let { rawDate ->
+                for (pattern in fullDatePatterns) {
+                    val parsed = runCatching {
+                        SimpleDateFormat(pattern, Locale.CHINA).apply { isLenient = false }.parse(rawDate)?.time
+                    }.getOrNull()
+                    if (parsed != null) return parsed
+                }
+            }
+
+            val relativeRegex = Regex("""(今天|昨天|前天)\s*(\d{1,2}):(\d{2})(?::(\d{2}))?""")
+            relativeRegex.find(textWithoutLogistics)?.let { m ->
+                val dayWord = m.groupValues[1]
+                val hour = m.groupValues[2].toIntOrNull() ?: return@let
+                val minute = m.groupValues[3].toIntOrNull() ?: return@let
+                val second = m.groupValues[4].toIntOrNull() ?: 0
+                val cal = Calendar.getInstance().apply {
+                    timeInMillis = referenceMillis
+                    when (dayWord) {
+                        "昨天" -> add(Calendar.DAY_OF_YEAR, -1)
+                        "前天" -> add(Calendar.DAY_OF_YEAR, -2)
+                    }
+                    set(Calendar.HOUR_OF_DAY, hour)
+                    set(Calendar.MINUTE, minute)
+                    set(Calendar.SECOND, second)
+                    set(Calendar.MILLISECOND, 0)
+                }
+                return cal.timeInMillis
+            }
+
+            val monthDayRegex = Regex("""(?<!\d)(?:(\d{1,2})月(\d{1,2})日\s*|(\d{1,2})-(\d{1,2})\s+)(\d{1,2}):(\d{2})(?::(\d{2}))?""")
+            monthDayRegex.find(textWithoutLogistics)?.let { m ->
+                val monthStr = m.groupValues[1].ifBlank { m.groupValues[3] }
+                val dayStr = m.groupValues[2].ifBlank { m.groupValues[4] }
+                val month = (monthStr.toIntOrNull() ?: return@let) - 1
+                val day = dayStr.toIntOrNull() ?: return@let
+                val hour = m.groupValues[5].toIntOrNull() ?: return@let
+                val minute = m.groupValues[6].toIntOrNull() ?: return@let
+                val second = m.groupValues[7].toIntOrNull() ?: 0
+                if (month in 0..11 && day in 1..31 && hour in 0..23 && minute in 0..59) {
+                    val cal = Calendar.getInstance().apply {
+                        timeInMillis = referenceMillis
+                        set(Calendar.MONTH, month)
+                        set(Calendar.DAY_OF_MONTH, day)
+                        set(Calendar.HOUR_OF_DAY, hour)
+                        set(Calendar.MINUTE, minute)
+                        set(Calendar.SECOND, second)
+                        set(Calendar.MILLISECOND, 0)
+                    }
+                    return cal.timeInMillis
+                }
+            }
+
+            return null
+        }
     }
 
     suspend fun parseCapturedText(
@@ -227,10 +325,11 @@ class AiAccountingEngine(
             .ifBlank { resolvedTxNo }
             .ifBlank { resolvedMerchantNo }
         val resolvedPayMethod = finalResult.paymentMethodRaw.ifBlank { localFallback?.paymentMethodRaw.orEmpty() }
-        val resolvedOccurredAt = finalResult.occurredAtMillis
+        // 严禁把当前采集/截图时间 (capturedAtMillis) 冒充为支付时间：若页面没有任何明确时间，直接拦截不予录入！
+        val resolvedOccurredAt = extractOccurredTimeMillis(rawText, capturedAtMillis)
             ?: localFallback?.occurredAtMillis
-            ?: extractOccurredTimeMillis(rawText, capturedAtMillis)
-            ?: capturedAtMillis
+            ?: finalResult.occurredAtMillis
+            ?: return@withContext null
 
         val resolvedQuantity = if (finalResult.itemQuantity > 1) {
             finalResult.itemQuantity
@@ -381,108 +480,6 @@ class AiAccountingEngine(
             return wallets.firstOrNull { it.name.contains("微信") || it.name.contains("零钱") || it.name.contains("支付宝") }
         }
         return wallets.firstOrNull { preferCredit == null || it.type.isLiability == preferCredit }
-    }
-
-    /**
-     * 从账单文本提取「实际购物/交易发生时间（毫秒）」：
-     * 支持 `2026-11-06 21:18:53`、`2026年11月5日 18:24:25`、`2026年11月01日 15时56分23秒`、`昨天 21:18`、`11-05 20:23` 等格式。
-     * 注意：自动剔除「物流轨迹：... 时间：...」中的快递签收时间，防止把快递签收时间误当成下单时间！
-     */
-    fun extractOccurredTimeMillis(
-        text: String,
-        referenceMillis: Long = System.currentTimeMillis(),
-        orderKey: String = ""
-    ): Long? {
-        val textWithoutLogistics = text.replace(
-            Regex("""物流轨迹[:：][^|]*"""),
-            " "
-        )
-        val normalized = textWithoutLogistics
-            .replace(
-                Regex("""(\d{1,2})时(\d{1,2})分(?:(\d{1,2})秒)?"""),
-                "$1:$2:$3"
-            )
-            .replace(":|", "00|")
-            .replace(Regex(""":(?=\s|$)"""), ":00")
-            .replace(
-                Regex("""(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?)\s*\|\s*(\d{1,2}:\d{2}(?::\d{2})?)"""),
-                "$1 $2"
-            )
-        val fullDateRegex = Regex(
-            """(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?\s+\d{1,2}:\d{2}(?::\d{2})?)"""
-        )
-        fullDateRegex.find(normalized)?.groupValues?.getOrNull(1)?.trim()?.let { rawDate ->
-            for (pattern in fullDatePatterns) {
-                val parsed = runCatching {
-                    SimpleDateFormat(pattern, Locale.CHINA).apply { isLenient = false }.parse(rawDate)?.time
-                }.getOrNull()
-                if (parsed != null) return parsed
-            }
-        }
-
-        val relativeRegex = Regex("""(今天|昨天|前天)\s*(\d{1,2}):(\d{2})(?::(\d{2}))?""")
-        relativeRegex.find(textWithoutLogistics)?.let { m ->
-            val dayWord = m.groupValues[1]
-            val hour = m.groupValues[2].toIntOrNull() ?: return@let
-            val minute = m.groupValues[3].toIntOrNull() ?: return@let
-            val second = m.groupValues[4].toIntOrNull() ?: 0
-            val cal = Calendar.getInstance().apply {
-                timeInMillis = referenceMillis
-                when (dayWord) {
-                    "昨天" -> add(Calendar.DAY_OF_YEAR, -1)
-                    "前天" -> add(Calendar.DAY_OF_YEAR, -2)
-                }
-                set(Calendar.HOUR_OF_DAY, hour)
-                set(Calendar.MINUTE, minute)
-                set(Calendar.SECOND, second)
-                set(Calendar.MILLISECOND, 0)
-            }
-            return cal.timeInMillis
-        }
-
-        val monthDayRegex = Regex("""(?<!\d)(\d{1,2})[-月](\d{1,2})日?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?""")
-        monthDayRegex.find(textWithoutLogistics)?.let { m ->
-            val month = (m.groupValues[1].toIntOrNull() ?: return@let) - 1
-            val day = m.groupValues[2].toIntOrNull() ?: return@let
-            val hour = m.groupValues[3].toIntOrNull() ?: return@let
-            val minute = m.groupValues[4].toIntOrNull() ?: return@let
-            val second = m.groupValues[5].toIntOrNull() ?: 0
-            if (month in 0..11 && day in 1..31) {
-                val cal = Calendar.getInstance().apply {
-                    timeInMillis = referenceMillis
-                    set(Calendar.MONTH, month)
-                    set(Calendar.DAY_OF_MONTH, day)
-                    set(Calendar.HOUR_OF_DAY, hour)
-                    set(Calendar.MINUTE, minute)
-                    set(Calendar.SECOND, second)
-                    set(Calendar.MILLISECOND, 0)
-                }
-                return cal.timeInMillis
-            }
-        }
-
-        // 兜底：若拼多多等订单详情页未展开「查看更多订单信息」（下单时间被折叠），从订单编号前缀（如 261019-361339369840060）解析真实下单日期
-        Regex("""^(\d{2})(\d{2})(\d{2})-\d{8,}$""").find(orderKey.trim())?.let { m ->
-            val year = 2000 + (m.groupValues[1].toIntOrNull() ?: return@let)
-            val month = (m.groupValues[2].toIntOrNull() ?: return@let) - 1
-            val day = m.groupValues[3].toIntOrNull() ?: return@let
-            if (year in 2020..2035 && month in 0..11 && day in 1..31) {
-                val refCal = Calendar.getInstance().apply { timeInMillis = referenceMillis }
-                if (refCal.get(Calendar.YEAR) == year &&
-                    refCal.get(Calendar.MONTH) == month &&
-                    refCal.get(Calendar.DAY_OF_MONTH) == day
-                ) {
-                    return referenceMillis
-                }
-                val orderCal = Calendar.getInstance().apply {
-                    set(year, month, day, 12, 0, 0)
-                    set(Calendar.MILLISECOND, 0)
-                }
-                return orderCal.timeInMillis
-            }
-        }
-
-        return null
     }
 
     /**
@@ -789,7 +786,7 @@ $recentDesc
             text = if (payTimeVal.isNotBlank()) "$payTimeVal | $strippedText" else strippedText,
             referenceMillis = referenceMillis,
             orderKey = orderKey
-        )
+        ) ?: return null
 
         // 1. 识别币种与【原价 / 优惠 / 实扣】三元组（iCost 模板规范）
         val currency = when {

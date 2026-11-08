@@ -17,6 +17,7 @@ import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import com.moji.ai.MoJiApp
+import com.moji.ai.ai.AiAccountingEngine
 import java.util.concurrent.Executors
 import kotlin.math.abs
 
@@ -504,6 +505,12 @@ open class PaymentAccessibilityService : AccessibilityService() {
             text.contains("待收货") &&
             (text.contains("待发货") || text.contains("待评价") || text.contains("待分享") || text.contains("退款/售后"))
         if (isEcommerceOrderListTabs) {
+            return false
+        }
+
+        // 3. 铁律：页面必须包含明确的支付/交易/下单时间（如 2026-11-08 14:54:50、昨天 21:18、11-08 14:54）。
+        // 像微信/支付宝仅展示「支付成功 | 商户 | ¥95.00 | 完成」却没有任何时间的过渡结果页，一律不予录入！
+        if (!AiAccountingEngine.hasExplicitOccurredTime(text)) {
             return false
         }
 

@@ -129,8 +129,13 @@ class CapturePipelineCoordinator(
             val wallets = repository.getAllWallets()
             val recentExpenses = repository.getRecentRefundableExpenses(15)
 
-            // 1. 清理支付成功页（如支付宝碰一下立减）第一帧先录了原价、几秒后立减动画完成又录了实扣价产生的重复原价记录
+            // 1. 清理：
+            // (a) 支付成功页（如支付宝碰一下立减）第一帧先录了原价、几秒后立减动画完成又录了实扣价产生的重复原价记录；
+            // (b) 没有任何明确支付/交易时间且无订单号的裸完成页脏记录（如微信“支付成功 | 商户名 | ¥95.00 | 完成”被重复触发产生的无时间记录）。
             for (tx in allTxs) {
+                if (tx.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT")) {
+                    continue
+                }
                 if (tx.discountCents == 0L && tx.orderKey.isBlank()) {
                     val hasPostDiscountSibling = allTxs.any { other ->
                         other.id != tx.id &&
@@ -141,20 +146,65 @@ class CapturePipelineCoordinator(
                     }
                     if (hasPostDiscountSibling) {
                         repository.undoAndDeleteTransaction(tx.id)
+                        continue
+                    }
+                }
+                if (tx.orderKey.isBlank() && tx.transactionNo.isBlank() && tx.merchantOrderNo.isBlank()) {
+                    val evidences = repository.getEvidencesForTransaction(tx.id)
+                    val fullSourceText = (evidences.map { it.rawText } + listOf(tx.rawCapturedText))
+                        .filter { it.isNotBlank() }
+                        .joinToString(" | ")
+                    val refMillis = tx.capturedAtMillis.takeIf { it > 0L } ?: tx.timestamp
+                    if (!AiAccountingEngine.hasExplicitOccurredTime(fullSourceText, refMillis)) {
+                        repository.undoAndDeleteTransaction(tx.id)
+                        continue
                     }
                 }
             }
 
-            // 2. 先从 capture_evidences 恢复曾因异步截图覆盖而丢失的订单号/交易时间，并重算旧版拼多多/京东异常记录
+            // 2. 先从 capture_evidences 恢复曾因异步截图覆盖或首帧无时间而缺失的精确支付时间/备注/订单号，并重算旧版拼多多/京东异常记录
             val afterStep1 = repository.getAllTransactions()
             for (tx in afterStep1) {
-                if (tx.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR")) {
+                if (tx.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT")) {
                     continue
                 }
                 val evidences = repository.getEvidencesForTransaction(tx.id)
                 val fullSourceText = (evidences.map { it.rawText } + listOf(tx.rawCapturedText))
                     .filter { it.isNotBlank() }
                     .joinToString(" | ")
+                val refMillis = tx.capturedAtMillis.takeIf { it > 0L } ?: tx.timestamp
+                val explicitTimeFromEvidence = AiAccountingEngine.extractOccurredTimeMillis(fullSourceText, refMillis)
+                if (explicitTimeFromEvidence != null && (tx.timestamp % 1_000L != 0L || tx.note == tx.merchant)) {
+                    val pkgHintForEvidence = when {
+                        fullSourceText.contains("com.tencent.mm") -> "com.tencent.mm"
+                        fullSourceText.contains("com.eg.android.AlipayGphone") -> "com.eg.android.AlipayGphone"
+                        else -> ""
+                    }
+                    val reparsedFromEv = aiEngine.localSmartFallbackParse(
+                        rawText = fullSourceText,
+                        sourceAppPackage = pkgHintForEvidence,
+                        wallets = wallets,
+                        recentExpenses = recentExpenses,
+                        referenceMillis = refMillis
+                    )
+                    val upgradedNote = if (tx.note == tx.merchant &&
+                        !reparsedFromEv?.note.isNullOrBlank() &&
+                        reparsedFromEv?.note != tx.merchant
+                    ) {
+                        reparsedFromEv!!.note
+                    } else {
+                        tx.note
+                    }
+                    if (tx.timestamp != explicitTimeFromEvidence || upgradedNote != tx.note) {
+                        repository.updateExistingTransaction(
+                            tx.copy(
+                                timestamp = explicitTimeFromEvidence,
+                                note = upgradedNote,
+                                updatedAtMillis = System.currentTimeMillis()
+                            )
+                        )
+                    }
+                }
 
                 val isPddTx = fullSourceText.contains("com.xunmeng.pinduoduo") || tx.orderKey.matches(Regex("""^\d{6}-\d{8,}$"""))
                 val isJdTx = fullSourceText.contains("com.jingdong.app.mall") || tx.category == "购物-京东"
@@ -251,16 +301,29 @@ class CapturePipelineCoordinator(
                 }
             }
 
-            // 3. 自动扫描并合并「电商订单详情（拼多多/京东/淘宝/抖音） ↔ 支付账单详情（支付宝/微信）」产生的跨端同笔订单重复记录（如 #68 拼多多 9.60 与 #78 支付宝 9.60）
+            // 3. 自动扫描并合并：
+            // (a) 「电商订单详情（拼多多/京东/淘宝/抖音） ↔ 支付账单详情（支付宝/微信）」产生的跨端同笔订单重复记录；
+            // (b) 「(支付时间 OR 登记时间) + 相同金额」命中的重复自动入账记录。
             val currentTxs = repository.getAllTransactions().sortedBy { it.id }
             val deletedIds = mutableSetOf<Long>()
             for (i in currentTxs.indices) {
                 val primary = currentTxs[i]
                 if (primary.id in deletedIds) continue
+                if (primary.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT")) continue
                 for (j in (i + 1) until currentTxs.size) {
                     val secondary = currentTxs[j]
                     if (secondary.id in deletedIds) continue
-                    if (isCrossChannelSameOrderPair(primary, secondary)) {
+                    if (secondary.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT")) continue
+                    val isSamePaymentOrCapturedTimeAndAmount = primary.type == secondary.type &&
+                        primary.amountCents == secondary.amountCents && (
+                            abs(primary.timestamp - secondary.timestamp) <= 65_000L ||
+                                (primary.timestamp / 60_000L == secondary.timestamp / 60_000L) ||
+                                (primary.capturedAtMillis > 0L && secondary.capturedAtMillis > 0L && (
+                                    abs(primary.capturedAtMillis - secondary.capturedAtMillis) <= 65_000L ||
+                                        (primary.capturedAtMillis / 60_000L == secondary.capturedAtMillis / 60_000L)
+                                    ))
+                            )
+                    if (isSamePaymentOrCapturedTimeAndAmount || isCrossChannelSameOrderPair(primary, secondary)) {
                         val incomingResolvedKey = secondary.orderKey
                             .ifBlank { secondary.transactionNo }
                             .ifBlank { secondary.merchantOrderNo }
@@ -559,7 +622,7 @@ class CapturePipelineCoordinator(
 
         // 规则 2：若规则 1 未命中，检查：
         // (a) 跨端内嵌订单号匹配（如微信账单商品写明「京东-订单编号3673486013948720」与京东订单号 3673486013948720）；
-        // (b) 同一支付时间 + 相同金额匹配；
+        // (b) 同一支付时间（timestamp）或同一登记时间（capturedAtMillis）+ 相同金额匹配；
         // (c) 跨应用同笔购物融合（如拼多多/京东/淘宝/抖音订单详情页 + 支付宝/微信账单详情页扫了同一笔 9.60 元商品）。
         if (duplicateMatchedTx == null) {
             val sameDayAmountCandidates = repository.findTransactionsByAmountAndOccurredWindow(
@@ -567,9 +630,16 @@ class CapturePipelineCoordinator(
                 occurredAtMillis = parsedTx.timestamp,
                 toleranceMillis = 24 * 3600_000L
             )
+            val timeOrCapturedCandidates = repository.findTransactionsByAmountAndTimeOrCapturedWindow(
+                amountCents = parsedTx.amountCents,
+                occurredAtMillis = parsedTx.timestamp,
+                capturedAtMillis = capturedAtMillis,
+                toleranceMillis = 65_000L
+            )
+            val combinedCandidates = (timeOrCapturedCandidates + sameDayAmountCandidates).distinctBy { it.id }
 
             // 2a. 跨端内嵌订单号匹配（如微信支付商品详情中包含京东/淘宝/美团订单编号）
-            val matchedByEmbeddedOrderNo = sameDayAmountCandidates.firstOrNull { existing ->
+            val matchedByEmbeddedOrderNo = combinedCandidates.firstOrNull { existing ->
                 hasCrossEmbeddedOrderNumber(existing, parsedTx, resolvedOrderKey, mergedText)
             }
             if (matchedByEmbeddedOrderNo != null) {
@@ -577,25 +647,41 @@ class CapturePipelineCoordinator(
                 duplicateReasonLabel = "跨端订单号关联(${resolvedOrderKey.ifBlank { matchedByEmbeddedOrderNo.orderKey }.takeLast(8)})"
             }
 
-            // 2b. 相同支付时间 + 相同金额匹配
+            // 2b. (相同支付时间 OR 相同登记时间) + 相同金额去重（无论双方是否有订单号或跨渠道订单号不同，均以支付时间/登记时间+金额去重）
             if (duplicateMatchedTx == null) {
-                val matchedByTimeAndAmount = sameDayAmountCandidates.firstOrNull { existing ->
-                    val isExactTimestampMatch = abs(existing.timestamp - parsedTx.timestamp) <= 2_000L
-                    val isSameMinuteMatch = (resolvedOrderKey.isBlank() || existing.orderKey.isBlank() || resolvedOrderKey == existing.orderKey) &&
-                        abs(existing.timestamp - parsedTx.timestamp) <= 65_000L
-                    isExactTimestampMatch || isSameMinuteMatch
+                var matchedByCapturedClock = false
+                val matchedByTimeAndAmount = combinedCandidates.firstOrNull { existing ->
+                    val isPaymentTimeMatch = abs(existing.timestamp - parsedTx.timestamp) <= 65_000L ||
+                        (existing.timestamp / 60_000L == parsedTx.timestamp / 60_000L)
+                    val isCapturedTimeMatch = existing.capturedAtMillis > 0L && capturedAtMillis > 0L && (
+                        abs(existing.capturedAtMillis - capturedAtMillis) <= 65_000L ||
+                            (existing.capturedAtMillis / 60_000L == capturedAtMillis / 60_000L)
+                        )
+                    if (!isPaymentTimeMatch && isCapturedTimeMatch) {
+                        matchedByCapturedClock = true
+                    }
+                    isPaymentTimeMatch || isCapturedTimeMatch
                 } ?: recentRecordedTransactions[amountTypeFingerprint]?.takeIf { recent ->
-                    abs(capturedAtMillis - recent.capturedAtMillis) <= 30_000L &&
-                        (recent.orderKey.isBlank() || resolvedOrderKey.isBlank() || recent.orderKey == resolvedOrderKey) &&
-                        abs(parsedTx.timestamp - recent.timestamp) <= 120_000L
+                    val isPaymentTimeMatch = abs(parsedTx.timestamp - recent.timestamp) <= 65_000L ||
+                        (parsedTx.timestamp / 60_000L == recent.timestamp / 60_000L)
+                    val isCapturedTimeMatch = abs(capturedAtMillis - recent.capturedAtMillis) <= 65_000L ||
+                        (capturedAtMillis / 60_000L == recent.capturedAtMillis / 60_000L)
+                    if (!isPaymentTimeMatch && isCapturedTimeMatch) {
+                        matchedByCapturedClock = true
+                    }
+                    isPaymentTimeMatch || isCapturedTimeMatch
                 }?.let { recent ->
                     repository.getTransactionById(recent.id)
                 }
 
                 if (matchedByTimeAndAmount != null) {
                     duplicateMatchedTx = matchedByTimeAndAmount
-                    val occurredStr = SimpleDateFormat("MM-dd HH:mm:ss", Locale.CHINA).format(Date(parsedTx.timestamp))
-                    duplicateReasonLabel = "支付时间($occurredStr)与金额一致"
+                    val fmt = SimpleDateFormat("MM-dd HH:mm:ss", Locale.CHINA)
+                    duplicateReasonLabel = if (matchedByCapturedClock) {
+                        "登记时间(${fmt.format(Date(capturedAtMillis))})与金额一致"
+                    } else {
+                        "支付时间(${fmt.format(Date(parsedTx.timestamp))})与金额一致"
+                    }
                 }
             }
 
@@ -1110,9 +1196,11 @@ class CapturePipelineCoordinator(
         var updatedNote = existing.note
         val cleanIncomingNote = incoming.note.trim()
         val existingNoteIsGenericOrderRef = existing.note.isBlank() ||
+            existing.note == existing.merchant ||
             existing.note.contains("商户单号 ") ||
             existing.note.contains("订单编号")
         val incomingNoteHasProductTitle = cleanIncomingNote.isNotBlank() &&
+            cleanIncomingNote != incoming.merchant &&
             !cleanIncomingNote.contains("[用户手动确认录入]") &&
             !cleanIncomingNote.contains("商户单号 ") &&
             !cleanIncomingNote.contains("订单编号")
@@ -1159,16 +1247,16 @@ class CapturePipelineCoordinator(
             enrichedFields.add("数量(${incoming.quantityDesc})")
         }
 
-        // 如果原账单时间只有整分/日期（如通知栏时间或订单号日期前缀 12:00:00）或原账单时间只是截图时的兜底时间，而新识别提取到了精确到秒的真实下单时间，同步校准！
-        val existingWasFallbackTime = existing.timestamp % 60_000L == 0L ||
-            isDateOnlyFallbackTimestamp(existing.timestamp) ||
-            abs(existing.timestamp - existing.capturedAtMillis) <= 15_000L
-        val incomingHasExactHistoricalTime = incoming.timestamp % 60_000L != 0L &&
+        // 如果原账单时间只有整分/日期（如通知栏时间或订单号日期前缀 12:00:00）或原账单时间带非零毫秒（曾用截图时间兜底），而新识别提取到了精确到秒的真实下单时间，同步校准！
+        val existingWasFallbackTime = existing.timestamp % 1_000L != 0L ||
+            existing.timestamp % 60_000L == 0L ||
+            isDateOnlyFallbackTimestamp(existing.timestamp)
+        val incomingHasExactSecondTime = incoming.timestamp % 1_000L == 0L &&
+            incoming.timestamp % 60_000L != 0L &&
             !isDateOnlyFallbackTimestamp(incoming.timestamp) &&
-            abs(incoming.timestamp - capturedAtMillis) > 30_000L &&
-            abs(incoming.timestamp - existing.timestamp) > 5_000L
-        val updatedTimestamp = if (existingWasFallbackTime && incomingHasExactHistoricalTime) {
-            enrichedFields.add("下单时间")
+            incoming.timestamp != existing.timestamp
+        val updatedTimestamp = if (existingWasFallbackTime && incomingHasExactSecondTime) {
+            enrichedFields.add("支付时间")
             incoming.timestamp
         } else {
             existing.timestamp
