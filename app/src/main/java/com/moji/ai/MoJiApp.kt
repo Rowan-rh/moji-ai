@@ -6,6 +6,7 @@ import com.moji.ai.ai.AiConfigManager
 import com.moji.ai.ai.MerchantMemoryManager
 import com.moji.ai.ai.SmartRuleEngine
 import com.moji.ai.data.local.AppDatabase
+import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.SilentBookkeepingNotifier
 import com.moji.ai.service.CapturePipelineCoordinator
@@ -48,6 +49,7 @@ class MoJiApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        CategoryCatalog.init(this)
         database = AppDatabase.getInstance(this)
         repository = LedgerRepository(database)
         aiConfigManager = AiConfigManager(this)
