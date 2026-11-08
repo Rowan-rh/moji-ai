@@ -1,36 +1,48 @@
 package com.moji.ai.ui.components
 
+import android.graphics.BitmapFactory
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import java.io.File
+import kotlin.math.abs
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CurrencyExchange
-import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.TaskAlt
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -39,38 +51,102 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.CategoryCatalog
+import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
+import com.moji.ai.ui.theme.ICostAssetImage
 import com.moji.ai.ui.theme.ICostBgGray
 import com.moji.ai.ui.theme.ICostBlueAccent
 import com.moji.ai.ui.theme.ICostCardWhite
+import com.moji.ai.ui.theme.ICostCategoryBadge
+import com.moji.ai.ui.theme.ICostCellGray
+import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
+import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
+import com.moji.ai.ui.theme.WalletBrandAvatar
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
-import com.moji.ai.ui.theme.resolveCategoryIcon
+import com.moji.ai.ui.theme.iCostHorizontalSwipeTrigger
+import com.moji.ai.ui.theme.iCostPressScale
 import com.moji.ai.ui.theme.resolveTransactionBadgeColor
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * 通用二次确认弹窗（删除、退款、报销入账等不可轻易撤回的操作）。
+ */
+@Composable
+internal fun ICostConfirmDialog(
+    title: String,
+    message: String,
+    confirmText: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+    destructive: Boolean = true,
+    dismissText: String = "取消"
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = ICostCardWhite,
+        title = { Text(title, fontWeight = FontWeight.ExtraBold) },
+        text = { Text(message, fontSize = 14.sp, color = ICostTextSecondary) },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text(
+                    confirmText,
+                    color = if (destructive) ICostCoralRed else ICostBlueAccent,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(dismissText) }
+        }
+    )
+}
+
+/** 拆分账单可选的支出分类（主分类及「主-子」二级分类），与记账面板保持同一份目录 */
+private val splitCategoryOptions: List<String> by lazy {
+    CategoryCatalog.expenseCategories.flatMap { cat ->
+        listOf(cat.name) + cat.subCategories.map { "${cat.name}-${it.name}" }
+    }
+}
+
+/**
+ * 1:1 iCost 全屏「账单详情」页面（对齐 05_detail_full.png）
+ *
+ * @param onDuplicate 传入后在详情页显示「复制一笔」操作（首页左滑菜单空间有限，复制入口放在这里）
+ */
 @Composable
 fun TransactionDetailSheet(
     tx: TransactionEntity,
@@ -79,237 +155,561 @@ fun TransactionDetailSheet(
     onEdit: (TransactionEntity) -> Unit,
     onRefund: (expenseId: Long, refundYuan: Double, receiveWalletId: Long?, note: String) -> Unit,
     onSettleReimburse: (expenseId: Long, receiveWalletId: Long?) -> Unit,
-    onDelete: (Long) -> Unit
+    onDelete: (Long) -> Unit,
+    onSaveAsTemplate: (TransactionEntity) -> Unit = {},
+    onSplitTransaction: (expenseId: Long, categoryA: String, amountAYuan: Double, categoryB: String, noteB: String) -> Unit = { _, _, _, _, _ -> },
+    onDuplicate: ((TransactionEntity) -> Unit)? = null
 ) {
+    BackHandler(onBack = onDismiss)
+
     val walletMap = remember(wallets) { wallets.associateBy { it.id } }
     val sourceWallet = tx.sourceWalletId?.let { walletMap[it] }
     val targetWallet = tx.targetWalletId?.let { walletMap[it] }
     val badgeColor = resolveTransactionBadgeColor(tx.type)
 
     val fullTimeStr = remember(tx.timestamp) {
-        SimpleDateFormat("yyyy年MM月dd日 HH:mm", Locale.CHINA).format(Date(tx.timestamp))
+        val cal = Calendar.getInstance().apply { timeInMillis = tx.timestamp }
+        val pattern = if (cal.get(Calendar.SECOND) != 0) "yyyy-MM-dd HH:mm:ss" else "yyyy-MM-dd HH:mm"
+        SimpleDateFormat(pattern, Locale.CHINA).format(Date(tx.timestamp))
     }
+    val capturedTimeStr = remember(tx.capturedAtMillis, tx.timestamp, tx.captureSource) {
+        if (tx.captureSource != "MANUAL" && tx.capturedAtMillis > 0L) {
+            SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(Date(tx.capturedAtMillis))
+        } else {
+            null
+        }
+    }
+    val screenshotBitmap = produceState<ImageBitmap?>(initialValue = null, key1 = tx.screenshotPath) {
+        value = if (tx.screenshotPath.isNotBlank()) {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val f = File(tx.screenshotPath)
+                    if (f.exists()) BitmapFactory.decodeFile(f.absolutePath)?.asImageBitmap() else null
+                }.getOrNull()
+            }
+        } else {
+            null
+        }
+    }.value
 
     val remainingRefundableCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
+    val canRefund = tx.type == TransactionType.EXPENSE && remainingRefundableCents > 0L
+    val canReimburse = tx.type == TransactionType.EXPENSE && tx.reimbursable && !tx.reimbursed
     var showRefundDialog by remember { mutableStateOf(false) }
+    var showSplitDialog by remember { mutableStateOf(false) }
+    var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showSettleDialog by remember { mutableStateOf(false) }
+    var showScreenshotFullscreen by remember { mutableStateOf(false) }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = ICostBgGray,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ICostBgGray)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = {}
+            )
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 18.dp)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 18.dp, vertical = 8.dp)
-                .navigationBarsPadding(),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+        Spacer(modifier = Modifier.height(8.dp))
+        ICostCircleIconButton(onClick = onDismiss, size = 42.dp) {
+            ICostAssetImage(
+                assetFile = "record_back_icon.webp",
+                tint = ICostTextPrimary,
+                contentDescription = "返回",
+                modifier = Modifier.size(16.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(14.dp))
+        Text(
+            text = "账单详情",
+            fontSize = 30.sp,
+            fontWeight = FontWeight.ExtraBold,
+            color = ICostTextPrimary,
+            modifier = Modifier.padding(horizontal = 2.dp)
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // 主详情白卡片
+        Surface(
+            shape = RoundedCornerShape(22.dp),
+            color = ICostCardWhite,
+            modifier = Modifier.fillMaxWidth()
         ) {
-            // 顶部主卡片
-            Surface(
-                shape = RoundedCornerShape(22.dp),
-                color = ICostCardWhite,
-                modifier = Modifier.fillMaxWidth()
+            Column(
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 22.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Column(
-                    modifier = Modifier.padding(20.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(52.dp)
-                            .clip(CircleShape)
-                            .background(badgeColor),
-                        contentAlignment = Alignment.Center
+                ICostCategoryBadge(
+                    category = tx.category,
+                    type = tx.type,
+                    size = 46.dp,
+                    badgeColor = badgeColor
+                )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                Text(
+                    text = when (tx.type) {
+                        TransactionType.REFUND_OFFSET -> "退款入账"
+                        TransactionType.REPAYMENT -> "转至${targetWallet?.name ?: "信用账户"}"
+                        TransactionType.TRANSFER -> "转至${targetWallet?.name ?: "目标账户"}"
+                        else -> tx.category
+                    },
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = ICostTextPrimary
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                val prefix = when (tx.type) {
+                    TransactionType.EXPENSE, TransactionType.LOAN_OUT -> "-"
+                    TransactionType.INCOME, TransactionType.LOAN_IN -> "+"
+                    else -> ""
+                }
+                val amountColor = when (tx.type) {
+                    TransactionType.EXPENSE, TransactionType.LOAN_OUT -> ICostCoralRed
+                    TransactionType.REFUND_OFFSET -> ICostAmberGold
+                    TransactionType.INCOME, TransactionType.LOAN_IN -> ICostGreenIncome
+                    else -> ICostTextPrimary
+                }
+                Text(
+                    text = "$prefix${formatMoneyCents(tx.amountCents, tx.currency)}",
+                    fontFamily = ICDinFontFamily,
+                    fontSize = 30.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = amountColor
+                )
+
+                if (tx.type == TransactionType.EXPENSE && tx.discountCents > 0L) {
+                    val origCents = tx.amountCents + tx.discountCents
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFFFFF4EC)
                     ) {
-                        Icon(
-                            imageVector = resolveCategoryIcon(tx.category, tx.type),
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(26.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(tx.category, fontSize = 16.sp, fontWeight = FontWeight.Bold, color = ICostTextPrimary)
-                    Spacer(modifier = Modifier.height(4.dp))
-                    val prefix = when (tx.type) {
-                        TransactionType.EXPENSE, TransactionType.LOAN_OUT -> "-"
-                        TransactionType.INCOME, TransactionType.LOAN_IN -> "+"
-                        else -> ""
-                    }
-                    Text(
-                        text = "$prefix${formatMoneyCents(tx.amountCents, tx.currency)}",
-                        fontSize = 32.sp,
-                        fontWeight = FontWeight.ExtraBold,
-                        color = badgeColor
-                    )
-                    if (tx.refundedAmountCents > 0L) {
-                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "已退款冲销 ${formatMoneyCents(tx.refundedAmountCents)} · 实际净支出 ${formatMoneyCents(remainingRefundableCents)}",
+                            text = "原价 ${formatMoneyCents(origCents, tx.currency)}  ·  优惠 ${formatMoneyCents(tx.discountCents, tx.currency)}  ·  实扣 ${formatMoneyCents(tx.amountCents, tx.currency)}",
                             fontSize = 12.sp,
-                            color = ICostAmberGold,
-                            fontWeight = FontWeight.SemiBold
+                            color = Color(0xFFD96B27),
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
                         )
                     }
+                }
 
-                    Spacer(modifier = Modifier.height(16.dp))
-                    HorizontalDivider(color = ICostDivider)
-                    Spacer(modifier = Modifier.height(12.dp))
+                if (tx.refundedAmountCents > 0L) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "已退款 ${formatMoneyCents(tx.refundedAmountCents)} · 实际支出 ${formatMoneyCents(remainingRefundableCents)}",
+                        fontSize = 12.sp,
+                        color = ICostAmberGold,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
 
-                    DetailKeyValueRow("记录时间", fullTimeStr)
-                    DetailKeyValueRow(
-                        "资金账户",
-                        when (tx.type) {
-                            TransactionType.TRANSFER, TransactionType.REPAYMENT ->
-                                "${formatWalletDisplayName(sourceWallet, "转出")} ➔ ${formatWalletDisplayName(targetWallet, "转入")}"
-                            TransactionType.INCOME, TransactionType.REFUND_OFFSET ->
-                                formatWalletDisplayName(targetWallet ?: sourceWallet)
-                            else -> formatWalletDisplayName(sourceWallet)
-                        }
-                    )
-                    if (tx.merchant.isNotBlank()) {
-                        DetailKeyValueRow("商户/摘要", tx.merchant)
-                    }
-                    if (tx.discountCents > 0L) {
-                        DetailKeyValueRow("优惠立减", formatMoneyCents(tx.discountCents))
-                    }
-                    if (tx.reimbursable) {
-                        DetailKeyValueRow("报销状态", if (tx.reimbursed) "已完成报销入账" else "待报销")
-                    }
-                    if (tx.tags.isNotBlank()) {
-                        DetailKeyValueRow("标签", "#${tx.tags}")
-                    }
-                    DetailKeyValueRow("所属账本", tx.ledgerName)
-                    DetailKeyValueRow(
-                        "记账方式",
-                        when {
-                            tx.captureSource.startsWith("AI") -> "AI 自动静默识账 (${tx.captureSource.removePrefix("AI_")})"
-                            tx.captureSource == "RECURRING" -> "周期性自动入账"
-                            else -> "手动记账"
-                        }
-                    )
-                    if (tx.rawCapturedText.isNotBlank()) {
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = ICostBgGray,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
+                Spacer(modifier = Modifier.height(22.dp))
+
+                if (tx.duplicateSuspected) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xFFFFEFEA),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                             Text(
-                                text = "原始凭证：${tx.rawCapturedText}",
-                                fontSize = 11.sp,
-                                color = ICostTextSecondary,
-                                modifier = Modifier.padding(10.dp)
+                                text = "⚠️ 疑似重复（已手动确认录入）",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostCoralRed
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "该笔账单在识别时曾触发重复保护（订单Key或交易时间+金额一致），由您点击「录入」后手动写入账本。",
+                                fontSize = 12.sp,
+                                color = Color(0xFF8C2D19)
                             )
                         }
                     }
                 }
-            }
 
-            // 操作按钮栏：退款 / 报销 / 编辑 / 删除
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                if (tx.type == TransactionType.EXPENSE && tx.discountCents > 0L) {
+                    val origCents = tx.amountCents + tx.discountCents
+                    DetailKeyValueRow("商品原价", formatMoneyCents(origCents, tx.currency), singleLine = true)
+                    DetailKeyValueRow("优惠立减", "-${formatMoneyCents(tx.discountCents, tx.currency)}", singleLine = true)
+                    DetailKeyValueRow("实扣金额", formatMoneyCents(tx.amountCents, tx.currency), singleLine = true)
+                }
+                DetailKeyValueRow("实际购物时间", fullTimeStr, singleLine = true)
+                if (capturedTimeStr != null && abs(tx.capturedAtMillis - tx.timestamp) >= 1_000L) {
+                    DetailKeyValueRow("截图/识账时间", capturedTimeStr, singleLine = true)
+                }
+                DetailKeyValueRow("商品数量", tx.quantityDesc.ifBlank { "${tx.itemQuantity}件" }, singleLine = true)
+                val effectiveOrderKey = tx.orderKey.ifBlank { tx.transactionNo }.ifBlank { tx.merchantOrderNo }
+                if (effectiveOrderKey.isNotBlank()) {
+                    DetailKeyValueRow("订单唯一Key", effectiveOrderKey, singleLine = true, compactFont = true)
+                }
+                DetailKeyValueRow("账本", tx.ledgerName, singleLine = true)
+                DetailKeyValueRow(
+                    "资金账户",
+                    when (tx.type) {
+                        TransactionType.TRANSFER, TransactionType.REPAYMENT ->
+                            "${formatWalletDisplayName(sourceWallet, "转出")} → ${formatWalletDisplayName(targetWallet, "转入")}"
+                        TransactionType.INCOME, TransactionType.REFUND_OFFSET ->
+                            formatWalletDisplayName(targetWallet ?: sourceWallet)
+                        else -> formatWalletDisplayName(sourceWallet)
+                    },
+                    singleLine = true
+                )
+                if (tx.paymentMethodRaw.isNotBlank()) {
+                    DetailKeyValueRow("账单支付方式", tx.paymentMethodRaw, singleLine = true)
+                }
+                if (tx.transactionNo.isNotBlank() && tx.transactionNo != effectiveOrderKey) {
+                    DetailKeyValueRow("交易流水号", tx.transactionNo, singleLine = true, compactFont = true)
+                }
+                if (tx.merchantOrderNo.isNotBlank() && tx.merchantOrderNo != effectiveOrderKey) {
+                    DetailKeyValueRow("商户单号", tx.merchantOrderNo, singleLine = true, compactFont = true)
+                }
+                if (tx.type != TransactionType.EXPENSE && tx.discountCents > 0L) {
+                    DetailKeyValueRow("优惠金额", formatMoneyCents(tx.discountCents), singleLine = true)
+                }
+                if (tx.feeCents > 0L) {
+                    DetailKeyValueRow("手续费", formatMoneyCents(tx.feeCents), singleLine = true)
+                }
+                if (tx.reimbursable) {
+                    DetailKeyValueRow("报销状态", if (tx.reimbursed) "已报销" else "待报销", singleLine = true)
+                }
+                if (tx.tags.isNotBlank()) {
+                    DetailKeyValueRow("标签", "#${tx.tags}", singleLine = true)
+                }
+                val merchant = tx.merchant.trim()
+                val cleanedNote = tx.note
+                    .let { n -> if (n.startsWith("原价¥") && n.contains("| ")) n.substringAfter("| ").trim() else if (n.startsWith("原价¥")) "" else n.trim() }
+                    .let { n ->
+                        if (tx.paymentMethodRaw.isNotBlank() && n.endsWith(" · ${tx.paymentMethodRaw}")) {
+                            n.removeSuffix(" · ${tx.paymentMethodRaw}").trim()
+                        } else {
+                            n.replace(Regex("""\s*·\s*(?:账户余额|微信零钱|零钱|支付宝|微信支付|花呗|京东白条|[^·]*(?:信用卡|储蓄卡|银行卡))(?:\([^)]*\))?\s*$"""), "").trim()
+                        }
+                    }
+                if (merchant.isNotEmpty()) {
+                    DetailKeyValueRow("商户", merchant)
+                }
+                if (cleanedNote.isNotEmpty() && cleanedNote != merchant) {
+                    DetailKeyValueRow("商品/备注", cleanedNote)
+                }
+                if (tx.captureSource != "MANUAL") {
+                    val sourceLabel = when (tx.captureSource) {
+                        "AI_ACCESSIBILITY" -> "无障碍页面自动识账"
+                        "AI_OCR" -> "端侧截屏 OCR 识账"
+                        "AI_NOTIFICATION" -> "通知栏静默识账"
+                        "AI_FUSED", "AI_MERGED" -> "多通道证据融合识账"
+                        else -> tx.captureSource
+                    }
+                    DetailKeyValueRow("识账来源", sourceLabel, singleLine = true)
+                }
+            }
+        }
+
+        if (screenshotBitmap != null) {
+            Spacer(modifier = Modifier.height(14.dp))
+            Surface(
+                shape = RoundedCornerShape(22.dp),
+                color = ICostCardWhite,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .iCostPressScale(pressedScale = 0.98f) { showScreenshotFullscreen = true }
             ) {
-                if (tx.type == TransactionType.EXPENSE && remainingRefundableCents > 0L) {
-                    OutlinedButton(
-                        onClick = { showRefundDialog = true },
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.weight(1f)
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.CurrencyExchange, contentDescription = null, tint = ICostAmberGold, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("退款", color = ICostTextPrimary, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = "识账原图留证",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ICostTextPrimary
+                        )
+                        Text(
+                            text = "点击查看大图",
+                            fontSize = 12.sp,
+                            color = ICostBlueAccent,
+                            fontWeight = FontWeight.Medium
+                        )
                     }
-                }
-
-                if (tx.reimbursable && !tx.reimbursed) {
-                    OutlinedButton(
-                        onClick = {
-                            onSettleReimburse(tx.id, tx.sourceWalletId)
-                            onDismiss()
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = if (tx.transactionNo.isNotBlank()) {
+                            "已绑定订单流水号 (${tx.transactionNo.takeLast(8)}) 与金额防重校验"
+                        } else {
+                            "已绑定图像 SHA-256 指纹 (${tx.screenshotSha256.take(8)}) 防重校验"
                         },
-                        shape = RoundedCornerShape(16.dp),
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Icon(Icons.Default.TaskAlt, contentDescription = null, tint = ICostGreenIncome, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("报销入账", color = ICostTextPrimary, fontWeight = FontWeight.Bold)
-                    }
-                }
-
-                Button(
-                    onClick = {
-                        onDismiss()
-                        onEdit(tx)
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("编辑", fontWeight = FontWeight.Bold)
-                }
-
-                OutlinedButton(
-                    onClick = {
-                        onDelete(tx.id)
-                        onDismiss()
-                    },
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Default.DeleteOutline, contentDescription = null, tint = ICostCoralRed, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("删除", color = ICostCoralRed, fontWeight = FontWeight.Bold)
+                        fontSize = 11.sp,
+                        color = ICostTextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(10.dp))
+                    Image(
+                        bitmap = screenshotBitmap,
+                        contentDescription = "账单原图截图",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(210.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                    )
                 }
             }
+        }
 
-            Spacer(modifier = Modifier.height(8.dp))
+        Spacer(modifier = Modifier.height(14.dp))
+
+        // 1:1 iCost 双卡操作行：左「编辑 / 删除」，右「退款 / 存为模板」（对齐 05_detail_full.png）
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            DetailActionPairCard(
+                modifier = Modifier.weight(1f),
+                leftAsset = "detail_edit.webp",
+                leftLabel = "编辑",
+                leftColor = ICostBlueAccent,
+                onLeft = {
+                    onDismiss()
+                    onEdit(tx)
+                },
+                rightAsset = "detail_delete.webp",
+                rightLabel = "删除",
+                rightColor = ICostCoralRed,
+                onRight = { showDeleteConfirm = true }
+            )
+            DetailActionPairCard(
+                modifier = Modifier.weight(1f),
+                leftAsset = "detail_refund.webp",
+                leftLabel = "退款",
+                leftColor = if (canRefund) ICostBlueAccent else ICostTextSecondary,
+                onLeft = if (canRefund) ({ showRefundDialog = true }) else null,
+                rightAsset = "detail_template.webp",
+                rightLabel = "存模板",
+                rightColor = Color(0xFFF59E0B),
+                onRight = { onSaveAsTemplate(tx) }
+            )
+        }
+
+        // 待报销账单：单独的「报销到账」入口，与退款互不影响
+        if (canReimburse) {
+            Spacer(modifier = Modifier.height(10.dp))
+            DetailWideActionButton(
+                assetFile = "detail_claim.webp",
+                label = "报销到账",
+                onClick = { showSettleDialog = true }
+            )
+        }
+
+        if (tx.type == TransactionType.EXPENSE && tx.amountCents >= 2L) {
+            Spacer(modifier = Modifier.height(10.dp))
+            DetailWideActionButton(
+                assetFile = "setting_category.webp",
+                label = "拆分账单",
+                onClick = { showSplitDialog = true }
+            )
+        }
+
+        if (onDuplicate != null) {
+            Spacer(modifier = Modifier.height(10.dp))
+            DetailWideActionButton(
+                assetFile = "detail_template.webp",
+                label = "再记一笔相同的",
+                onClick = { onDuplicate(tx) }
+            )
+        }
+
+        Spacer(modifier = Modifier.height(36.dp))
+    }
+
+    if (showDeleteConfirm) {
+        ICostConfirmDialog(
+            title = "删除这笔账单？",
+            message = "删除后，相关账户余额会同步恢复。",
+            confirmText = "删除",
+            onConfirm = {
+                showDeleteConfirm = false
+                onDelete(tx.id)
+            },
+            onDismiss = { showDeleteConfirm = false }
+        )
+    }
+
+    if (showScreenshotFullscreen && screenshotBitmap != null) {
+        Dialog(
+            onDismissRequest = { showScreenshotFullscreen = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xEB000000))
+                    .clickable { showScreenshotFullscreen = false }
+                    .padding(16.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Image(
+                    bitmap = screenshotBitmap,
+                    contentDescription = "账单原图大图",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(16.dp))
+                )
+            }
         }
     }
 
-    if (showRefundDialog) {
-        var refundYuanStr by remember {
-            mutableStateOf(String.format(Locale.US, "%.2f", remainingRefundableCents / 100.0))
+    if (showSettleDialog) {
+        // 收款账户：默认原支付账户，可改选任一资产账户（非信用/负债账户）
+        val receiveOptions = remember(wallets, tx.sourceWalletId) {
+            (listOfNotNull(sourceWallet) + wallets.filter { !it.type.isLiability }).distinctBy { it.id }
         }
-        var refundNote by remember { mutableStateOf("") }
-
+        var receiveWalletId by remember { mutableStateOf(tx.sourceWalletId ?: receiveOptions.firstOrNull()?.id) }
+        val settleAmountCents = remainingRefundableCents
         AlertDialog(
-            onDismissRequest = { showRefundDialog = false },
+            onDismissRequest = { showSettleDialog = false },
             containerColor = ICostCardWhite,
-            title = { Text("发起退款 / AA分摊冲销", fontWeight = FontWeight.Bold) },
+            title = { Text("确认报销到账？", fontWeight = FontWeight.ExtraBold) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "退回金额将自动恢复原账户余额，并扣减本笔账单的净支出（全额退回则标记为「全额退款」）：",
-                        fontSize = 13.sp,
+                        "报销款 ${formatMoneyCents(settleAmountCents)} 将记入下方选中的账户，这笔账单会标记为已报销。",
+                        fontSize = 14.sp,
                         color = ICostTextSecondary
                     )
-                    OutlinedTextField(
-                        value = refundYuanStr,
-                        onValueChange = { refundYuanStr = it },
-                        label = { Text("退款/冲销金额 (元)") },
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = refundNote,
-                        onValueChange = { refundNote = it },
-                        label = { Text("备注（选填，如：退货退款 / 同事AA）") },
-                        singleLine = true
-                    )
+                    Column(
+                        modifier = Modifier
+                            .heightIn(max = 260.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        receiveOptions.forEach { w ->
+                            val selected = w.id == receiveWalletId
+                            Surface(
+                                onClick = { receiveWalletId = w.id },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (selected) Color(0xFFEAF2FF) else ICostCellGray,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    WalletBrandAvatar(w, size = 28.dp)
+                                    Spacer(modifier = Modifier.width(10.dp))
+                                    Text(
+                                        text = formatWalletDisplayName(w),
+                                        fontSize = 14.sp,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (selected) ICostBlueAccent else ICostTextPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (w.id == tx.sourceWalletId) {
+                                        Text("原支付账户", fontSize = 11.sp, color = ICostTextSecondary)
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val yuan = refundYuanStr.toDoubleOrNull() ?: return@TextButton
-                    onRefund(tx.id, yuan, tx.sourceWalletId, refundNote)
-                    showRefundDialog = false
-                    onDismiss()
+                    showSettleDialog = false
+                    onSettleReimburse(tx.id, receiveWalletId)
                 }) {
-                    Text("确认退款", color = ICostCoralRed, fontWeight = FontWeight.Bold)
+                    Text("确认到账", color = ICostBlueAccent, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSettleDialog = false }) { Text("取消") }
+            }
+        )
+    }
+
+    if (showRefundDialog) {
+        var refundYuanStr by remember {
+            mutableStateOf(
+                String.format(Locale.US, "%.2f", remainingRefundableCents / 100.0)
+            )
+        }
+        var refundNote by remember { mutableStateOf("") }
+        val refundCents = parseYuanToCents(refundYuanStr)
+        val refundError = when {
+            refundYuanStr.isBlank() -> "请输入退款金额"
+            refundCents == null -> "请输入正确的金额"
+            refundCents <= 0L -> "退款金额需大于 0"
+            refundCents > remainingRefundableCents -> "最多可退 ${formatMoneyCents(remainingRefundableCents)}"
+            else -> null
+        }
+        val refundWalletName = formatWalletDisplayName(sourceWallet, "原账户")
+
+        AlertDialog(
+            onDismissRequest = { showRefundDialog = false },
+            containerColor = ICostCardWhite,
+            title = { Text("退款", fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "退款将退回到「$refundWalletName」，并从这笔账单的支出中扣除。最多可退 ${formatMoneyCents(remainingRefundableCents)}。",
+                        fontSize = 13.sp,
+                        color = ICostTextSecondary
+                    )
+                    ICostFormField(
+                        value = refundYuanStr,
+                        onValueChange = { refundYuanStr = sanitizeMoneyInput(it) },
+                        label = "退款金额（元）",
+                        placeholder = "0.00",
+                        isError = refundError != null && refundYuanStr.isNotBlank(),
+                        supportingText = refundError,
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    ICostFormField(
+                        value = refundNote,
+                        onValueChange = { refundNote = it },
+                        label = "备注（选填）",
+                        placeholder = "如：商品部分退款",
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = refundError == null,
+                    onClick = {
+                        val cents = refundCents ?: return@TextButton
+                        onRefund(tx.id, cents / 100.0, tx.sourceWalletId, refundNote.trim())
+                        showRefundDialog = false
+                    }
+                ) {
+                    Text(
+                        "确认退款",
+                        color = if (refundError == null) ICostCoralRed else ICostTextSecondary,
+                        fontWeight = FontWeight.Bold
+                    )
                 }
             },
             dismissButton = {
@@ -317,91 +717,517 @@ fun TransactionDetailSheet(
             }
         )
     }
+
+    if (showSplitDialog) {
+        val totalCents = tx.amountCents
+        var categoryA by remember(tx.id) { mutableStateOf(tx.category) }
+        var amountAStr by remember(tx.id) {
+            mutableStateOf(
+                String.format(Locale.US, "%.2f", (totalCents / 2L).coerceAtLeast(1L) / 100.0)
+            )
+        }
+        var categoryB by remember(tx.id) { mutableStateOf("日用") }
+        var noteB by remember(tx.id) { mutableStateOf("") }
+
+        val amountACents = parseYuanToCents(amountAStr)
+        val remainBCents = if (amountACents != null) totalCents - amountACents else totalCents
+        val splitError = when {
+            amountAStr.isBlank() -> "请输入第一笔的金额"
+            amountACents == null -> "请输入正确的金额"
+            amountACents <= 0L -> "金额需大于 0"
+            amountACents >= totalCents -> "需小于原账单金额 ${formatMoneyCents(totalCents, tx.currency)}"
+            categoryA.isBlank() || categoryB.isBlank() -> "请选择分类"
+            else -> null
+        }
+
+        AlertDialog(
+            onDismissRequest = { showSplitDialog = false },
+            containerColor = ICostCardWhite,
+            title = { Text("拆分账单", fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.verticalScroll(rememberScrollState())
+                ) {
+                    Text(
+                        text = "把 ${formatMoneyCents(totalCents, tx.currency)} 拆成两笔不同分类的账单，总金额不变。",
+                        fontSize = 12.sp,
+                        color = ICostTextSecondary
+                    )
+                    Text("第一笔", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = ICostTextPrimary)
+                    SplitCategoryPicker(
+                        label = "分类",
+                        value = categoryA,
+                        onValueChange = { categoryA = it }
+                    )
+                    ICostFormField(
+                        value = amountAStr,
+                        onValueChange = { amountAStr = sanitizeMoneyInput(it) },
+                        label = "金额（元）",
+                        placeholder = "0.00",
+                        isError = splitError != null && amountAStr.isNotBlank() && amountACents != null &&
+                            (amountACents <= 0L || amountACents >= totalCents),
+                        supportingText = splitError,
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text(
+                        "第二笔 · 自动分配剩余 ${formatMoneyCents(remainBCents.coerceAtLeast(0L), tx.currency)}",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextPrimary
+                    )
+                    SplitCategoryPicker(
+                        label = "分类",
+                        value = categoryB,
+                        onValueChange = { categoryB = it }
+                    )
+                    ICostFormField(
+                        value = noteB,
+                        onValueChange = { noteB = it },
+                        label = "备注（选填）",
+                        placeholder = "如：分摊项目",
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = splitError == null,
+                    onClick = {
+                        val cents = amountACents ?: return@TextButton
+                        onSplitTransaction(tx.id, categoryA.trim(), cents / 100.0, categoryB.trim(), noteB.trim())
+                        showSplitDialog = false
+                    }
+                ) {
+                    Text(
+                        "确认拆分",
+                        color = if (splitError == null) ICostBlueAccent else ICostTextSecondary,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSplitDialog = false }) { Text("取消") }
+            }
+        )
+    }
+}
+
+/** 分类选择：点开下拉列表，从记账面板同一份分类目录中挑选 */
+@Composable
+private fun SplitCategoryPicker(
+    label: String,
+    value: String,
+    onValueChange: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        Surface(
+            onClick = { expanded = true },
+            shape = RoundedCornerShape(10.dp),
+            color = ICostCellGray,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(label, fontSize = 13.sp, color = ICostTextSecondary)
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = value.replace("-", " · ").ifBlank { "请选择" },
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = ICostTextPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f)
+                )
+                Icon(
+                    Icons.Default.KeyboardArrowDown,
+                    contentDescription = "选择分类",
+                    tint = ICostTextSecondary,
+                    modifier = Modifier.size(18.dp)
+                )
+            }
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            containerColor = ICostCardWhite,
+            modifier = Modifier.heightIn(max = 320.dp)
+        ) {
+            val options = if (value.isNotBlank() && value !in splitCategoryOptions) {
+                listOf(value) + splitCategoryOptions
+            } else splitCategoryOptions
+            options.forEach { option ->
+                val isSub = option.contains('-')
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = if (isSub) "    ${option.substringAfter('-')}" else option,
+                            fontSize = 14.sp,
+                            fontWeight = if (option == value) FontWeight.Bold else if (isSub) FontWeight.Normal else FontWeight.Medium,
+                            color = if (option == value) ICostBlueAccent else ICostTextPrimary
+                        )
+                    },
+                    onClick = {
+                        onValueChange(option)
+                        expanded = false
+                    }
+                )
+            }
+        }
+    }
+}
+
+/** 详情页白色双按钮卡片（中间细分隔线）；onLeft 为 null 时左侧按钮置灰不可点 */
+@Composable
+private fun DetailActionPairCard(
+    modifier: Modifier,
+    leftAsset: String,
+    leftLabel: String,
+    leftColor: Color,
+    onLeft: (() -> Unit)?,
+    rightAsset: String,
+    rightLabel: String,
+    rightColor: Color,
+    onRight: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = ICostCardWhite,
+        modifier = modifier.height(52.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .let { mod -> if (onLeft != null) mod.iCostPressScale(pressedScale = 0.92f, onClick = onLeft) else mod },
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ICostAssetImage(
+                    assetFile = leftAsset,
+                    tint = leftColor,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = leftLabel,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    softWrap = false,
+                    color = leftColor
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .width(0.8.dp)
+                    .height(20.dp)
+                    .background(ICostDivider)
+            )
+
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .iCostPressScale(pressedScale = 0.92f, onClick = onRight),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ICostAssetImage(
+                    assetFile = rightAsset,
+                    tint = rightColor,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = rightLabel,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    softWrap = false,
+                    color = rightColor
+                )
+            }
+        }
+    }
 }
 
 @Composable
-private fun DetailKeyValueRow(label: String, value: String) {
+private fun DetailWideActionButton(
+    assetFile: String,
+    label: String,
+    onClick: () -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = ICostCardWhite,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(48.dp)
+            .iCostPressScale(pressedScale = 0.95f, onClick = onClick)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxSize(),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            ICostAssetImage(
+                assetFile = assetFile,
+                tint = ICostBlueAccent,
+                modifier = Modifier.size(16.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = label,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = ICostBlueAccent
+            )
+        }
+    }
+}
+
+@Composable
+private fun DetailKeyValueRow(
+    label: String,
+    value: String,
+    singleLine: Boolean = false,
+    compactFont: Boolean = false
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 5.dp),
+            .padding(vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text(label, fontSize = 13.sp, color = ICostTextSecondary)
-        Spacer(modifier = Modifier.width(16.dp))
         Text(
-            value,
-            fontSize = 13.sp,
+            text = label,
+            fontSize = 14.sp,
+            color = ICostTextSecondary,
+            maxLines = 1,
+            softWrap = false
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = value,
+            fontSize = if (compactFont) 12.sp else 14.sp,
             color = ICostTextPrimary,
             fontWeight = FontWeight.Medium,
             textAlign = TextAlign.End,
+            maxLines = if (singleLine) 1 else 3,
+            softWrap = !singleLine,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
     }
 }
 
 /**
- * 收支日历面板（点击首页「收支日历」弹出）
+ * 1:1 iCost 全屏「收支日历」页面（对齐 06_calendar_full.png）
+ *
+ * 推荐传入 [allTransactions]（实时全量账单）与 [currentLedger]，日历会按显示的年月与账本自行筛选，
+ * 切换月份、编辑或删除账单后都能实时刷新。[monthTransactions] 仅为兼容旧调用保留（只含打开时的当月快照）。
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MonthlyCalendarSheet(
     year: Int,
     month: Int,
-    monthTransactions: List<TransactionEntity>,
+    monthTransactions: List<TransactionEntity> = emptyList(),
     onDismiss: () -> Unit,
-    onSelectTransaction: (TransactionEntity) -> Unit
+    onSelectTransaction: (TransactionEntity) -> Unit,
+    allTransactions: List<TransactionEntity>? = null,
+    currentLedger: String? = null
 ) {
-    val cal = remember(year, month) {
+    BackHandler(onBack = onDismiss)
+
+    val sourceTransactions = remember(allTransactions, currentLedger, monthTransactions) {
+        if (allTransactions != null) {
+            if (currentLedger == null) allTransactions else allTransactions.filter { it.ledgerName == currentLedger }
+        } else {
+            monthTransactions
+        }
+    }
+
+    fun daysWithTransactions(y: Int, m: Int): Set<Int> {
+        val c = Calendar.getInstance()
+        return sourceTransactions.mapNotNullTo(mutableSetOf()) { tx ->
+            c.timeInMillis = tx.timestamp
+            if (c.get(Calendar.YEAR) == y && (c.get(Calendar.MONTH) + 1) == m) c.get(Calendar.DAY_OF_MONTH) else null
+        }
+    }
+
+    /** 切到某月时默认选中的日期：当月选今天，其他月份选最后一笔账单所在日，没有账单则选 1 号 */
+    fun defaultDayFor(y: Int, m: Int): Int {
+        val now = Calendar.getInstance()
+        if (now.get(Calendar.YEAR) == y && now.get(Calendar.MONTH) + 1 == m) return now.get(Calendar.DAY_OF_MONTH)
+        return daysWithTransactions(y, m).maxOrNull() ?: 1
+    }
+
+    var displayYear by remember(year) { mutableIntStateOf(year) }
+    var displayMonth by remember(month) { mutableIntStateOf(month) }
+    var selectedDay by remember(year, month) { mutableIntStateOf(defaultDayFor(year, month)) }
+
+    fun goToMonth(y: Int, m: Int, day: Int? = null) {
+        displayYear = y
+        displayMonth = m
+        selectedDay = day ?: defaultDayFor(y, m)
+    }
+
+    fun shiftMonth(delta: Int) {
+        val total = displayYear * 12 + (displayMonth - 1) + delta
+        goToMonth(total / 12, total % 12 + 1)
+    }
+
+    val cal = remember(displayYear, displayMonth) {
         Calendar.getInstance().apply {
-            set(Calendar.YEAR, year)
-            set(Calendar.MONTH, month - 1)
-            set(Calendar.DAY_OF_MONTH, 1)
+            clear()
+            set(displayYear, displayMonth - 1, 1)
         }
     }
     val daysInMonth = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
-    // 将周日=1..周六=7 转换为 周一=0..周日=6
+    // 周一=0..周日=6
     val firstDayOffset = (cal.get(Calendar.DAY_OF_WEEK) + 5) % 7
+    val safeSelectedDay = selectedDay.coerceIn(1, daysInMonth)
 
-    var selectedDay by remember {
-        mutableIntStateOf(Calendar.getInstance().get(Calendar.DAY_OF_MONTH).coerceAtMost(daysInMonth))
-    }
-
-    val byDay = remember(monthTransactions) {
+    val byDay = remember(sourceTransactions, displayYear, displayMonth) {
         val c = Calendar.getInstance()
-        monthTransactions.groupBy { tx ->
+        sourceTransactions.filter { tx ->
+            c.timeInMillis = tx.timestamp
+            c.get(Calendar.YEAR) == displayYear && (c.get(Calendar.MONTH) + 1) == displayMonth
+        }.groupBy { tx ->
             c.timeInMillis = tx.timestamp
             c.get(Calendar.DAY_OF_MONTH)
         }
     }
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss,
-        containerColor = ICostBgGray,
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+    val selectedList = byDay[safeSelectedDay].orEmpty()
+    val dayExpenseCents = selectedList
+        .filter { it.type == TransactionType.EXPENSE }
+        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+    val dayIncomeCents = selectedList
+        .filter { it.type == TransactionType.INCOME }
+        .sumOf { it.amountCnyCents }
+    val dayRefundCents = selectedList
+        .filter { it.type == TransactionType.REFUND_OFFSET }
+        .sumOf { it.amountCnyCents }
+
+    val selectedDateLabel = remember(displayYear, displayMonth, safeSelectedDay) {
+        val c = Calendar.getInstance().apply {
+            clear()
+            set(displayYear, displayMonth - 1, safeSelectedDay)
+        }
+        SimpleDateFormat("MM/dd EEEE", Locale.CHINA).format(c.time)
+    }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ICostBgGray)
+            .padding(horizontal = 18.dp),
+        contentPadding = PaddingValues(top = 8.dp, bottom = 48.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .navigationBarsPadding(),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
+        item {
+            ICostCircleIconButton(onClick = onDismiss, size = 42.dp) {
+                ICostAssetImage(
+                    assetFile = "record_back_icon.webp",
+                    tint = ICostTextPrimary,
+                    contentDescription = "返回",
+                    modifier = Modifier.size(16.dp)
+                )
+            }
+        }
+
+        item {
             Text(
-                "${year}年${month}月 收支日历",
-                fontSize = 20.sp,
+                text = "收支日历",
+                fontSize = 30.sp,
                 fontWeight = FontWeight.ExtraBold,
                 color = ICostTextPrimary
             )
+        }
 
+        // 年月切换栏 + 今日
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "${displayYear}年${displayMonth}月",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextPrimary
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    CalendarArrowButton(
+                        icon = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
+                        contentDescription = "上个月",
+                        onClick = { shiftMonth(-1) }
+                    )
+                    CalendarArrowButton(
+                        icon = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "下个月",
+                        onClick = { shiftMonth(1) }
+                    )
+                }
+
+                Surface(
+                    onClick = {
+                        val now = Calendar.getInstance()
+                        goToMonth(
+                            now.get(Calendar.YEAR),
+                            now.get(Calendar.MONTH) + 1,
+                            now.get(Calendar.DAY_OF_MONTH)
+                        )
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    color = Color(0xFFEBEBEB),
+                    modifier = Modifier.heightIn(min = 40.dp)
+                ) {
+                    Box(contentAlignment = Alignment.Center, modifier = Modifier.heightIn(min = 40.dp)) {
+                        Text(
+                            text = "今日",
+                            fontSize = 13.sp,
+                            color = Color(0xFF666666),
+                            fontWeight = FontWeight.Medium,
+                            modifier = Modifier.padding(horizontal = 14.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // 1:1 iCost 星期表头 + 7 列圆角格子日历（支持右滑切上月 / 左滑切下月）
+        item {
             Surface(
                 shape = RoundedCornerShape(22.dp),
                 color = ICostCardWhite,
-                modifier = Modifier.fillMaxWidth()
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .iCostHorizontalSwipeTrigger(
+                        onSwipeRight = { shiftMonth(-1) },
+                        onSwipeLeft = { shiftMonth(1) }
+                    )
             ) {
                 Column(modifier = Modifier.padding(12.dp)) {
-                    // 星期头
                     Row(modifier = Modifier.fillMaxWidth()) {
                         listOf("一", "二", "三", "四", "五", "六", "日").forEach { w ->
                             Text(
@@ -413,108 +1239,238 @@ fun MonthlyCalendarSheet(
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
                     val totalCells = firstDayOffset + daysInMonth
                     val rows = (totalCells + 6) / 7
-                    for (r in 0 until rows) {
-                        Row(modifier = Modifier.fillMaxWidth()) {
-                            for (c in 0 until 7) {
-                                val cellIndex = r * 7 + c
-                                val dayNum = cellIndex - firstDayOffset + 1
-                                if (dayNum in 1..daysInMonth) {
-                                    val dayTxs = byDay[dayNum].orEmpty()
-                                    val dayExp = dayTxs.filter { it.type == TransactionType.EXPENSE }
-                                        .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
-                                    val isSelected = selectedDay == dayNum
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        for (r in 0 until rows) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(5.dp)
+                            ) {
+                                for (c in 0 until 7) {
+                                    val cellIndex = r * 7 + c
+                                    val dayNum = cellIndex - firstDayOffset + 1
+                                    if (dayNum in 1..daysInMonth) {
+                                        val dayTxs = byDay[dayNum].orEmpty()
+                                        val dayExp = dayTxs.filter { it.type == TransactionType.EXPENSE }
+                                            .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
+                                        val dayInc = dayTxs.filter { it.type == TransactionType.INCOME }
+                                            .sumOf { it.amountCnyCents }
+                                        val isSelected = safeSelectedDay == dayNum
+                                        val hasExp = dayExp > 0L
 
-                                    Column(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .height(48.dp)
-                                            .clip(RoundedCornerShape(10.dp))
-                                            .background(if (isSelected) Color(0xFFFFEFEA) else Color.Transparent)
-                                            .clickable { selectedDay = dayNum },
-                                        horizontalAlignment = Alignment.CenterHorizontally,
-                                        verticalArrangement = Arrangement.Center
-                                    ) {
-                                        Text(
-                                            text = dayNum.toString(),
-                                            fontSize = 14.sp,
-                                            fontWeight = if (isSelected) FontWeight.ExtraBold else FontWeight.Medium,
-                                            color = if (isSelected) ICostCoralRed else ICostTextPrimary
-                                        )
-                                        if (dayExp > 0L) {
-                                            Text(
-                                                text = String.format(Locale.US, "-%.0f", dayExp / 100.0),
-                                                fontSize = 9.sp,
-                                                color = ICostCoralRed,
-                                                maxLines = 1
-                                            )
+                                        val targetCellBg = when {
+                                            isSelected -> ICostCoralRed
+                                            hasExp -> Color(0xFFFDECE9)
+                                            dayInc > 0L -> Color(0xFFE8F8F0)
+                                            else -> Color(0xFFF7F7F8)
                                         }
+                                        val cellBg by animateColorAsState(
+                                            targetValue = targetCellBg,
+                                            animationSpec = tween(180),
+                                            label = "CalendarCellBg"
+                                        )
+
+                                        Column(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(52.dp)
+                                                .clip(RoundedCornerShape(10.dp))
+                                                .background(cellBg)
+                                                .iCostPressScale(pressedScale = 0.90f) { selectedDay = dayNum }
+                                                .padding(vertical = 4.dp, horizontal = 1.dp),
+                                            horizontalAlignment = Alignment.CenterHorizontally,
+                                            verticalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Text(
+                                                text = dayNum.toString(),
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (isSelected) Color.White else ICostTextPrimary
+                                            )
+                                            if (hasExp) {
+                                                Text(
+                                                    text = "-${formatCalendarCellAmount(dayExp)}",
+                                                    fontSize = 10.sp,
+                                                    color = if (isSelected) Color.White else ICostCoralRed,
+                                                    maxLines = 1,
+                                                    softWrap = false
+                                                )
+                                            } else if (dayInc > 0L) {
+                                                Text(
+                                                    text = "+${formatCalendarCellAmount(dayInc)}",
+                                                    fontSize = 10.sp,
+                                                    color = if (isSelected) Color.White else ICostGreenIncome,
+                                                    maxLines = 1,
+                                                    softWrap = false
+                                                )
+                                            } else {
+                                                Spacer(modifier = Modifier.height(10.dp))
+                                            }
+                                        }
+                                    } else {
+                                        Spacer(
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(52.dp)
+                                        )
                                     }
-                                } else {
-                                    Spacer(modifier = Modifier.weight(1f))
                                 }
                             }
                         }
                     }
                 }
             }
+        }
 
-            // 选中日期的账单列表
-            val selectedList = byDay[selectedDay].orEmpty()
-            Text(
-                text = "${month}月${selectedDay}日 明细 (${selectedList.size}笔)",
-                fontSize = 13.sp,
-                color = ICostTextSecondary
-            )
+        // 当日收支三栏汇总卡（总支出 / 总收入 / 结余，外加退款说明）
+        item {
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = ICostCardWhite,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 12.dp, horizontal = 14.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    CalendarSummaryMetric("总支出", formatMoneyCents(dayExpenseCents), ICostCoralRed)
+                    CalendarSummaryMetric("总收入", formatMoneyCents(dayIncomeCents), ICostGreenIncome)
+                    if (dayRefundCents > 0L) {
+                        CalendarSummaryMetric("退款", formatMoneyCents(dayRefundCents), ICostAmberGold)
+                    } else {
+                        CalendarSummaryMetric("结余", formatMoneyCents(dayIncomeCents - dayExpenseCents), ICostTextPrimary)
+                    }
+                }
+            }
+        }
 
-            LazyColumn(
+        // 当日头部
+        item {
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(190.dp),
-                contentPadding = PaddingValues(bottom = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                    .padding(horizontal = 4.dp),
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                if (selectedList.isEmpty()) {
-                    item {
-                        Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = ICostCardWhite,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                "当日无收支记录",
-                                fontSize = 13.sp,
-                                color = ICostTextSecondary,
-                                modifier = Modifier.padding(18.dp)
-                            )
-                        }
-                    }
-                } else {
-                    items(selectedList) { item ->
-                        Surface(
-                            onClick = { onSelectTransaction(item) },
-                            shape = RoundedCornerShape(16.dp),
-                            color = ICostCardWhite,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Row(
-                                modifier = Modifier.padding(14.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(item.category, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                    if (item.merchant.isNotBlank()) {
-                                        Text(item.merchant, fontSize = 12.sp, color = ICostTextSecondary)
+                Text(selectedDateLabel, fontSize = 13.sp, color = ICostTextSecondary)
+                Text("支出: ${formatMoneyCents(dayExpenseCents)}", fontSize = 13.sp, color = ICostTextSecondary)
+            }
+        }
+
+        // 当日流水列表卡片
+        if (selectedList.isEmpty()) {
+            item {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = ICostCardWhite,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "这天没有账单",
+                        fontSize = 14.sp,
+                        color = ICostTextSecondary,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 26.dp)
+                    )
+                }
+            }
+        } else {
+            item {
+                Surface(
+                    shape = RoundedCornerShape(22.dp),
+                    color = ICostCardWhite,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        selectedList.forEachIndexed { idx, item ->
+                            val timeStr = remember(item.timestamp) {
+                                SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(item.timestamp))
+                            }
+                            val sym = CurrencyCode.fromCode(item.currency).symbol
+                            val isRefunded = item.type == TransactionType.EXPENSE && item.refundedAmountCents > 0L
+                            val netExp = (item.amountCnyCents - item.refundedAmountCents).coerceAtLeast(0L)
+                            val cleanedNote = item.note
+                                .let { n -> if (n.startsWith("原价¥") && n.contains("| ")) n.substringAfter("| ").trim() else if (n.startsWith("原价¥")) "" else n.trim() }
+                                .let { n ->
+                                    if (item.paymentMethodRaw.isNotBlank() && n.endsWith(" · ${item.paymentMethodRaw}")) {
+                                        n.removeSuffix(" · ${item.paymentMethodRaw}").trim()
+                                    } else {
+                                        n.replace(Regex("""\s*·\s*(?:账户余额|微信零钱|零钱|支付宝|微信支付|花呗|京东白条|[^·]*(?:信用卡|储蓄卡|银行卡))(?:\([^)]*\))?\s*$"""), "").trim()
                                     }
                                 }
-                                Text(
-                                    formatMoneyCents(item.amountCents, item.currency),
-                                    fontWeight = FontWeight.Bold,
-                                    color = resolveTransactionBadgeColor(item.type)
+                            val subtitleExtra = item.merchant.ifBlank { cleanedNote }
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onSelectTransaction(item) }
+                                    .padding(horizontal = 16.dp, vertical = 13.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                ICostCategoryBadge(
+                                    category = item.category,
+                                    type = item.type,
+                                    size = 40.dp
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = if (item.type == TransactionType.REFUND_OFFSET) "退款入账" else item.category,
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 15.sp,
+                                        color = ICostTextPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = if (subtitleExtra.isNotBlank()) "$timeStr · $subtitleExtra" else timeStr,
+                                        fontSize = 12.sp,
+                                        color = ICostTextSecondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                if (isRefunded) {
+                                    Text(
+                                        text = String.format(Locale.US, "%s%,.2f", sym, item.amountCents / 100.0),
+                                        fontSize = 12.sp,
+                                        color = ICostTextSecondary,
+                                        textDecoration = TextDecoration.LineThrough
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text(
+                                        text = String.format(Locale.US, "-¥%,.2f", netExp / 100.0),
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = ICostCoralRed
+                                    )
+                                } else {
+                                    val amtColor = resolveTransactionBadgeColor(item.type)
+                                    val prefix = when (item.type) {
+                                        TransactionType.EXPENSE, TransactionType.LOAN_OUT -> "-"
+                                        TransactionType.INCOME, TransactionType.LOAN_IN -> "+"
+                                        else -> ""
+                                    }
+                                    Text(
+                                        text = "$prefix${formatMoneyCents(item.amountCents, item.currency)}",
+                                        fontSize = 16.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = amtColor
+                                    )
+                                }
+                            }
+                            if (idx < selectedList.lastIndex) {
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(start = 68.dp, end = 16.dp),
+                                    thickness = 0.5.dp,
+                                    color = ICostDivider
                                 )
                             }
                         }
@@ -522,5 +1478,63 @@ fun MonthlyCalendarSheet(
                 }
             }
         }
+    }
+}
+
+/**
+ * 日历格子里的紧凑金额：1 万及以上用「万」；1000 及以上不显示小数；其余最多两位小数（去掉末尾 0）。
+ */
+private fun formatCalendarCellAmount(cents: Long): String {
+    val yuan = cents / 100.0
+    return when {
+        yuan >= 10000.0 -> String.format(Locale.US, "%.1f", yuan / 10000.0).removeSuffix(".0") + "万"
+        yuan >= 1000.0 -> String.format(Locale.US, "%.0f", yuan)
+        else -> String.format(Locale.US, "%.2f", yuan).trimEnd('0').trimEnd('.')
+    }
+}
+
+/** 日历月份切换箭头：可视 28dp 白色圆，触控区 40dp */
+@Composable
+private fun CalendarArrowButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .iCostPressScale(pressedScale = 0.88f, onClick = onClick)
+            .semantics { this.contentDescription = contentDescription },
+        contentAlignment = Alignment.Center
+    ) {
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(CircleShape)
+                .background(ICostCardWhite),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = ICostTextSecondary,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun CalendarSummaryMetric(label: String, amountText: String, color: Color) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(label, fontSize = 11.sp, color = ICostTextSecondary)
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = amountText,
+            fontFamily = ICDinFontFamily,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Bold,
+            color = color
+        )
     }
 }

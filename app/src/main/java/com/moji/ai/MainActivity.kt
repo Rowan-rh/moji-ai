@@ -1,10 +1,12 @@
 package com.moji.ai
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -16,20 +18,26 @@ import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import com.moji.ai.ui.MainViewModel
 import com.moji.ai.ui.MoJiMainScreen
+import com.moji.ai.ui.theme.ICostBgGray
+import com.moji.ai.ui.theme.ICostBlueAccent
 
 private val MoJiColorScheme = lightColorScheme(
-    primary = Color(0xFF2563EB),
+    primary = ICostBlueAccent,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFDBEAFE),
-    onPrimaryContainer = Color(0xFF1E3A8A),
-    secondary = Color(0xFF0F766E),
-    secondaryContainer = Color(0xFFCCFBF1),
-    onSecondaryContainer = Color(0xFF134E4A),
-    background = Color(0xFFF8FAFC),
+    primaryContainer = Color(0xFFE6F0FF),
+    onPrimaryContainer = Color(0xFF003A8C),
+    secondary = Color(0xFFE65540),
+    secondaryContainer = Color(0xFFFFECE8),
+    onSecondaryContainer = Color(0xFF7A1C10),
+    background = ICostBgGray,
     surface = Color.White
 )
 
 class MainActivity : ComponentActivity() {
+
+    companion object {
+        const val EXTRA_OPEN_TRANSACTION_ID = "extra_open_transaction_id"
+    }
 
     private val viewModel: MainViewModel by viewModels()
 
@@ -39,15 +47,68 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableHighRefreshRateMode()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            ),
+            navigationBarStyle = SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            )
+        )
         requestPostNotificationPermissionIfNeeded()
+        handleLaunchIntent(intent)
 
         setContent {
             MaterialTheme(colorScheme = MoJiColorScheme) {
-                Surface(color = MaterialTheme.colorScheme.background) {
+                Surface(color = ICostBgGray) {
                     MoJiMainScreen(viewModel = viewModel)
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleLaunchIntent(intent)
+    }
+
+    private fun handleLaunchIntent(intent: Intent?) {
+        val openTxId = intent?.getLongExtra(EXTRA_OPEN_TRANSACTION_ID, -1L) ?: -1L
+        if (openTxId > 0L) {
+            viewModel.requestOpenTransactionDetail(openTxId)
+            intent?.removeExtra(EXTRA_OPEN_TRANSACTION_ID)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        enableHighRefreshRateMode()
+    }
+
+    private fun enableHighRefreshRateMode() {
+        runCatching {
+            val win = window ?: return
+            val params = win.attributes
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val disp = display ?: win.decorView.display
+                val modes = disp?.supportedModes.orEmpty()
+                val maxWidth = modes.maxOfOrNull { it.physicalWidth } ?: 0
+                val bestMode = modes
+                    .filter { it.physicalWidth == maxWidth && it.refreshRate >= 119f }
+                    .minByOrNull { kotlin.math.abs(it.refreshRate - 120f) }
+                    ?: modes.maxByOrNull { it.refreshRate }
+                if (bestMode != null) {
+                    params.preferredDisplayModeId = bestMode.modeId
+                    params.preferredRefreshRate = bestMode.refreshRate
+                }
+            } else {
+                params.preferredRefreshRate = 120f
+            }
+            win.attributes = params
         }
     }
 
