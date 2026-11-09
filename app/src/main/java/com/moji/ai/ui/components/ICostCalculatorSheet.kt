@@ -205,7 +205,8 @@ fun ICostCalculatorSheet(
     onConsumeTemplateDraft: () -> Unit = {},
     onOpenTemplateManagement: () -> Unit = {},
     onLoadPresetTemplates: () -> Unit = {},
-    onOpenCurrencyManagement: () -> Unit = {}
+    onOpenCurrencyManagement: () -> Unit = {},
+    onOpenAgentTriage: () -> Unit = {}
 ) {
     val isEditing = editingTransaction != null
     val expenseCategories by CategoryCatalog.expenseCategoriesFlow.collectAsState()
@@ -377,7 +378,9 @@ fun ICostCalculatorSheet(
 
     // 当用户在「分类管理」二级页中重命名或删除了当前选中的分类时，返回计算器后自动修正选中项
     LaunchedEffect(expenseCategories, incomeCategories, txType) {
-        if (txType == TransactionType.EXPENSE || txType == TransactionType.INCOME) {
+        if ((txType == TransactionType.EXPENSE || txType == TransactionType.INCOME) &&
+            selectedMainCategory != CategoryCatalog.PENDING_TRIAGE_CATEGORY
+        ) {
             val activeList = if (txType == TransactionType.EXPENSE) expenseCategories else incomeCategories
             val matchedMain = activeList.firstOrNull { it.name == selectedMainCategory }
             if (matchedMain == null) {
@@ -879,8 +882,68 @@ fun ICostCalculatorSheet(
                             .fillMaxSize()
                             .verticalScroll(categoryScrollState)
                             .padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
+                        // 顶部「待梳理（交由 Agent）」免分类记账胶囊 + 「✨ Agent 梳理」主入口
+                        val isPendingSelected = selectedMainCategory == CategoryCatalog.PENDING_TRIAGE_CATEGORY
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (isPendingSelected) Color(0xFF6366F1) else Color(0xFFECECEE),
+                                modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
+                                    if (isPendingSelected) {
+                                        selectedMainCategory = categories.firstOrNull()?.name ?: "餐饮"
+                                        selectedSubCategory = ""
+                                    } else {
+                                        selectedMainCategory = CategoryCatalog.PENDING_TRIAGE_CATEGORY
+                                        selectedSubCategory = ""
+                                    }
+                                }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    ICostAssetImage(
+                                        assetFile = "setting_auto.webp",
+                                        tint = if (isPendingSelected) Color.White else Color(0xFF6366F1),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Text(
+                                        text = if (isPendingSelected) "✓ 待梳理（交由 Agent）" else "待梳理（交由 Agent）",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isPendingSelected) Color.White else ICostTextPrimary
+                                    )
+                                }
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = Color(0xFFEEF2FF),
+                                modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
+                                    onOpenAgentTriage()
+                                }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "✨ Agent 梳理",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF4F46E5)
+                                    )
+                                }
+                            }
+                        }
+
                         rows.forEach { rowItems ->
                             Column {
                                 Row(
@@ -895,8 +958,14 @@ fun ICostCalculatorSheet(
                                                 modifier = Modifier
                                                     .weight(1f)
                                                     .iCostPressScale(pressedScale = 0.88f) {
-                                                        selectedMainCategory = cat.name
-                                                        selectedSubCategory = ""
+                                                        if (isSelected && selectedSubCategory.isEmpty()) {
+                                                            // 再次轻点已选中的主分类可取消选择，进入「待梳理」状态
+                                                            selectedMainCategory = CategoryCatalog.PENDING_TRIAGE_CATEGORY
+                                                            selectedSubCategory = ""
+                                                        } else {
+                                                            selectedMainCategory = cat.name
+                                                            selectedSubCategory = ""
+                                                        }
                                                     },
                                                 horizontalAlignment = Alignment.CenterHorizontally
                                             ) {

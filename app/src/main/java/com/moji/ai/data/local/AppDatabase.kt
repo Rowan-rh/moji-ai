@@ -171,6 +171,9 @@ interface TransactionDao {
 
 @Dao
 interface CaptureEvidenceDao {
+    @Query("SELECT * FROM capture_evidences ORDER BY capturedAtMillis DESC")
+    suspend fun getAllEvidences(): List<CaptureEvidenceEntity>
+
     @Query("SELECT * FROM capture_evidences WHERE transactionId = :txId ORDER BY capturedAtMillis DESC")
     suspend fun getEvidencesForTransaction(txId: Long): List<CaptureEvidenceEntity>
 

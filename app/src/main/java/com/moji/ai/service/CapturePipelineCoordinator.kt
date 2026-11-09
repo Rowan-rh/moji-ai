@@ -5,6 +5,7 @@ import com.moji.ai.ai.SmartRuleEngine
 import com.moji.ai.ai.SmartRuleExecutionResult
 import com.moji.ai.data.local.CaptureEvidenceEntity
 import com.moji.ai.data.local.TransactionEntity
+import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.SilentBookkeepingNotifier
@@ -1169,10 +1170,18 @@ class CapturePipelineCoordinator(
                 (incoming.merchant.length > existing.merchant.length && incoming.merchant.contains(existing.merchant)))
         ) {
             updatedMerchant = incoming.merchant
-            if (!incoming.category.startsWith("购物-") || existing.category.startsWith("购物-") || existing.category == "餐饮") {
+            if (!CategoryCatalog.isPendingTriage(incoming.category) &&
+                (CategoryCatalog.isPendingTriage(existing.category) ||
+                    !incoming.category.startsWith("购物-") ||
+                    existing.category.startsWith("购物-") ||
+                    existing.category == "餐饮")
+            ) {
                 updatedCategory = incoming.category
             }
             enrichedFields.add("商户(${incoming.merchant.take(8)})")
+        } else if (CategoryCatalog.isPendingTriage(existing.category) && !CategoryCatalog.isPendingTriage(incoming.category)) {
+            updatedCategory = incoming.category
+            enrichedFields.add("分类(${incoming.category})")
         }
 
         val isSameAmount = incoming.amountCents == existing.amountCents
@@ -1234,8 +1243,14 @@ class CapturePipelineCoordinator(
         )
         if (reclassifiedConf >= 0.85f &&
             reclassifiedCat != "餐饮" &&
-            (updatedCategory.startsWith("购物-") || updatedCategory == "餐饮")
+            !CategoryCatalog.isPendingTriage(reclassifiedCat) &&
+            (updatedCategory.startsWith("购物-") ||
+                updatedCategory == "餐饮" ||
+                CategoryCatalog.isPendingTriage(updatedCategory))
         ) {
+            if (CategoryCatalog.isPendingTriage(updatedCategory) && enrichedFields.none { it.startsWith("分类(") }) {
+                enrichedFields.add("分类($reclassifiedCat)")
+            }
             updatedCategory = reclassifiedCat
         }
 

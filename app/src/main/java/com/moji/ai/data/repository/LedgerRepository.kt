@@ -74,6 +74,9 @@ class LedgerRepository(private val db: AppDatabase) {
     suspend fun insertCaptureEvidence(evidence: com.moji.ai.data.local.CaptureEvidenceEntity): Long =
         db.captureEvidenceDao().insertEvidence(evidence)
 
+    suspend fun getAllCaptureEvidences(): List<com.moji.ai.data.local.CaptureEvidenceEntity> =
+        db.captureEvidenceDao().getAllEvidences()
+
     suspend fun getEvidencesForTransaction(txId: Long): List<com.moji.ai.data.local.CaptureEvidenceEntity> =
         db.captureEvidenceDao().getEvidencesForTransaction(txId)
 
@@ -639,6 +642,25 @@ class LedgerRepository(private val db: AppDatabase) {
             }
         }
         updatedTxCount
+    }
+
+    /**
+     * 在 Room 事务中批量更新指定账单的分类字段（用于 Agent 梳理结果一键采纳生效）
+     */
+    suspend fun batchUpdateTransactionCategories(
+        updates: Map<Long, String>
+    ): Int = db.withTransaction {
+        if (updates.isEmpty()) return@withTransaction 0
+        val now = System.currentTimeMillis()
+        val txDao = db.transactionDao()
+        var updatedCount = 0
+        for ((txId, newCat) in updates) {
+            if (txId > 0L && newCat.isNotBlank()) {
+                txDao.updateTransactionCategoryById(txId, newCat.trim(), now)
+                updatedCount++
+            }
+        }
+        updatedCount
     }
 
     /**

@@ -132,7 +132,8 @@ fun CategoryManagementScreen(
     onMoveSubCategory: (isExpense: Boolean, parentName: String, subIndex: Int, delta: Int) -> Unit,
     onDeleteSubCategory: (isExpense: Boolean, parentName: String, subName: String, migrateTargetCategory: String, onDone: (Result<Unit>) -> Unit) -> Unit,
     onRestoreDefaults: (isExpense: Boolean?, mergeOnly: Boolean) -> Unit,
-    onCountCategoryTransactions: suspend (category: String, includeSubPrefix: Boolean, isExpense: Boolean?) -> Int
+    onCountCategoryTransactions: suspend (category: String, includeSubPrefix: Boolean, isExpense: Boolean?) -> Int,
+    onOpenAgentTriage: () -> Unit = {}
 ) {
     BackHandler(onBack = onBack)
 
@@ -198,7 +199,7 @@ fun CategoryManagementScreen(
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "恢复默认",
+                                text = "更多与手动",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Medium,
                                 color = ICostTextPrimary
@@ -211,6 +212,19 @@ fun CategoryManagementScreen(
                         onDismissRequest = { showRestoreMenu = false },
                         containerColor = ICostCardWhite
                     ) {
+                        DropdownMenuItem(
+                            text = { Text("手动新增一级分类", fontSize = 14.sp, fontWeight = FontWeight.Medium) },
+                            onClick = {
+                                showRestoreMenu = false
+                                editorTarget = CategoryEditorTarget(
+                                    isExpense = isExpenseTab,
+                                    isSubCategory = false,
+                                    parentName = null,
+                                    existingName = null,
+                                    initialIconAsset = if (isExpenseTab) "cat_dining.webp" else "cat_salary.webp"
+                                )
+                            }
+                        )
                         DropdownMenuItem(
                             text = { Text("补全缺失的默认分类（保留自定义）", fontSize = 14.sp) },
                             onClick = {
@@ -236,32 +250,25 @@ fun CategoryManagementScreen(
 
                 Surface(
                     shape = RoundedCornerShape(18.dp),
-                    color = activeAccentColor,
+                    color = Color(0xFF4F46E5),
                     modifier = Modifier
-                        .semantics { contentDescription = "新增一级分类" }
+                        .semantics { contentDescription = "Agent梳理分类" }
                         .iCostPressScale(pressedScale = 0.94f) {
-                            editorTarget = CategoryEditorTarget(
-                                isExpense = isExpenseTab,
-                                isSubCategory = false,
-                                parentName = null,
-                                existingName = null,
-                                initialIconAsset = if (isExpenseTab) "cat_dining.webp" else "cat_salary.webp"
-                            )
+                            onOpenAgentTriage()
                         }
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 13.dp, vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Add,
-                            contentDescription = null,
+                        ICostAssetImage(
+                            assetFile = "setting_auto.webp",
                             tint = Color.White,
-                            modifier = Modifier.size(16.dp)
+                            modifier = Modifier.size(15.dp)
                         )
-                        Spacer(modifier = Modifier.width(3.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
                         Text(
-                            text = "新增一级分类",
+                            text = "✨ Agent 梳理",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White
