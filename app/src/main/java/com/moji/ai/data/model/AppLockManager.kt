@@ -41,6 +41,8 @@ object AppLockManager {
     private const val KEY_LOCK_TIMEOUT = "app_lock_timeout_seconds"
     private const val KEY_HIDE_RECENT = "app_lock_hide_recent_preview"
     private const val KEY_PIN_HINT = "app_lock_pin_hint"
+    private const val KEY_FAILED_ATTEMPTS = "app_lock_failed_attempts"
+    private const val KEY_COOLDOWN_UNTIL = "app_lock_cooldown_until_millis"
 
     const val MAX_FAILED_ATTEMPTS = 5
     const val COOLDOWN_DURATION_MILLIS = 30_000L
@@ -74,8 +76,18 @@ object AppLockManager {
             hideRecentTaskPreview = sp.getBoolean(KEY_HIDE_RECENT, false),
             pinHint = (sp.getString(KEY_PIN_HINT, "") ?: "").take(MAX_PIN_HINT_LENGTH)
         )
-        failedAttempts = 0; cooldownUntilMillis = 0L; lastBackgroundedAtMillis = 0L
+        failedAttempts = sp.getInt(KEY_FAILED_ATTEMPTS, 0).coerceIn(0, MAX_FAILED_ATTEMPTS)
+        cooldownUntilMillis = sp.getLong(KEY_COOLDOWN_UNTIL, 0L).coerceAtLeast(0L)
+        lastBackgroundedAtMillis = 0L
         _isSessionLockedFlow.value = enabled
+    }
+
+    @Synchronized
+    private fun persistAttemptState() {
+        prefs?.edit()
+            ?.putInt(KEY_FAILED_ATTEMPTS, failedAttempts)
+            ?.putLong(KEY_COOLDOWN_UNTIL, cooldownUntilMillis)
+            ?.apply()
     }
 
     fun normalizeTimeout(seconds: Int): Int = if (seconds == 60 || seconds == 300) seconds else 0
@@ -118,14 +130,17 @@ object AppLockManager {
         if (!isValidPinFormat(pin)) return PinVerifyResult.InvalidFormat("请输入 4 位数字密码")
         if (pinSalt.isNotBlank() && pinHash.isNotBlank() && hashPin(pin, pinSalt) == pinHash) {
             failedAttempts = 0; cooldownUntilMillis = 0L
+            persistAttemptState()
             if (unlockSessionOnSuccess) _isSessionLockedFlow.value = false
             return PinVerifyResult.Success
         }
         failedAttempts += 1
         if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
             cooldownUntilMillis = nowMillis + COOLDOWN_DURATION_MILLIS; failedAttempts = 0
+            persistAttemptState()
             return PinVerifyResult.CooldownLocked(30, "连续输错 5 次，已锁定 30 秒")
         }
+        persistAttemptState()
         val remaining = MAX_FAILED_ATTEMPTS - failedAttempts
         return PinVerifyResult.Mismatch(remaining, "密码错误，还可尝试 $remaining 次")
     }
@@ -135,7 +150,8 @@ object AppLockManager {
         _configFlow.value = config
         prefs?.edit()?.putBoolean(KEY_ENABLED, config.enabled)?.putString(KEY_PIN_SALT, pinSalt)
             ?.putString(KEY_PIN_HASH, pinHash)?.putInt(KEY_LOCK_TIMEOUT, config.lockTimeoutSeconds)
-            ?.putBoolean(KEY_HIDE_RECENT, config.hideRecentTaskPreview)?.putString(KEY_PIN_HINT, config.pinHint)?.apply()
+            ?.putBoolean(KEY_HIDE_RECENT, config.hideRecentTaskPreview)?.putString(KEY_PIN_HINT, config.pinHint)
+            ?.putInt(KEY_FAILED_ATTEMPTS, failedAttempts)?.putLong(KEY_COOLDOWN_UNTIL, cooldownUntilMillis)?.apply()
     }
 
     @Synchronized

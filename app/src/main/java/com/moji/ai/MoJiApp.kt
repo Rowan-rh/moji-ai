@@ -24,7 +24,7 @@ import kotlinx.coroutines.launch
 
 class MoJiApp : Application() {
 
-    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     lateinit var database: AppDatabase
         private set

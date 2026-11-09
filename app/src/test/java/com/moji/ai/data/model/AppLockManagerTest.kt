@@ -1,12 +1,19 @@
 package com.moji.ai.data.model
 
+import com.moji.ai.ai.SmartConditionRule
+import com.moji.ai.data.backup.BackupAndCsvTransferEngine
+import com.moji.ai.notification.SilentBookkeepingNotifier
+import com.moji.ai.ui.InstallmentPlanItem
+import com.moji.ai.ui.SavingPlanItem
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.Calendar
 
 class AppLockManagerTest {
 
@@ -165,5 +172,98 @@ class AppLockManagerTest {
         AppLockManager.onAppBackgrounded(nowMillis = 100_000L)
         AppLockManager.onAppForegrounded(nowMillis = 161_000L)
         assertTrue(AppLockManager.isSessionLockedFlow.value)
+    }
+
+    @Test
+    fun notificationIdForTransaction_assignsDistinctIdsForFirstThousandTransactions() {
+        val ids = (1L..1000L).map { SilentBookkeepingNotifier.notificationIdForTransaction(it) }.toSet()
+        assertEquals(1000, ids.size)
+        assertTrue(ids.all { it in 1001..9999 })
+    }
+
+    @Test
+    fun recurrenceFrequency_computesCalendarMonthAndYearWithoutFixedDayDrift() {
+        val cal = Calendar.getInstance().apply {
+            set(2026, Calendar.JANUARY, 15, 9, 30, 0)
+            set(Calendar.MILLISECOND, 0)
+        }
+        val baseMillis = cal.timeInMillis
+
+        val nextMonthly = RecurrenceFrequency.MONTHLY.computeNextTriggerMillis(baseMillis, baseMillis)
+        val monthlyCal = Calendar.getInstance().apply { timeInMillis = nextMonthly }
+        assertEquals(2026, monthlyCal.get(Calendar.YEAR))
+        assertEquals(Calendar.FEBRUARY, monthlyCal.get(Calendar.MONTH))
+        assertEquals(15, monthlyCal.get(Calendar.DAY_OF_MONTH))
+
+        val nextYearly = RecurrenceFrequency.YEARLY.computeNextTriggerMillis(baseMillis, baseMillis)
+        val yearlyCal = Calendar.getInstance().apply { timeInMillis = nextYearly }
+        assertEquals(2027, yearlyCal.get(Calendar.YEAR))
+        assertEquals(Calendar.JANUARY, yearlyCal.get(Calendar.MONTH))
+        assertEquals(15, yearlyCal.get(Calendar.DAY_OF_MONTH))
+    }
+
+    @Test
+    fun fullBackupSnapshot_preservesSmartRulesSavingPlansAndInstallmentPlans() {
+        val rules = listOf(
+            SmartConditionRule(
+                id = 101L,
+                name = "大额打车自动报销",
+                keywordContains = "滴滴",
+                minAmountYuan = 50.0,
+                targetCategory = "交通-打车",
+                markReimbursable = true,
+                appendTag = "差旅"
+            )
+        )
+        val savingPlans = listOf(
+            SavingPlanItem(
+                id = 201L,
+                title = "应急备用金",
+                targetCents = 5_000_000L,
+                savedCents = 2_000_000L,
+                deadlineLabel = "2026-12-31"
+            )
+        )
+        val installmentPlans = listOf(
+            InstallmentPlanItem(
+                id = 301L,
+                title = "MacBook Pro 12期",
+                walletId = 1L,
+                totalCents = 1_499_900L,
+                feePerPeriodCents = 0L,
+                totalPeriods = 12,
+                paidPeriods = 4,
+                category = "数码"
+            )
+        )
+
+        val json = BackupAndCsvTransferEngine.exportFullBackupJson(
+            ledgers = listOf("默认账本"),
+            monthlyBudgetCents = 300_000L,
+            wallets = emptyList(),
+            transactions = emptyList(),
+            recurringRules = emptyList(),
+            merchantMemories = emptyList(),
+            customExpenseCategories = emptyList(),
+            customIncomeCategories = emptyList(),
+            customTags = emptyList(),
+            quickTemplates = emptyList(),
+            smartRules = rules,
+            savingPlans = savingPlans,
+            installmentPlans = installmentPlans,
+            customCurrencyRates = mapOf("USD" to 7.25),
+            reminderSettingsJson = "",
+            appearanceSettingsJson = ""
+        )
+
+        val parsed = BackupAndCsvTransferEngine.parseFullBackupJson(json)
+        assertNotNull(parsed)
+        val snapshot = parsed!!.third
+        assertEquals(1, snapshot.smartRules.size)
+        assertEquals("大额打车自动报销", snapshot.smartRules.first().name)
+        assertEquals(1, snapshot.savingPlans.size)
+        assertEquals("应急备用金", snapshot.savingPlans.first().title)
+        assertEquals(1, snapshot.installmentPlans.size)
+        assertEquals("MacBook Pro 12期", snapshot.installmentPlans.first().title)
     }
 }

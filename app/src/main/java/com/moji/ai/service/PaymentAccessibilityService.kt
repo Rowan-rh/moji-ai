@@ -42,6 +42,25 @@ open class PaymentAccessibilityService : AccessibilityService() {
         private const val OCR_COOLDOWN_MS = 4_500L
         private const val MAX_TRAVERSE_DEPTH = 50
         private const val MAX_TRAVERSE_NODES = 550
+
+        private val BILL_AMOUNT_PRIMARY_REGEX = Regex(
+            """(?<!本月支出)(?:¥|￥)\s*\d+(?:\.\d{1,2})?|(?:支出|收入|付款|收款|实付|实付款|应付款|应付金额|商品总额|合计)?\s*\d+(?:\.\d{1,2})?\s*元"""
+        )
+        private val BILL_AMOUNT_SPLIT_NODE_REGEX = Regex(
+            """(?:¥|￥)\s*\|?\s*\d{1,7}\s*\|\s*\.\d{1,2}|(?:¥|￥)\s*\|?\s*\d{1,7}\.\s*\|\s*\d{1,2}|(?:¥|￥)\s*\|\s*\d{1,7}(?:\.\d{1,2})?"""
+        )
+        private val BILL_AMOUNT_SIGNED_DECIMAL_REGEX = Regex(
+            """(?:^|\||\s)[-+−]?\d{1,7}\.\d{1,2}(?:\s|\||$)"""
+        )
+        private val PAGE_IDENTITY_ORDER_REGEX = Regex(
+            """(?:交易单号|转账单号|订单编号|订单号|商户单号|商家订单号|支付宝交易号|流水号)\s*(?:[:：,，\s]|\|)*\s*([0-9A-Za-z_-]{10,44})"""
+        )
+        private val PAGE_IDENTITY_TIME_REGEX = Regex(
+            """(?:支付时间|付款时间|下单时间|拼单时间|创建时间|转账时间|收款时间)\s*(?:[:：,，\s]|\|)*\s*(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?\s+\d{1,2}[:时]\d{2}(?:[:分]\d{2}秒?)?)"""
+        )
+        private val PAGE_IDENTITY_AMOUNT_REGEX = Regex(
+            """(?:实付款|实付金额|合计实付|实扣|实付|应付总额|应付金额|应付款|需付款|合计|到手价|到手|支出|收入|付款|收款)\s*(?:[:：,，\s]|\|)*\s*(?:¥|￥)?\s*\d{1,7}(?:\.\d{1,2})?\s*[元)）]?|[-+−]?\d{1,7}\.\d{1,2}"""
+        )
     }
 
     private val targetFinancialPackages = setOf(
@@ -616,14 +635,14 @@ open class PaymentAccessibilityService : AccessibilityService() {
     }
 
     private fun containsLikelyBillAmount(text: String): Boolean {
-        if (Regex("""(?<!本月支出)(?:¥|￥)\s*\d+(?:\.\d{1,2})?|(?:支出|收入|付款|收款|实付|实付款|应付款|应付金额|商品总额|合计)?\s*\d+(?:\.\d{1,2})?\s*元""").containsMatchIn(text)) {
+        if (BILL_AMOUNT_PRIMARY_REGEX.containsMatchIn(text)) {
             return true
         }
         // 兼容京东/拼多多/抖音整数与小数分拆为相邻 TextView 的各种节点形态（如 "¥ | 29 | .90"、"¥29 | .90"、"¥ | 29. | 90"、"¥29. | 90"、"¥ | 29"）
-        if (Regex("""(?:¥|￥)\s*\|?\s*\d{1,7}\s*\|\s*\.\d{1,2}|(?:¥|￥)\s*\|?\s*\d{1,7}\.\s*\|\s*\d{1,2}|(?:¥|￥)\s*\|\s*\d{1,7}(?:\.\d{1,2})?""").containsMatchIn(text)) {
+        if (BILL_AMOUNT_SPLIT_NODE_REGEX.containsMatchIn(text)) {
             return true
         }
-        if (Regex("""(?:^|\||\s)[-+−]?\d{1,7}\.\d{1,2}(?:\s|\||$)""").containsMatchIn(text)) {
+        if (BILL_AMOUNT_SIGNED_DECIMAL_REGEX.containsMatchIn(text)) {
             return true
         }
         return false
@@ -967,20 +986,13 @@ open class PaymentAccessibilityService : AccessibilityService() {
      */
     private fun extractStablePageIdentity(pkg: String, fullPageText: String): String {
         val cleanText = stripEcommerceRecommendationFooter(fullPageText)
-        val labeledOrderRegex = Regex(
-            """(?:交易单号|转账单号|订单编号|订单号|商户单号|商家订单号|支付宝交易号|流水号)\s*(?:[:：,，\s]|\|)*\s*([0-9A-Za-z_-]{10,44})"""
-        )
-        val orders = labeledOrderRegex.findAll(cleanText)
+        val orders = PAGE_IDENTITY_ORDER_REGEX.findAll(cleanText)
             .map { it.groupValues[1].trim() }
             .filter { it.count { ch -> ch.isDigit() } >= 10 }
             .distinct()
             .joinToString(",")
-        val timeMatch = Regex(
-            """(?:支付时间|付款时间|下单时间|拼单时间|创建时间|转账时间|收款时间)\s*(?:[:：,，\s]|\|)*\s*(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?\s+\d{1,2}[:时]\d{2}(?:[:分]\d{2}秒?)?)"""
-        ).find(cleanText)?.groupValues?.getOrNull(1).orEmpty()
-        val amtMatch = Regex(
-            """(?:实付款|实付金额|合计实付|实扣|实付|应付总额|应付金额|应付款|需付款|合计|到手价|到手|支出|收入|付款|收款)\s*(?:[:：,，\s]|\|)*\s*(?:¥|￥)?\s*\d{1,7}(?:\.\d{1,2})?\s*[元)）]?|[-+−]?\d{1,7}\.\d{1,2}"""
-        ).find(cleanText)?.value.orEmpty()
+        val timeMatch = PAGE_IDENTITY_TIME_REGEX.find(cleanText)?.groupValues?.getOrNull(1).orEmpty()
+        val amtMatch = PAGE_IDENTITY_AMOUNT_REGEX.find(cleanText)?.value.orEmpty()
         val detailFlags = buildString {
             if (cleanText.contains("交易单号") || cleanText.contains("订单号") || cleanText.contains("订单编号") || cleanText.contains("转账单号")) append("O")
             if (cleanText.contains("商户单号") || cleanText.contains("商家订单号")) append("M")
