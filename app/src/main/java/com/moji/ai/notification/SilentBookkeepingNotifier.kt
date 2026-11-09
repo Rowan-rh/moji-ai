@@ -35,6 +35,8 @@ class SilentBookkeepingNotifier(private val context: Context) {
         const val FLUID_CLOUD_CHANNEL_ID = "moji_fluid_cloud_silent_v2"
         const val QA_CHANNEL_ID = "moji_silent_bookkeeping_qa_v2"
         const val QA_FLUID_CLOUD_CHANNEL_ID = "moji_fluid_cloud_silent_qa_v2"
+        const val DAILY_REMINDER_CHANNEL_ID = "moji_daily_reminder_channel"
+        const val QA_DAILY_REMINDER_CHANNEL_ID = "moji_daily_reminder_qa_channel"
         const val QA_ANTI_CAPTURE_MARKER = "[QA测试通知·确认付款免采集]"
         const val ACTION_UNDO_TRANSACTION = "com.moji.ai.ACTION_UNDO_TRANSACTION"
         const val ACTION_CYCLE_CATEGORY = "com.moji.ai.ACTION_CYCLE_CATEGORY"
@@ -77,6 +79,9 @@ class SilentBookkeepingNotifier(private val context: Context) {
 
     private val fluidChannelId: String
         get() = if (BuildConfig.IS_QA_BUILD) QA_FLUID_CLOUD_CHANNEL_ID else FLUID_CLOUD_CHANNEL_ID
+
+    private val dailyReminderChannelId: String
+        get() = if (BuildConfig.IS_QA_BUILD) QA_DAILY_REMINDER_CHANNEL_ID else DAILY_REMINDER_CHANNEL_ID
 
     private fun activeChannelId(isOnePlus: Boolean): String =
         if (isOnePlus) fluidChannelId else standardChannelId
@@ -126,6 +131,21 @@ class SilentBookkeepingNotifier(private val context: Context) {
             setShowBadge(true)
         }
         nm.createNotificationChannel(fluidCloudChannel)
+
+        val reminderChannelName = if (BuildConfig.IS_QA_BUILD) {
+            "【QA测试】每日记账提醒"
+        } else {
+            "每日记账提醒"
+        }
+        val reminderChannel = NotificationChannel(
+            dailyReminderChannelId,
+            reminderChannelName,
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "按设定的定时提醒时段推送记账提醒，点击通知直达记账计算器面板"
+            setShowBadge(true)
+        }
+        nm.createNotificationChannel(reminderChannel)
     }
 
     /**
@@ -438,6 +458,77 @@ class SilentBookkeepingNotifier(private val context: Context) {
 
         NotificationManagerCompat.from(context).notify(notifId, builder.build())
     }
+
+    /**
+     * 发送每日定时记账提醒通知（点击后打开 MainActivity 并自动拉起记账计算器面板）
+     */
+    fun sendDailyReminderNotification(
+        title: String,
+        message: String,
+        slotId: String = "test",
+        isTest: Boolean = false
+    ): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ActivityCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                return false
+            }
+        }
+        val nmCompat = NotificationManagerCompat.from(context)
+        if (!nmCompat.areNotificationsEnabled()) {
+            return false
+        }
+
+        val cleanTitle = title.trim().ifEmpty { "记账提醒" }
+        val cleanMessage = message.trim().ifEmpty { "今天的花销都记下了吗？花 10 秒随手记一笔吧～" }
+        val notifId = if (isTest) 88001 else (88000 + (slotId.hashCode() and 0x7FFF))
+
+        val openIntent = Intent(context, MainActivity::class.java).apply {
+            setPackage(context.packageName)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(MainActivity.EXTRA_OPEN_BOOKKEEPING_SHEET, true)
+        }
+        val openPending = PendingIntent.getActivity(
+            context,
+            notifId,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val expandedText = buildString {
+            append(cleanMessage)
+            append("\n点击通知即可直接打开记账面板快速记一笔")
+            if (BuildConfig.IS_QA_BUILD) {
+                append("\n").append(QA_ANTI_CAPTURE_MARKER)
+            }
+        }
+
+        val builder = NotificationCompat.Builder(context, dailyReminderChannelId)
+            .setSmallIcon(R.drawable.ic_fluid_cloud_moji)
+            .setColor(0xFF0EA5E9.toInt())
+            .setSubText(if (BuildConfig.IS_QA_BUILD) "默记 QA · 定时提醒" else "默记 · 定时提醒")
+            .setContentTitle(cleanTitle)
+            .setContentText(cleanMessage)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setAutoCancel(true)
+            .setContentIntent(openPending)
+
+        nmCompat.notify(notifId, builder.build())
+        return true
+    }
+
+    fun sendTestReminderNotification(
+        title: String = "记账提醒",
+        message: String = "今天的花销都记下了吗？花 10 秒随手记一笔吧～"
+    ): Boolean = sendDailyReminderNotification(title = title, message = message, slotId = "test", isTest = true)
 }
 
 class TransactionActionReceiver : BroadcastReceiver() {

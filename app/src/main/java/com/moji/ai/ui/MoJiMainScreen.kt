@@ -136,6 +136,7 @@ import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.PasswordProtectionConfig
+import com.moji.ai.data.model.ReminderSettingsConfig
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.service.CaptureEventOutcome
 import com.moji.ai.service.CaptureObservabilityLogEntry
@@ -155,6 +156,7 @@ import com.moji.ai.ui.screens.ICostAssetsScreen
 import com.moji.ai.ui.screens.ICostLedgerHomeScreen
 import com.moji.ai.ui.screens.ICostStatisticsScreen
 import com.moji.ai.ui.screens.PasswordProtectionScreen
+import com.moji.ai.ui.screens.ReminderManagementScreen
 import com.moji.ai.ui.screens.TagManagementScreen
 import com.moji.ai.ui.screens.TemplateManagementScreen
 import com.moji.ai.ui.theme.ICDinFontFamily
@@ -217,6 +219,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val customCurrencyRates by viewModel.customCurrencyRates.collectAsState()
     val passwordProtectionConfig by viewModel.passwordProtectionConfig.collectAsState()
     val isAppSessionLocked by viewModel.isAppSessionLocked.collectAsState()
+    val reminderSettingsConfig by viewModel.reminderSettingsConfig.collectAsState()
+    val pendingOpenBookkeepingSheet by viewModel.pendingOpenBookkeepingSheet.collectAsState()
     val triageReport by viewModel.triageReport.collectAsState()
     val isTriaging by viewModel.isTriaging.collectAsState()
     val showAgentTriageSheet by viewModel.showAgentTriageSheet.collectAsState()
@@ -266,6 +270,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var templateManagementAutoCreate by remember { mutableStateOf(false) }
     var showCurrencyManagementPage by remember { mutableStateOf(false) }
     var showPasswordProtectionPage by remember { mutableStateOf(false) }
+    var showReminderManagementPage by remember { mutableStateOf(false) }
     var isAssetSubpageOpen by remember { mutableStateOf(false) }
 
     val hasFullScreenOverlay = inspectingTx != null ||
@@ -277,6 +282,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         showTemplateManagementPage ||
         showCurrencyManagementPage ||
         showPasswordProtectionPage ||
+        showReminderManagementPage ||
         isAssetSubpageOpen
 
     LaunchedEffect(pendingTemplateDraftForCalc) {
@@ -326,6 +332,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             showTemplateManagementPage = false
             showCurrencyManagementPage = false
             showPasswordProtectionPage = false
+            showReminderManagementPage = false
             calendarMonthTxs = null
             showCalculatorSheet = false
             editingTx = null
@@ -338,6 +345,29 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             inspectingTx = matchedTx
             viewModel.consumePendingOpenTransactionDetail()
         }
+    }
+
+    // 响应点击定时记账提醒通知：自动关闭二级全屏页、切回账本首页并拉起记账计算器面板
+    LaunchedEffect(pendingOpenBookkeepingSheet) {
+        if (!pendingOpenBookkeepingSheet) return@LaunchedEffect
+        selectedTab = 0
+        showSettingsPage = false
+        showSmartBookkeepingPage = false
+        showCategoryManagementPage = false
+        showTagManagementPage = false
+        showTemplateManagementPage = false
+        showCurrencyManagementPage = false
+        showPasswordProtectionPage = false
+        showReminderManagementPage = false
+        calendarMonthTxs = null
+        inspectingTx = null
+        editingTx = null
+        templateDraftForCalc = null
+        calcInitialType = TransactionType.EXPENSE
+        calcInitialSourceWalletId = null
+        calcInitialTargetWalletId = null
+        showCalculatorSheet = true
+        viewModel.consumePendingOpenBookkeepingSheet()
     }
 
     Box(
@@ -614,6 +644,10 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 passwordProtectionConfig = passwordProtectionConfig,
                 onOpenPasswordProtection = {
                     showPasswordProtectionPage = true
+                },
+                reminderSettingsConfig = reminderSettingsConfig,
+                onOpenReminderManagement = {
+                    showReminderManagementPage = true
                 }
             )
         }
@@ -815,6 +849,30 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             )
         }
 
+        // 全屏「定时提醒」管理页面（对齐 setting_time.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showReminderManagementPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            ReminderManagementScreen(
+                config = reminderSettingsConfig,
+                onBack = { showReminderManagementPage = false },
+                onSetMasterEnabled = { enabled -> viewModel.setReminderMasterEnabled(enabled) },
+                onSetSkipIfRecordedToday = { skip -> viewModel.setReminderSkipIfRecordedToday(skip) },
+                onUpsertSlot = { item, onDone -> viewModel.upsertReminderSlot(item, onDone) },
+                onToggleSlotEnabled = { slotId, enabled -> viewModel.toggleReminderSlotEnabled(slotId, enabled) },
+                onDeleteSlot = { slotId -> viewModel.deleteReminderSlot(slotId) },
+                onSendTestReminder = { viewModel.sendTestDailyReminder() }
+            )
+        }
+
         // 全屏「智能记账」页面（09_smart_bookkeeping.png）—— 二级侧滑推入转场
         AnimatedVisibility(
             visible = showSmartBookkeepingPage,
@@ -899,7 +957,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 ledgers = ledgers,
                 onSelectLedger = { viewModel.selectLedger(it) },
                 visible = showCalculatorSheet,
-                suspendedBySubpage = showCategoryManagementPage || showTagManagementPage || showTemplateManagementPage || showCurrencyManagementPage || showPasswordProtectionPage,
+                suspendedBySubpage = showCategoryManagementPage || showTagManagementPage || showTemplateManagementPage || showCurrencyManagementPage || showPasswordProtectionPage || showReminderManagementPage,
                 editingTransaction = editingTx,
                 initialType = calcInitialType,
                 initialSourceWalletId = calcInitialSourceWalletId,
@@ -1392,7 +1450,9 @@ private fun ICostSettingsFullScreen(
     customCurrencyRateCount: Int = 0,
     onOpenCurrencyManagement: () -> Unit = {},
     passwordProtectionConfig: PasswordProtectionConfig = PasswordProtectionConfig(),
-    onOpenPasswordProtection: () -> Unit = {}
+    onOpenPasswordProtection: () -> Unit = {},
+    reminderSettingsConfig: ReminderSettingsConfig = ReminderSettingsConfig(),
+    onOpenReminderManagement: () -> Unit = {}
 ) {
     BackHandler(onBack = onBack)
 
@@ -1557,7 +1617,12 @@ private fun ICostSettingsFullScreen(
                             passwordProtectionConfig.settingsTrailingText,
                             onClick = onOpenPasswordProtection
                         ),
-                        SettingRowDef("setting_time.webp", "定时提醒"),
+                        SettingRowDef(
+                            "setting_time.webp",
+                            "定时提醒",
+                            reminderSettingsConfig.settingsTrailingText,
+                            onClick = onOpenReminderManagement
+                        ),
                         SettingRowDef("setting_appearance.webp", "外观显示")
                     )
                 )

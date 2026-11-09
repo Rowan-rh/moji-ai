@@ -98,7 +98,19 @@
             </intent-filter>
         </receiver>
 
-        <!-- 5. 应用内 OTA 更新 APK 安装 FileProvider（支持私有仓库下载 APK 后调起系统安装器） -->
+        <!-- 5. 每日定时记账提醒与开机/时间变更重调度广播接收器 -->
+        <receiver
+            android:name=".notification.DailyReminderReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.moji.ai.ACTION_TRIGGER_DAILY_REMINDER" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- 6. 应用内 OTA 更新 APK 安装 FileProvider（支持私有仓库下载 APK 后调起系统安装器） -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

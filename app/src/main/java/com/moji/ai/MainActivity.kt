@@ -42,6 +42,7 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val EXTRA_OPEN_TRANSACTION_ID = "extra_open_transaction_id"
+        const val EXTRA_OPEN_BOOKKEEPING_SHEET = "extra_open_bookkeeping_sheet"
     }
 
     private val viewModel: MainViewModel by viewModels()
@@ -94,6 +95,10 @@ class MainActivity : ComponentActivity() {
         if (openTxId > 0L) {
             viewModel.requestOpenTransactionDetail(openTxId)
             intent?.removeExtra(EXTRA_OPEN_TRANSACTION_ID)
+        }
+        if (intent?.getBooleanExtra(EXTRA_OPEN_BOOKKEEPING_SHEET, false) == true) {
+            viewModel.requestOpenBookkeepingSheet()
+            intent.removeExtra(EXTRA_OPEN_BOOKKEEPING_SHEET)
         }
     }
 

@@ -9,8 +9,10 @@ import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.model.AppLockManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyRateManager
+import com.moji.ai.data.model.ReminderConfigManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.repository.LedgerRepository
+import com.moji.ai.notification.DailyReminderScheduler
 import com.moji.ai.notification.SilentBookkeepingNotifier
 import com.moji.ai.service.CapturePipelineCoordinator
 import com.moji.ai.update.AppUpdateManager
@@ -56,6 +58,7 @@ class MoJiApp : Application() {
         TagCatalog.init(this)
         CurrencyRateManager.init(this)
         AppLockManager.init(this)
+        ReminderConfigManager.init(this)
         database = AppDatabase.getInstance(this)
         repository = LedgerRepository(database)
         aiConfigManager = AiConfigManager(this)
@@ -63,6 +66,7 @@ class MoJiApp : Application() {
         smartRuleEngine = SmartRuleEngine(this)
         aiEngine = AiAccountingEngine(aiConfigManager, merchantMemoryManager)
         notifier = SilentBookkeepingNotifier(this)
+        DailyReminderScheduler.rescheduleAll(this)
         appUpdateManager = AppUpdateManager(this)
         captureCoordinator = CapturePipelineCoordinator(
             repository = repository,
