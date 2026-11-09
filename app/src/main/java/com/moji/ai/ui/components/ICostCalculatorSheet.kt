@@ -23,6 +23,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -48,9 +50,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.filled.AccessTime
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -66,6 +72,7 @@ import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -87,19 +94,33 @@ import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CategoryCatalog
+import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.CurrencyRateManager
+import com.moji.ai.data.model.SubCategoryDef
+import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.ui.QuickBookkeepingTemplate
+import com.moji.ai.ui.screens.CategoryEditorBottomSheet
+import com.moji.ai.ui.screens.ICostColorTagChip
+import com.moji.ai.ui.screens.TagEditorBottomSheet
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
 import com.moji.ai.ui.theme.ICostAssetImage
 import com.moji.ai.ui.theme.ICostBgGray
 import com.moji.ai.ui.theme.ICostBlueAccent
 import com.moji.ai.ui.theme.ICostCardWhite
+import com.moji.ai.ui.theme.ICostCategoryBadge
 import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
+import com.moji.ai.ui.theme.ICostDivider
+import com.moji.ai.ui.theme.ICostExpenseColor
 import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostIncomeColor
+import com.moji.ai.ui.theme.ICostPillGray
+import com.moji.ai.ui.theme.ICostSheetHeader
 import com.moji.ai.ui.theme.ICostSlateIcon
 import com.moji.ai.ui.theme.ICostSmoothBottomSheet
 import com.moji.ai.ui.theme.ICostTextPrimary
@@ -173,15 +194,32 @@ fun ICostCalculatorSheet(
     ledgers: List<String> = listOf("默认账本"),
     onSelectLedger: (String) -> Unit = {},
     visible: Boolean = true,
+    suspendedBySubpage: Boolean = false,
     editingTransaction: TransactionEntity? = null,
     initialType: TransactionType = TransactionType.EXPENSE,
     initialSourceWalletId: Long? = null,
     initialTargetWalletId: Long? = null,
     onDismiss: () -> Unit,
     onSaveTransaction: (TransactionEntity, keepOpen: Boolean) -> Unit,
-    onOpenAiSandbox: () -> Unit = {}
+    onOpenAiSandbox: () -> Unit = {},
+    onOpenCategoryManagement: (isExpense: Boolean) -> Unit = {},
+    onOpenTagManagement: () -> Unit = {},
+    templates: List<QuickBookkeepingTemplate> = emptyList(),
+    templateDraft: QuickBookkeepingTemplate? = null,
+    onConsumeTemplateDraft: () -> Unit = {},
+    onOpenTemplateManagement: () -> Unit = {},
+    onLoadPresetTemplates: () -> Unit = {},
+    onOpenCurrencyManagement: () -> Unit = {},
+    onOpenAgentTriage: () -> Unit = {}
 ) {
     val isEditing = editingTransaction != null
+    val expenseCategories by CategoryCatalog.expenseCategoriesFlow.collectAsState()
+    val incomeCategories by CategoryCatalog.incomeCategoriesFlow.collectAsState()
+    val catalogTags by TagCatalog.tagsFlow.collectAsState()
+    val tagRemapHistory by TagCatalog.remapHistoryFlow.collectAsState()
+    val customCurrencyRates by CurrencyRateManager.customRatesFlow.collectAsState()
+    var quickAddSubParent by remember { mutableStateOf<Pair<Boolean, CategoryDef>?>(null) }
+    var showQuickAddTagSheet by remember { mutableStateOf(false) }
     // 1:1 iCost 顶部三态：支出 | 收入 | 转账（若外部传入 REPAYMENT 则归在转账 tab 并在保存时自动判断目标账户）
     var txType by remember {
         val raw = editingTransaction?.type ?: initialType
@@ -191,9 +229,10 @@ fun ICostCalculatorSheet(
     }
 
     // 解析初始主分类与子分类
-    val initFullCategory = editingTransaction?.category ?: "餐饮"
+    val defaultExpName = expenseCategories.firstOrNull()?.name ?: "餐饮"
+    val initFullCategory = editingTransaction?.category ?: defaultExpName
     val initParts = initFullCategory.split("-")
-    var selectedMainCategory by remember { mutableStateOf(initParts.firstOrNull() ?: "餐饮") }
+    var selectedMainCategory by remember { mutableStateOf(initParts.firstOrNull() ?: defaultExpName) }
     var selectedSubCategory by remember { mutableStateOf(initParts.getOrNull(1) ?: "") }
 
     var expr by remember {
@@ -250,18 +289,57 @@ fun ICostCalculatorSheet(
     var inlineError by remember { mutableStateOf<String?>(null) }
     var showDiscardConfirm by remember { mutableStateOf(false) }
 
+    fun applyTemplateToDraft(tpl: QuickBookkeepingTemplate, resetZeroAmount: Boolean) {
+        val resolvedType = tpl.resolvedType()
+        txType = resolvedType
+        if (resolvedType == TransactionType.EXPENSE || resolvedType == TransactionType.INCOME) {
+            val activeList = if (resolvedType == TransactionType.EXPENSE) {
+                CategoryCatalog.expenseCategories
+            } else {
+                CategoryCatalog.incomeCategories
+            }
+            val parts = tpl.category.split("-")
+            val mainName = parts.firstOrNull().orEmpty()
+            val subName = parts.getOrNull(1).orEmpty()
+            val matchedMain = activeList.firstOrNull { it.name == mainName } ?: activeList.firstOrNull()
+            selectedMainCategory = matchedMain?.name ?: if (resolvedType == TransactionType.EXPENSE) "餐饮" else "工资"
+            selectedSubCategory = if (matchedMain != null && matchedMain.subCategories.any { it.name == subName }) {
+                subName
+            } else {
+                ""
+            }
+            val fallbackW = wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull()
+            sourceWalletId = (wallets.firstOrNull { it.id == tpl.walletId } ?: fallbackW)?.id
+            targetWalletId = null
+        } else {
+            sourceWalletId = wallets.firstOrNull { it.id == tpl.walletId }?.id
+            targetWalletId = wallets.firstOrNull { it.id == tpl.targetWalletId }?.id?.takeIf { it != sourceWalletId }
+        }
+        if (tpl.amountCents > 0L) {
+            expr = String.format(Locale.US, "%.2f", tpl.amountCents / 100.0).trimEnd('0').trimEnd('.')
+        } else if (resetZeroAmount) {
+            expr = ""
+        }
+        currency = CurrencyCode.fromCode(tpl.currency).name
+        tagText = TagCatalog.joinTags(TagCatalog.parseTags(tpl.tags))
+        noteText = tpl.note.ifBlank { tpl.title }
+        reimbursable = resolvedType == TransactionType.EXPENSE && tpl.reimbursable
+        inlineError = null
+    }
+
     // 每次唤起面板时同步重置表单状态，配合 keepWarm 预热实现 0ms 首帧唤醒
     LaunchedEffect(visible, editingTransaction, initialType, initialSourceWalletId, initialTargetWalletId) {
         if (visible) {
             val raw = editingTransaction?.type ?: initialType
             txType = if (raw == TransactionType.REPAYMENT) TransactionType.TRANSFER else raw
+            val fallbackExpName = CategoryCatalog.expenseCategories.firstOrNull()?.name ?: "餐饮"
             val fullCat = editingTransaction?.category ?: if (raw == TransactionType.INCOME) {
                 CategoryCatalog.incomeCategories.first().name
             } else {
-                "餐饮"
+                fallbackExpName
             }
             val parts = fullCat.split("-")
-            selectedMainCategory = parts.firstOrNull() ?: "餐饮"
+            selectedMainCategory = parts.firstOrNull() ?: fallbackExpName
             selectedSubCategory = parts.getOrNull(1) ?: ""
             expr = if (editingTransaction != null) {
                 String.format(Locale.US, "%.2f", editingTransaction.amountCents / 100.0).trimEnd('0').trimEnd('.')
@@ -288,6 +366,49 @@ fun ICostCalculatorSheet(
             isSubmitting = false
             inlineError = null
             showDiscardConfirm = false
+            if (templateDraft != null && editingTransaction == null) {
+                applyTemplateToDraft(templateDraft, resetZeroAmount = true)
+                onConsumeTemplateDraft()
+            }
+        }
+    }
+
+    LaunchedEffect(visible, templateDraft) {
+        if (visible && templateDraft != null && editingTransaction == null) {
+            applyTemplateToDraft(templateDraft, resetZeroAmount = true)
+            onConsumeTemplateDraft()
+        }
+    }
+
+    // 当用户在「分类管理」二级页中重命名或删除了当前选中的分类时，返回计算器后自动修正选中项
+    LaunchedEffect(expenseCategories, incomeCategories, txType) {
+        if ((txType == TransactionType.EXPENSE || txType == TransactionType.INCOME) &&
+            selectedMainCategory != CategoryCatalog.PENDING_TRIAGE_CATEGORY
+        ) {
+            val activeList = if (txType == TransactionType.EXPENSE) expenseCategories else incomeCategories
+            val matchedMain = activeList.firstOrNull { it.name == selectedMainCategory }
+            if (matchedMain == null) {
+                selectedMainCategory = activeList.firstOrNull()?.name ?: "餐饮"
+                selectedSubCategory = ""
+            } else if (selectedSubCategory.isNotBlank() && matchedMain.subCategories.none { it.name == selectedSubCategory }) {
+                selectedSubCategory = ""
+            }
+        }
+    }
+
+    // 当用户在「标签管理」二级页中重命名、合并或删除了草稿中的标签时，自动同步修正当前草稿的 tagText
+    var lastHandledTagRemapSeq by remember {
+        mutableLongStateOf(TagCatalog.remapHistoryFlow.value.lastOrNull()?.seq ?: 0L)
+    }
+    LaunchedEffect(tagRemapHistory) {
+        for (record in tagRemapHistory) {
+            if (record.seq > lastHandledTagRemapSeq) {
+                val mapped = TagCatalog.remapTagsString(tagText, record.oldTag, record.newTag)
+                if (mapped != null) {
+                    tagText = mapped
+                }
+                lastHandledTagRemapSeq = record.seq
+            }
         }
     }
 
@@ -295,6 +416,7 @@ fun ICostCalculatorSheet(
     var showDiscountDialog by remember { mutableStateOf(false) }
     var showFeeDialog by remember { mutableStateOf(false) }
     var showTagDialog by remember { mutableStateOf(false) }
+    var showTemplatePickerSheet by remember { mutableStateOf(false) }
     var showLedgerPicker by remember { mutableStateOf(false) }
     var showCurrencyPicker by remember { mutableStateOf(false) }
     var showDatePicker by remember { mutableStateOf(false) }
@@ -427,7 +549,15 @@ fun ICostCalculatorSheet(
             flashError("金额需大于 0")
             return
         }
-        val rate = CurrencyCode.fromCode(currency).defaultRateToCny
+        val rate = if (
+            editingTransaction != null &&
+            editingTransaction.currency.equals(currency, ignoreCase = true) &&
+            editingTransaction.exchangeRateToCny > 0.0
+        ) {
+            editingTransaction.exchangeRateToCny
+        } else {
+            CurrencyRateManager.getEffectiveRateToCny(currency)
+        }
         val cnyCents = (cents * rate).roundToLong()
         val discountCents = if (txType == TransactionType.EXPENSE) parseYuanToCents(discountYuanStr) ?: 0L else 0L
         // 非转账账单没有手续费输入框：编辑时保留原有手续费（如自动识别出的手续费），避免余额被悄悄改动
@@ -508,6 +638,8 @@ fun ICostCalculatorSheet(
             entryTimestamp
         }
 
+        val normalizedTags = TagCatalog.joinTags(TagCatalog.parseTags(tagText))
+
         // 编辑时基于原账单 copy，保留退款金额、关联账单、原始采集文本、AI 置信度等字段
         val entity = editingTransaction?.copy(
             ledgerName = targetLedger,
@@ -524,7 +656,7 @@ fun ICostCalculatorSheet(
             sourceWalletId = finalSourceId,
             targetWalletId = finalTargetId,
             reimbursable = finalReimbursable,
-            tags = tagText.trim(),
+            tags = normalizedTags,
             timestamp = finalTimestamp
         ) ?: TransactionEntity(
             ledgerName = targetLedger,
@@ -541,7 +673,7 @@ fun ICostCalculatorSheet(
             sourceWalletId = finalSourceId,
             targetWalletId = finalTargetId,
             reimbursable = finalReimbursable,
-            tags = tagText.trim(),
+            tags = normalizedTags,
             timestamp = finalTimestamp,
             captureSource = "MANUAL"
         )
@@ -562,9 +694,10 @@ fun ICostCalculatorSheet(
 
     // 新记一笔且已输入金额时，关闭前确认，避免误触丢失（X、返回键、下拉、点遮罩都会拦截）
     val hasUnsavedInput = !isEditing && !isSubmitting && expr.isNotEmpty()
+    val sheetVisible = visible && !suspendedBySubpage
     ICostSmoothBottomSheet(
         onDismissRequest = onDismiss,
-        visible = visible,
+        visible = sheetVisible,
         keepWarm = true,
         containerColor = ICostBgGray,
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
@@ -582,7 +715,7 @@ fun ICostCalculatorSheet(
         // 晚于抽屉自身注册，优先拦截系统返回键
         // 只在面板可见时注册：BackHandler 按注册先后决定优先级，常驻预热的面板若一直注册，
         // 会被之后打开的全屏页（钱包详情、日历）抢先处理返回键
-        if (visible) {
+        if (sheetVisible) {
             BackHandler(enabled = hasUnsavedInput) { showDiscardConfirm = true }
         }
 
@@ -642,7 +775,7 @@ fun ICostCalculatorSheet(
                         modes.forEach { (mode, label) ->
                             val selected = txType == mode
                             val modeBgColor by animateColorAsState(
-                                targetValue = if (selected) Color(0xFFECECEE) else Color.Transparent,
+                                targetValue = if (selected) ICostPillGray else Color.Transparent,
                                 animationSpec = tween(200),
                                 label = "CalcModePillBg"
                             )
@@ -739,12 +872,13 @@ fun ICostCalculatorSheet(
             ) { currentMode ->
                 if (currentMode == TransactionType.EXPENSE || currentMode == TransactionType.INCOME) {
                     val categories = if (currentMode == TransactionType.EXPENSE) {
-                        CategoryCatalog.expenseCategories
+                        expenseCategories
                     } else {
-                        CategoryCatalog.incomeCategories
+                        incomeCategories
                     }
-                    val activeColor = if (currentMode == TransactionType.EXPENSE) ICostCoralRed else ICostGreenIncome
-                    val rows = remember(categories) { categories.chunked(5) }
+                    val activeColor = if (currentMode == TransactionType.EXPENSE) ICostExpenseColor else ICostIncomeColor
+                    val gridCells: List<CategoryDef?> = remember(categories) { categories + listOf(null) }
+                    val rows = remember(gridCells) { gridCells.chunked(5) }
                     val categoryScrollState = rememberScrollState()
 
                     Column(
@@ -752,23 +886,90 @@ fun ICostCalculatorSheet(
                             .fillMaxSize()
                             .verticalScroll(categoryScrollState)
                             .padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
+                        // 顶部「待梳理（交由 Agent）」免分类记账胶囊 + 「✨ Agent 梳理」主入口
+                        val isPendingSelected = selectedMainCategory == CategoryCatalog.PENDING_TRIAGE_CATEGORY
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = if (isPendingSelected) Color(0xFF6366F1) else ICostPillGray,
+                                modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
+                                    if (isPendingSelected) {
+                                        selectedMainCategory = categories.firstOrNull()?.name ?: "餐饮"
+                                        selectedSubCategory = ""
+                                    } else {
+                                        selectedMainCategory = CategoryCatalog.PENDING_TRIAGE_CATEGORY
+                                        selectedSubCategory = ""
+                                    }
+                                }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    ICostAssetImage(
+                                        assetFile = "setting_auto.webp",
+                                        tint = if (isPendingSelected) Color.White else Color(0xFF6366F1),
+                                        modifier = Modifier.size(14.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(5.dp))
+                                    Text(
+                                        text = if (isPendingSelected) "✓ 待梳理（交由 Agent）" else "待梳理（交由 Agent）",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isPendingSelected) Color.White else ICostTextPrimary
+                                    )
+                                }
+                            }
+
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = Color(0xFFEEF2FF),
+                                modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
+                                    onOpenAgentTriage()
+                                }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "✨ Agent 梳理",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF4F46E5)
+                                    )
+                                }
+                            }
+                        }
+
                         rows.forEach { rowItems ->
                             Column {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                        rowItems.forEach { cat ->
+                                    rowItems.forEach { cat ->
+                                        if (cat != null) {
                                             val isSelected = selectedMainCategory == cat.name
-                                            val circleBg = if (isSelected) activeColor else Color(0xFFECECEE)
+                                            val circleBg = if (isSelected) activeColor else ICostPillGray
                                             Column(
                                                 modifier = Modifier
                                                     .weight(1f)
                                                     .iCostPressScale(pressedScale = 0.88f) {
-                                                        selectedMainCategory = cat.name
-                                                        selectedSubCategory = ""
+                                                        if (isSelected && selectedSubCategory.isEmpty()) {
+                                                            // 再次轻点已选中的主分类可取消选择，进入「待梳理」状态
+                                                            selectedMainCategory = CategoryCatalog.PENDING_TRIAGE_CATEGORY
+                                                            selectedSubCategory = ""
+                                                        } else {
+                                                            selectedMainCategory = cat.name
+                                                            selectedSubCategory = ""
+                                                        }
                                                     },
                                                 horizontalAlignment = Alignment.CenterHorizontally
                                             ) {
@@ -817,44 +1018,86 @@ fun ICostCalculatorSheet(
                                                     maxLines = 1
                                                 )
                                             }
-                                        }
-                                        repeat(5 - rowItems.size) {
-                                            Spacer(modifier = Modifier.weight(1f))
-                                        }
-                                    }
-
-                                    // 1:1 展开当前选中主分类的 5 列浅灰圆角二级分类盒（高响应临界阻尼弹簧过渡）
-                                    val expandedCat = rowItems.firstOrNull {
-                                        it.name == selectedMainCategory && it.subCategories.isNotEmpty()
-                                    }
-                                    AnimatedVisibility(
-                                        visible = expandedCat != null,
-                                        enter = expandVertically(
-                                            animationSpec = spring(dampingRatio = 0.94f, stiffness = 620f)
-                                        ) + fadeIn(tween(140)),
-                                        exit = shrinkVertically(
-                                            animationSpec = spring(dampingRatio = 0.96f, stiffness = 680f)
-                                        ) + fadeOut(tween(110))
-                                    ) {
-                                        if (expandedCat != null) {
-                                            Column {
-                                                Spacer(modifier = Modifier.height(5.dp))
-                                                Surface(
-                                                    shape = RoundedCornerShape(16.dp),
-                                                    color = Color(0xFFECECEE),
-                                                    modifier = Modifier.fillMaxWidth()
+                                        } else {
+                                            // 一级分类网格末尾「管理」快捷入口
+                                            Column(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .iCostPressScale(pressedScale = 0.88f) {
+                                                        onOpenCategoryManagement(currentMode == TransactionType.EXPENSE)
+                                                    },
+                                                horizontalAlignment = Alignment.CenterHorizontally
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier.size(48.dp),
+                                                    contentAlignment = Alignment.Center
                                                 ) {
-                                                    val subRows = expandedCat.subCategories.chunked(5)
-                                                    Column(
-                                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                                                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(44.dp)
+                                                            .clip(CircleShape)
+                                                            .background(ICostPillGray),
+                                                        contentAlignment = Alignment.Center
                                                     ) {
-                                                        subRows.forEach { subRow ->
-                                                            Row(
-                                                                modifier = Modifier.fillMaxWidth(),
-                                                                horizontalArrangement = Arrangement.SpaceBetween
-                                                            ) {
-                                                                subRow.forEach { sub ->
+                                                        ICostAssetImage(
+                                                            assetFile = "setting_category.webp",
+                                                            tint = ICostSlateIcon,
+                                                            modifier = Modifier.size(22.dp)
+                                                        )
+                                                    }
+                                                }
+                                                Spacer(modifier = Modifier.height(3.dp))
+                                                Text(
+                                                    text = "管理",
+                                                    fontSize = 12.sp,
+                                                    color = ICostTextSecondary,
+                                                    fontWeight = FontWeight.Medium,
+                                                    maxLines = 1
+                                                )
+                                            }
+                                        }
+                                    }
+                                    repeat(5 - rowItems.size) {
+                                        Spacer(modifier = Modifier.weight(1f))
+                                    }
+                                }
+
+                                // 1:1 展开当前选中主分类的 5 列浅灰圆角二级分类盒（高响应临界阻尼弹簧过渡）
+                                val expandedCat = rowItems.filterNotNull().firstOrNull {
+                                    it.name == selectedMainCategory && it.subCategories.isNotEmpty()
+                                }
+                                AnimatedVisibility(
+                                    visible = expandedCat != null,
+                                    enter = expandVertically(
+                                        animationSpec = spring(dampingRatio = 0.94f, stiffness = 620f)
+                                    ) + fadeIn(tween(140)),
+                                    exit = shrinkVertically(
+                                        animationSpec = spring(dampingRatio = 0.96f, stiffness = 680f)
+                                    ) + fadeOut(tween(110))
+                                ) {
+                                    if (expandedCat != null) {
+                                        Column {
+                                            Spacer(modifier = Modifier.height(5.dp))
+                                            Surface(
+                                                shape = RoundedCornerShape(16.dp),
+                                                color = ICostPillGray,
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                val subCells: List<SubCategoryDef?> = remember(expandedCat.subCategories) {
+                                                    expandedCat.subCategories + listOf(null)
+                                                }
+                                                val subRows = remember(subCells) { subCells.chunked(5) }
+                                                Column(
+                                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                                ) {
+                                                    subRows.forEach { subRow ->
+                                                        Row(
+                                                            modifier = Modifier.fillMaxWidth(),
+                                                            horizontalArrangement = Arrangement.SpaceBetween
+                                                        ) {
+                                                            subRow.forEach { sub ->
+                                                                if (sub != null) {
                                                                     val subSelected = selectedSubCategory == sub.name
                                                                     Column(
                                                                         modifier = Modifier
@@ -886,9 +1129,43 @@ fun ICostCalculatorSheet(
                                                                             maxLines = 1
                                                                         )
                                                                     }
+                                                                } else {
+                                                                    // 展开二级分类盒末尾「+ 新建」快捷胶囊
+                                                                    Column(
+                                                                        modifier = Modifier
+                                                                            .weight(1f)
+                                                                            .iCostPressScale(pressedScale = 0.88f) {
+                                                                                quickAddSubParent = (currentMode == TransactionType.EXPENSE) to expandedCat
+                                                                            },
+                                                                        horizontalAlignment = Alignment.CenterHorizontally
+                                                                    ) {
+                                                                        Box(
+                                                                            modifier = Modifier
+                                                                                .size(30.dp)
+                                                                                .clip(CircleShape)
+                                                                                .background(Color(0xFFE0E0E4)),
+                                                                            contentAlignment = Alignment.Center
+                                                                        ) {
+                                                                            Icon(
+                                                                                imageVector = Icons.Default.Add,
+                                                                                contentDescription = "新建二级分类",
+                                                                                tint = ICostSlateIcon,
+                                                                                modifier = Modifier.size(16.dp)
+                                                                            )
+                                                                        }
+                                                                        Spacer(modifier = Modifier.height(1.dp))
+                                                                        Text(
+                                                                            text = "+ 新建",
+                                                                            fontSize = 11.sp,
+                                                                            color = ICostTextSecondary,
+                                                                            fontWeight = FontWeight.Medium,
+                                                                            maxLines = 1
+                                                                        )
+                                                                    }
                                                                 }
-                                                                repeat(5 - subRow.size) {
-                                                                    Spacer(modifier = Modifier.weight(1f))
+                                                            }
+                                                            repeat(5 - subRow.size) {
+                                                                Spacer(modifier = Modifier.weight(1f))
                                                             }
                                                         }
                                                     }
@@ -1081,12 +1358,35 @@ fun ICostCalculatorSheet(
                         }
                     }
                     item {
+                        val parsedTags = remember(tagText) { TagCatalog.parseTags(tagText) }
+                        val hasSelectedTags = parsedTags.isNotEmpty()
+                        val primaryTagColor = if (hasSelectedTags) {
+                            Color(TagCatalog.resolveTagColorHex(parsedTags.first()))
+                        } else {
+                            ICostBlueAccent
+                        }
                         ICostOptionPill(
                             assetFile = "opt_tag.webp",
-                            label = if (tagText.isNotBlank()) "#$tagText" else "标签",
-                            active = tagText.isNotBlank(),
+                            label = if (hasSelectedTags) {
+                                parsedTags.joinToString(" · ") { "#$it" }
+                            } else {
+                                "标签"
+                            },
+                            active = hasSelectedTags,
+                            activeBg = primaryTagColor.copy(alpha = 0.16f),
+                            activeTextColor = primaryTagColor,
                             onClick = { showTagDialog = true }
                         )
+                    }
+                    if (!isEditing) {
+                        item {
+                            ICostOptionPill(
+                                assetFile = "setting_template.webp",
+                                label = if (templates.isEmpty()) "模板" else "模板 (${templates.size})",
+                                active = false,
+                                onClick = { showTemplatePickerSheet = true }
+                            )
+                        }
                     }
                 }
 
@@ -1118,8 +1418,8 @@ fun ICostCalculatorSheet(
             ) {
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
                     val amountColor = when (txType) {
-                        TransactionType.EXPENSE -> ICostCoralRed
-                        TransactionType.INCOME -> ICostGreenIncome
+                        TransactionType.EXPENSE -> ICostExpenseColor
+                        TransactionType.INCOME -> ICostIncomeColor
                         else -> Color(0xFFF5A623)
                     }
                     val displayExpr = if (expr.isEmpty()) "${sym}0.00" else "$sym$expr"
@@ -1133,6 +1433,42 @@ fun ICostCalculatorSheet(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.graphicsLayer { translationX = amountShake.value * density }
                     )
+                    if (currency != "CNY") {
+                        val effectiveRate = remember(currency, customCurrencyRates) {
+                            CurrencyRateManager.getEffectiveRateToCny(currency)
+                        }
+                        val isCustom = customCurrencyRates.containsKey(currency)
+                        val previewVal = evaluateExpr(expr)?.takeIf { it > 0.0 } ?: 0.0
+                        val previewCny = String.format(Locale.US, "%.2f", previewVal * effectiveRate)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "≈ ¥$previewCny CNY · 1 $currency = ¥${CurrencyRateManager.formatRate(effectiveRate)}" +
+                                    if (isCustom) " (自定义)" else "",
+                                fontFamily = ICDinFontFamily,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostBlueAccent,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "汇率设置",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostBlueAccent,
+                                modifier = Modifier
+                                    .clickable { onOpenCurrencyManagement() }
+                                    .padding(start = 8.dp, top = 2.dp, bottom = 2.dp)
+                            )
+                        }
+                    }
                     AnimatedVisibility(
                         visible = inlineError != null,
                         enter = expandVertically(tween(160)) + fadeIn(tween(160)),
@@ -1148,7 +1484,7 @@ fun ICostCalculatorSheet(
                     }
 
                     Spacer(modifier = Modifier.height(6.dp))
-                    HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFF0F0F0))
+                    HorizontalDivider(thickness = 0.5.dp, color = ICostDivider)
                     Spacer(modifier = Modifier.height(6.dp))
 
                     Row(
@@ -1157,7 +1493,7 @@ fun ICostCalculatorSheet(
                     ) {
                         Surface(
                             shape = RoundedCornerShape(14.dp),
-                            color = if (timeManuallySet) Color(0xFFEAF2FF) else Color(0xFFF3F3F5),
+                            color = if (timeManuallySet) Color(0xFFEAF2FF) else ICostPillGray,
                             modifier = Modifier.iCostPressScale(pressedScale = 0.92f) { showDatePicker = true }
                         ) {
                             Row(
@@ -1222,8 +1558,8 @@ fun ICostCalculatorSheet(
                             val isDoneKey = key == "DONE"
                             val bgColor = if (isDoneKey) {
                                 when (txType) {
-                                    TransactionType.EXPENSE -> ICostCoralRed
-                                    TransactionType.INCOME -> ICostGreenIncome
+                                    TransactionType.EXPENSE -> ICostExpenseColor
+                                    TransactionType.INCOME -> ICostIncomeColor
                                     else -> Color(0xFFF5A623)
                                 }
                             } else {
@@ -1420,28 +1756,104 @@ fun ICostCalculatorSheet(
     }
 
     if (showCurrencyPicker) {
+        val currentExprValue = evaluateExpr(expr)?.takeIf { it > 0.0 } ?: 0.0
         AlertDialog(
             onDismissRequest = { showCurrencyPicker = false },
             containerColor = ICostCardWhite,
-            title = { Text("切换记账币种", fontWeight = FontWeight.Bold) },
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("切换记账币种", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = ICostBlueAccent.copy(alpha = 0.12f),
+                        modifier = Modifier.clickable {
+                            showCurrencyPicker = false
+                            onOpenCurrencyManagement()
+                        }
+                    ) {
+                        Text(
+                            text = "汇率设置",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ICostBlueAccent,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                }
+            },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 380.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
                     CurrencyCode.entries.forEach { item ->
+                        val isSelected = currency == item.name
+                        val rate = customCurrencyRates[item.name] ?: item.defaultRateToCny
+                        val isCustom = item != CurrencyCode.CNY && customCurrencyRates.containsKey(item.name)
                         Surface(
                             onClick = {
                                 currency = item.name
                                 showCurrencyPicker = false
                             },
                             shape = RoundedCornerShape(12.dp),
-                            color = if (currency == item.name) Color(0xFFEAF2FF) else ICostCellGray,
+                            color = if (isSelected) Color(0xFFEAF2FF) else ICostCellGray,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text(
-                                text = "${item.displayName} (${item.symbol})",
-                                fontWeight = if (currency == item.name) FontWeight.Bold else FontWeight.Medium,
-                                color = if (currency == item.name) ICostBlueAccent else ICostTextPrimary,
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                            )
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "${item.displayName} (${item.symbol})",
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isSelected) ICostBlueAccent else ICostTextPrimary,
+                                        fontSize = 14.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (item == CurrencyCode.CNY) {
+                                        Text(
+                                            text = "本位币",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ICostTextSecondary
+                                        )
+                                    } else {
+                                        Text(
+                                            text = "1 ${item.name} = ¥${CurrencyRateManager.formatRate(rate)}" +
+                                                if (isCustom) " (自定义)" else "",
+                                            fontFamily = ICDinFontFamily,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isCustom || isSelected) ICostBlueAccent else ICostTextSecondary
+                                        )
+                                    }
+                                }
+                                if (item != CurrencyCode.CNY && currentExprValue > 0.0) {
+                                    val cnyPreview = String.format(Locale.US, "%.2f", currentExprValue * rate)
+                                    Text(
+                                        text = "当次 ${item.symbol}${String.format(Locale.US, "%.2f", currentExprValue)} ≈ ¥$cnyPreview CNY",
+                                        fontFamily = ICDinFontFamily,
+                                        fontSize = 11.sp,
+                                        color = ICostTextSecondary,
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -1549,24 +1961,441 @@ fun ICostCalculatorSheet(
     }
 
     if (showTagDialog) {
-        AlertDialog(
+        val selectedTags = remember(tagText) { TagCatalog.parseTags(tagText) }
+        ICostSmoothBottomSheet(
             onDismissRequest = { showTagDialog = false },
-            containerColor = ICostCardWhite,
-            title = { Text("添加标签", fontWeight = FontWeight.Bold) },
-            text = {
-                ICostFormField(
-                    value = tagText,
-                    onValueChange = { tagText = it },
-                    label = "标签名称",
-                    placeholder = "如：聚餐、出差、固定开支",
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+            containerColor = ICostBgGray,
+            showDragHandle = false
+        ) { requestDismiss ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+            ) {
+                ICostSheetHeader(
+                    title = "选择标签",
+                    subtitle = if (selectedTags.isEmpty()) {
+                        "可多选标签，用于跨分类归集出差、聚餐、分期等场景账单"
+                    } else {
+                        "已选 ${selectedTags.size} 个：${selectedTags.joinToString(" · ") { "#$it" }}"
+                    },
+                    onClose = requestDismiss
                 )
-            },
-            confirmButton = {
-                TextButton(onClick = { showTagDialog = false }) { Text("确定") }
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 460.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // 顶部快捷操作栏：+ 快速新建标签 | 管理标签 | 清空已选
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = ICostBlueAccent,
+                            modifier = Modifier.iCostPressScale(pressedScale = 0.94f) {
+                                showQuickAddTagSheet = true
+                            }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "快速新建标签",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = ICostCardWhite,
+                            modifier = Modifier.iCostPressScale(pressedScale = 0.94f) {
+                                showTagDialog = false
+                                onOpenTagManagement()
+                            }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                ICostAssetImage(
+                                    assetFile = "setting_tag.webp",
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = "管理标签",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = ICostTextPrimary
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.weight(1f))
+
+                        if (selectedTags.isNotEmpty()) {
+                            TextButton(
+                                onClick = { tagText = "" },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "清空已选",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostCoralRed
+                                )
+                            }
+                        }
+                    }
+
+                    // 按分组展示全部标签彩色胶囊（支持多选点选切换）
+                    val groupedTags = remember(catalogTags) {
+                        val order = TagCatalog.presetGroups
+                        catalogTags
+                            .groupBy { it.groupName.ifBlank { "日常" } }
+                            .entries
+                            .sortedBy { (grp, _) ->
+                                val idx = order.indexOf(grp)
+                                if (idx >= 0) idx else order.size
+                            }
+                    }
+
+                    groupedTags.forEach { (groupName, groupItems) ->
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = ICostCardWhite,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(
+                                    text = groupName,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostTextSecondary
+                                )
+
+                                @OptIn(ExperimentalLayoutApi::class)
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    groupItems.forEach { tagDef ->
+                                        val isSelected = tagDef.name in selectedTags
+                                        val baseColor = Color(tagDef.colorHex)
+                                        Surface(
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = if (isSelected) baseColor else baseColor.copy(alpha = 0.12f),
+                                            modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
+                                                val updated = if (isSelected) {
+                                                    selectedTags.filterNot { it == tagDef.name }
+                                                } else {
+                                                    selectedTags + tagDef.name
+                                                }
+                                                tagText = TagCatalog.joinTags(updated)
+                                            }
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                if (isSelected) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Check,
+                                                        contentDescription = null,
+                                                        tint = Color.White,
+                                                        modifier = Modifier.size(13.dp)
+                                                    )
+                                                } else {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(7.dp)
+                                                            .clip(CircleShape)
+                                                            .background(baseColor)
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.width(5.dp))
+                                                Text(
+                                                    text = "#${tagDef.name}",
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (isSelected) Color.White else baseColor
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Button(
+                        onClick = requestDismiss,
+                        colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 14.dp)
+                            .height(46.dp)
+                    ) {
+                        Text(
+                            text = if (selectedTags.isEmpty()) "完成" else "完成（已选 ${selectedTags.size} 个）",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (showQuickAddTagSheet) {
+        TagEditorBottomSheet(
+            existingTag = null,
+            existingTagNames = catalogTags.map { it.name },
+            initialGroup = "日常",
+            onDismiss = { showQuickAddTagSheet = false },
+            onSave = { newTagName, newColorHex, newGroupName, requestDismiss ->
+                val res = TagCatalog.addTag(
+                    name = newTagName,
+                    colorHex = newColorHex,
+                    groupName = newGroupName
+                )
+                if (res.isSuccess) {
+                    val created = res.getOrThrow()
+                    val currentList = TagCatalog.parseTags(tagText)
+                    tagText = TagCatalog.joinTags(currentList + created.name)
+                    requestDismiss()
+                }
             }
         )
+    }
+
+    quickAddSubParent?.let { (isExp, parentCat) ->
+        CategoryEditorBottomSheet(
+            isExpense = isExp,
+            isSubCategory = true,
+            parentName = parentCat.name,
+            existingName = null,
+            initialIconAsset = parentCat.assetFile,
+            siblingNames = parentCat.subCategories.map { it.name },
+            onDismiss = { quickAddSubParent = null },
+            onSave = { newSubName, newAsset, requestDismiss ->
+                val res = CategoryCatalog.addSubCategory(
+                    isExpense = isExp,
+                    parentName = parentCat.name,
+                    subName = newSubName,
+                    assetFile = newAsset
+                )
+                if (res.isSuccess) {
+                    selectedMainCategory = parentCat.name
+                    selectedSubCategory = newSubName
+                    requestDismiss()
+                }
+            }
+        )
+    }
+
+    if (showTemplatePickerSheet) {
+        CalculatorTemplatePickerSheet(
+            templates = templates,
+            onDismiss = { showTemplatePickerSheet = false },
+            onSelectTemplate = { tpl, requestDismiss ->
+                applyTemplateToDraft(tpl, resetZeroAmount = false)
+                requestDismiss()
+            },
+            onOpenTemplateManagement = {
+                showTemplatePickerSheet = false
+                onOpenTemplateManagement()
+            },
+            onLoadPresetTemplates = onLoadPresetTemplates
+        )
+    }
+}
+
+@Composable
+private fun CalculatorTemplatePickerSheet(
+    templates: List<QuickBookkeepingTemplate>,
+    onDismiss: () -> Unit,
+    onSelectTemplate: (QuickBookkeepingTemplate, requestDismiss: () -> Unit) -> Unit,
+    onOpenTemplateManagement: () -> Unit,
+    onLoadPresetTemplates: () -> Unit
+) {
+    ICostSmoothBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = ICostBgGray,
+        showDragHandle = false
+    ) { requestDismiss ->
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+        ) {
+            ICostSheetHeader(
+                title = "选择记账模板",
+                subtitle = "点选模板一键预填分类、账户、标签、备注与预设金额",
+                onClose = requestDismiss
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = ICostCardWhite,
+                        modifier = Modifier.iCostPressScale(pressedScale = 0.94f) {
+                            onOpenTemplateManagement()
+                        }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            ICostAssetImage(
+                                assetFile = "setting_template.webp",
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = "管理模板",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = ICostTextPrimary
+                            )
+                        }
+                    }
+                    if (templates.isEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = Color(0xFFFFF3E0),
+                            modifier = Modifier.iCostPressScale(pressedScale = 0.94f) {
+                                onLoadPresetTemplates()
+                            }
+                        ) {
+                            Text(
+                                text = "一键加载常用预设",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFD97706),
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                            )
+                        }
+                    }
+                }
+
+                if (templates.isEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = ICostCardWhite,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "暂无记账模板，点击上方「一键加载常用预设」或「管理模板」新建",
+                            fontSize = 13.sp,
+                            color = ICostTextSecondary,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp)
+                        )
+                    }
+                } else {
+                    templates.forEach { tpl ->
+                        val resolvedType = tpl.resolvedType()
+                        val amtColor = when (resolvedType) {
+                            TransactionType.INCOME -> ICostIncomeColor
+                            TransactionType.TRANSFER -> ICostAmberGold
+                            else -> ICostExpenseColor
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = ICostCardWhite,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .iCostPressScale(pressedScale = 0.96f) {
+                                    onSelectTemplate(tpl, requestDismiss)
+                                }
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                ICostCategoryBadge(
+                                    category = if (resolvedType == TransactionType.TRANSFER) "内部转账" else tpl.category,
+                                    type = resolvedType,
+                                    size = 34.dp
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = tpl.title,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = buildString {
+                                            append(if (resolvedType == TransactionType.TRANSFER) "内部转账" else tpl.category.replace("-", " · "))
+                                            if (tpl.reimbursable && resolvedType == TransactionType.EXPENSE) append(" · 待报销")
+                                            if (tpl.tags.isNotBlank()) append(" · #${TagCatalog.parseTags(tpl.tags).joinToString(" #")}")
+                                        },
+                                        fontSize = 11.sp,
+                                        color = ICostTextSecondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (tpl.amountCents > 0L) {
+                                        formatMoneyCents(tpl.amountCents, tpl.currency)
+                                    } else {
+                                        "待填金额"
+                                    },
+                                    fontFamily = ICDinFontFamily,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (tpl.amountCents > 0L) amtColor else Color(0xFFD97706)
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+        }
     }
 }
 

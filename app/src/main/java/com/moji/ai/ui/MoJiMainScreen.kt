@@ -56,6 +56,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -131,8 +133,13 @@ import com.moji.ai.ai.SmartConditionRule
 import com.moji.ai.data.backup.BackupAndCsvTransferEngine
 import com.moji.ai.data.backup.CsvParsePreviewResult
 import com.moji.ai.data.backup.WebDavConfig
+import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AppearanceSettingsConfig
+import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.PasswordProtectionConfig
+import com.moji.ai.data.model.ReminderSettingsConfig
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.service.CaptureEventOutcome
 import com.moji.ai.service.CaptureObservabilityLogEntry
@@ -141,12 +148,21 @@ import com.moji.ai.service.RomKeepAliveGuideHelper
 import com.moji.ai.update.AppUpdateConfig
 import com.moji.ai.update.ReleaseUpdateInfo
 import com.moji.ai.update.UpdateCheckState
+import com.moji.ai.ui.components.AgentTriageBottomSheet
 import com.moji.ai.ui.components.ICostCalculatorSheet
 import com.moji.ai.ui.components.MonthlyCalendarSheet
 import com.moji.ai.ui.components.TransactionDetailSheet
+import com.moji.ai.ui.screens.AppLockUnlockOverlay
+import com.moji.ai.ui.screens.AppearanceManagementScreen
+import com.moji.ai.ui.screens.CategoryManagementScreen
+import com.moji.ai.ui.screens.CurrencyManagementScreen
 import com.moji.ai.ui.screens.ICostAssetsScreen
 import com.moji.ai.ui.screens.ICostLedgerHomeScreen
 import com.moji.ai.ui.screens.ICostStatisticsScreen
+import com.moji.ai.ui.screens.PasswordProtectionScreen
+import com.moji.ai.ui.screens.ReminderManagementScreen
+import com.moji.ai.ui.screens.TagManagementScreen
+import com.moji.ai.ui.screens.TemplateManagementScreen
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
 import com.moji.ai.ui.theme.ICostAssetImage
@@ -160,6 +176,7 @@ import com.moji.ai.ui.theme.ICostDivider
 import com.moji.ai.ui.theme.ICostFormCard
 import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostPillGray
 import com.moji.ai.ui.theme.ICostSheetHeader
 import com.moji.ai.ui.theme.ICostSmoothBottomSheet
 import com.moji.ai.ui.theme.ICostTextMuted
@@ -200,6 +217,19 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val appUpdateConfig by viewModel.appUpdateConfig.collectAsState()
     val appUpdateState by viewModel.appUpdateState.collectAsState()
     val pendingOpenTxId by viewModel.pendingOpenTransactionId.collectAsState()
+    val pendingTemplateDraftForCalc by viewModel.pendingTemplateDraftForCalc.collectAsState()
+    val expenseCategories by viewModel.expenseCategories.collectAsState()
+    val incomeCategories by viewModel.incomeCategories.collectAsState()
+    val tags by viewModel.tags.collectAsState()
+    val customCurrencyRates by viewModel.customCurrencyRates.collectAsState()
+    val passwordProtectionConfig by viewModel.passwordProtectionConfig.collectAsState()
+    val isAppSessionLocked by viewModel.isAppSessionLocked.collectAsState()
+    val reminderSettingsConfig by viewModel.reminderSettingsConfig.collectAsState()
+    val appearanceSettingsConfig by viewModel.appearanceSettingsConfig.collectAsState()
+    val pendingOpenBookkeepingSheet by viewModel.pendingOpenBookkeepingSheet.collectAsState()
+    val triageReport by viewModel.triageReport.collectAsState()
+    val isTriaging by viewModel.isTriaging.collectAsState()
+    val showAgentTriageSheet by viewModel.showAgentTriageSheet.collectAsState()
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) } // 0: 账本, 1: 资产, 2: 统计
     // 每个 Tab 独立保存 rememberSaveable 状态（搜索词、折叠状态、统计周期等），切换 Tab 回来不丢失
@@ -232,19 +262,47 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var calcInitialType by remember { mutableStateOf(TransactionType.EXPENSE) }
     var calcInitialSourceWalletId by remember { mutableStateOf<Long?>(null) }
     var calcInitialTargetWalletId by remember { mutableStateOf<Long?>(null) }
+    var templateDraftForCalc by remember { mutableStateOf<QuickBookkeepingTemplate?>(null) }
 
-    // 全屏二级页面状态：账单详情、收支日历、设置页、智能记账页、资产子页面
+    // 全屏二级页面状态：账单详情、收支日历、设置页、智能记账页、分类管理页、标签管理页、模板管理页、资产子页面
     var inspectingTx by remember { mutableStateOf<TransactionEntity?>(null) }
     var calendarMonthTxs by remember { mutableStateOf<List<TransactionEntity>?>(null) }
-    var showSettingsPage by remember { mutableStateOf(false) }
-    var showSmartBookkeepingPage by remember { mutableStateOf(false) }
-    var isAssetSubpageOpen by remember { mutableStateOf(false) }
+    var showSettingsPage by rememberSaveable { mutableStateOf(false) }
+    var showSmartBookkeepingPage by rememberSaveable { mutableStateOf(false) }
+    var showCategoryManagementPage by rememberSaveable { mutableStateOf(false) }
+    var categoryManagementInitialExpense by rememberSaveable { mutableStateOf(true) }
+    var showTagManagementPage by rememberSaveable { mutableStateOf(false) }
+    var showTemplateManagementPage by rememberSaveable { mutableStateOf(false) }
+    var templateManagementAutoCreate by rememberSaveable { mutableStateOf(false) }
+    var showCurrencyManagementPage by rememberSaveable { mutableStateOf(false) }
+    var showPasswordProtectionPage by rememberSaveable { mutableStateOf(false) }
+    var showReminderManagementPage by rememberSaveable { mutableStateOf(false) }
+    var showAppearanceManagementPage by rememberSaveable { mutableStateOf(false) }
+    var isAssetSubpageOpen by rememberSaveable { mutableStateOf(false) }
+    val settingsListState = rememberLazyListState()
+    val appearanceListState = rememberLazyListState()
 
     val hasFullScreenOverlay = inspectingTx != null ||
         calendarMonthTxs != null ||
         showSettingsPage ||
         showSmartBookkeepingPage ||
+        showCategoryManagementPage ||
+        showTagManagementPage ||
+        showTemplateManagementPage ||
+        showCurrencyManagementPage ||
+        showPasswordProtectionPage ||
+        showReminderManagementPage ||
+        showAppearanceManagementPage ||
         isAssetSubpageOpen
+
+    LaunchedEffect(pendingTemplateDraftForCalc) {
+        val draft = pendingTemplateDraftForCalc ?: return@LaunchedEffect
+        showTemplateManagementPage = false
+        editingTx = null
+        templateDraftForCalc = draft
+        showCalculatorSheet = true
+        viewModel.consumePendingTemplateDraftForCalc()
+    }
 
     // AI 沙盒与模型配置弹窗状态
     var showAiSandboxSheet by remember { mutableStateOf(false) }
@@ -279,6 +337,13 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             selectedTab = 0
             showSettingsPage = false
             showSmartBookkeepingPage = false
+            showCategoryManagementPage = false
+            showTagManagementPage = false
+            showTemplateManagementPage = false
+            showCurrencyManagementPage = false
+            showPasswordProtectionPage = false
+            showReminderManagementPage = false
+            showAppearanceManagementPage = false
             calendarMonthTxs = null
             showCalculatorSheet = false
             editingTx = null
@@ -291,6 +356,30 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             inspectingTx = matchedTx
             viewModel.consumePendingOpenTransactionDetail()
         }
+    }
+
+    // 响应点击定时记账提醒通知：自动关闭二级全屏页、切回账本首页并拉起记账计算器面板
+    LaunchedEffect(pendingOpenBookkeepingSheet) {
+        if (!pendingOpenBookkeepingSheet) return@LaunchedEffect
+        selectedTab = 0
+        showSettingsPage = false
+        showSmartBookkeepingPage = false
+        showCategoryManagementPage = false
+        showTagManagementPage = false
+        showTemplateManagementPage = false
+        showCurrencyManagementPage = false
+        showPasswordProtectionPage = false
+        showReminderManagementPage = false
+        showAppearanceManagementPage = false
+        calendarMonthTxs = null
+        inspectingTx = null
+        editingTx = null
+        templateDraftForCalc = null
+        calcInitialType = TransactionType.EXPENSE
+        calcInitialSourceWalletId = null
+        calcInitialTargetWalletId = null
+        showCalculatorSheet = true
+        viewModel.consumePendingOpenBookkeepingSheet()
     }
 
     Box(
@@ -370,6 +459,11 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onClickTransaction = { tx -> inspectingTx = tx },
                     templates = templates,
                     onApplyTemplate = { tpl -> viewModel.applyQuickTemplateNow(tpl) },
+                    onOpenTemplateManagement = { autoCreate ->
+                        templateManagementAutoCreate = autoCreate
+                        showTemplateManagementPage = true
+                    },
+                    onLoadPresetTemplates = { viewModel.addPresetTemplates() },
                     onEditTransaction = { toEdit ->
                         editingTx = toEdit
                         showCalculatorSheet = true
@@ -382,7 +476,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                             viewModel.refundExpense(tx.id, remainYuan, tx.sourceWalletId, "侧滑快捷全额退款")
                         }
                     },
-                    onDeleteTransaction = { txId -> viewModel.deleteTransaction(txId) }
+                    onDeleteTransaction = { txId -> viewModel.deleteTransaction(txId) },
+                    onOpenAgentTriage = { viewModel.openAgentTriageSheet() }
             )
         }
 
@@ -424,7 +519,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onDeleteInstallmentPlan = { viewModel.deleteInstallmentPlan(it) },
                     onAddRecurringRule = { title, amountYuan, currency, category, walletId, frequency ->
                         viewModel.addRecurringRule(title, amountYuan, currency, category, walletId, frequency)
-                    }
+                    },
+                    customCurrencyRates = customCurrencyRates
             )
         }
 
@@ -436,7 +532,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     initialMonth = selectedMonth,
                     currentLedger = currentLedger,
                     hideAmounts = hideAssetAmounts,
-                    onOpenSettingsPage = { showSettingsPage = true }
+                    onOpenSettingsPage = { showSettingsPage = true },
+                    onSelectTransaction = { tx -> inspectingTx = tx },
+                    customCurrencyRates = customCurrencyRates
             )
         }
 
@@ -498,48 +596,6 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             )
         }
 
-        // 全屏账单详情页面（05_detail_full.png）—— 丝滑侧滑推入转场
-        AnimatedVisibility(
-            visible = activeTx != null,
-            enter = slideInHorizontally(
-                initialOffsetX = { it },
-                animationSpec = tween(280, easing = FastOutSlowInEasing)
-            ) + fadeIn(tween(200)),
-            exit = slideOutHorizontally(
-                targetOffsetX = { it },
-                animationSpec = tween(240, easing = FastOutSlowInEasing)
-            ) + fadeOut(tween(180))
-        ) {
-            cachedInspectingTx?.let { detailTx ->
-                TransactionDetailSheet(
-                    tx = detailTx,
-                    wallets = wallets,
-                    onDismiss = { inspectingTx = null },
-                    onEdit = { toEdit ->
-                        editingTx = toEdit
-                        showCalculatorSheet = true
-                    },
-                    onRefund = { expId, yuan, recvId, note ->
-                        viewModel.refundExpense(expId, yuan, recvId, note)
-                    },
-                    onSettleReimburse = { expId, recvId ->
-                        viewModel.settleReimbursement(expId, recvId)
-                    },
-                    onDelete = { txId ->
-                        viewModel.deleteTransaction(txId)
-                        inspectingTx = null
-                    },
-                    onSaveAsTemplate = { tplTx ->
-                        viewModel.saveTemplateFromTransaction(tplTx)
-                    },
-                    onSplitTransaction = { expId, catA, yuanA, catB, noteB ->
-                        viewModel.splitExpenseTransaction(expId, catA, yuanA, catB, noteB)
-                    },
-                    onDuplicate = { tx -> viewModel.duplicateTransactionNow(tx) }
-                )
-            }
-        }
-
         // 全屏「设置」页面（09_settings_full.png）—— 丝滑侧滑推入转场
         AnimatedVisibility(
             visible = showSettingsPage,
@@ -577,7 +633,285 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 },
                 onOpenAppUpdate = {
                     showAppUpdateSheet = true
+                },
+                expenseCategoryCount = expenseCategories.size,
+                incomeCategoryCount = incomeCategories.size,
+                onOpenCategoryManagement = {
+                    categoryManagementInitialExpense = true
+                    showCategoryManagementPage = true
+                },
+                tagCount = tags.size,
+                onOpenTagManagement = {
+                    showTagManagementPage = true
+                },
+                templateCount = templates.size,
+                onOpenTemplateManagement = {
+                    templateManagementAutoCreate = false
+                    showTemplateManagementPage = true
+                },
+                customCurrencyRateCount = customCurrencyRates.size,
+                onOpenCurrencyManagement = {
+                    showCurrencyManagementPage = true
+                },
+                passwordProtectionConfig = passwordProtectionConfig,
+                onOpenPasswordProtection = {
+                    showPasswordProtectionPage = true
+                },
+                reminderSettingsConfig = reminderSettingsConfig,
+                onOpenReminderManagement = {
+                    showReminderManagementPage = true
+                },
+                appearanceSettingsConfig = appearanceSettingsConfig,
+                onOpenAppearanceManagement = {
+                    showAppearanceManagementPage = true
+                },
+                listState = settingsListState
+            )
+        }
+
+        // 全屏「分类管理」页面（对齐 setting_category.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showCategoryManagementPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            CategoryManagementScreen(
+                expenseCategories = expenseCategories,
+                incomeCategories = incomeCategories,
+                initialIsExpense = categoryManagementInitialExpense,
+                onBack = { showCategoryManagementPage = false },
+                onAddPrimaryCategory = { isExp, name, asset, onDone ->
+                    viewModel.addPrimaryCategory(isExp, name, asset, onDone)
+                },
+                onUpdatePrimaryCategory = { isExp, oldName, newName, asset, onDone ->
+                    viewModel.updatePrimaryCategory(isExp, oldName, newName, asset, onDone)
+                },
+                onMovePrimaryCategory = { isExp, idx, delta ->
+                    viewModel.movePrimaryCategory(isExp, idx, delta)
+                },
+                onDeletePrimaryCategory = { isExp, name, migrateTo, onDone ->
+                    viewModel.deletePrimaryCategoryAndMigrate(isExp, name, migrateTo, onDone)
+                },
+                onAddSubCategory = { isExp, parent, sub, asset, onDone ->
+                    viewModel.addSubCategory(isExp, parent, sub, asset, onDone)
+                },
+                onUpdateSubCategory = { isExp, parent, oldSub, newSub, asset, onDone ->
+                    viewModel.updateSubCategory(isExp, parent, oldSub, newSub, asset, onDone)
+                },
+                onMoveSubCategory = { isExp, parent, idx, delta ->
+                    viewModel.moveSubCategory(isExp, parent, idx, delta)
+                },
+                onDeleteSubCategory = { isExp, parent, sub, migrateTo, onDone ->
+                    viewModel.deleteSubCategoryAndMigrate(isExp, parent, sub, migrateTo, onDone)
+                },
+                onRestoreDefaults = { isExp, mergeOnly ->
+                    viewModel.restoreDefaultCategories(isExp, mergeOnly)
+                },
+                onCountCategoryTransactions = { cat, includeSub, isExp ->
+                    viewModel.countTransactionsByCategory(cat, includeSub, isExp)
+                },
+                onOpenAgentTriage = { viewModel.openAgentTriageSheet() }
+            )
+        }
+
+        // 全屏「标签管理」页面（对齐 setting_tag.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showTagManagementPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            TagManagementScreen(
+                tags = tags,
+                transactions = transactions,
+                wallets = wallets,
+                onBack = { showTagManagementPage = false },
+                onAddTag = { name, colorHex, groupName, onDone ->
+                    viewModel.addTag(name, colorHex, groupName, onDone)
+                },
+                onUpdateTag = { oldName, newName, colorHex, groupName, onDone ->
+                    viewModel.updateTag(oldName, newName, colorHex, groupName, onDone)
+                },
+                onMoveTag = { index, delta ->
+                    viewModel.moveTag(index, delta)
+                },
+                onMergeTag = { sourceName, targetName, onDone ->
+                    viewModel.mergeTag(sourceName, targetName, onDone)
+                },
+                onDeleteTag = { tagName, cascadeRemoveFromHistory, replacementTagName, onDone ->
+                    viewModel.deleteTag(tagName, cascadeRemoveFromHistory, replacementTagName, onDone)
+                },
+                onRestoreDefaults = { mergeOnly ->
+                    viewModel.restoreDefaultTags(mergeOnly)
+                },
+                onCountTagTransactions = { tagName ->
+                    viewModel.countTransactionsByTag(tagName)
+                },
+                onInspectTransaction = { tx ->
+                    inspectingTx = tx
                 }
+            )
+        }
+
+        // 全屏「记账模板」管理页面（对齐 setting_template.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showTemplateManagementPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            TemplateManagementScreen(
+                templates = templates,
+                wallets = wallets,
+                expenseCategories = expenseCategories,
+                incomeCategories = incomeCategories,
+                tags = tags,
+                autoOpenCreateOnEnter = templateManagementAutoCreate,
+                onConsumeAutoOpenCreate = { templateManagementAutoCreate = false },
+                onBack = { showTemplateManagementPage = false },
+                onApplyTemplateNow = { tpl -> viewModel.applyQuickTemplateNow(tpl) },
+                onFillCalculator = { tpl ->
+                    viewModel.requestFillCalculatorWithTemplate(tpl, "已将模板「${tpl.title}」填入记账计算器")
+                },
+                onSaveTemplate = { draft, onDone -> viewModel.upsertTemplate(draft, onDone) },
+                onDuplicateTemplate = { id -> viewModel.duplicateTemplate(id) },
+                onMoveTemplate = { idx, delta -> viewModel.moveTemplate(idx, delta) },
+                onDeleteTemplate = { id -> viewModel.deleteTemplate(id) },
+                onClearAllTemplates = { viewModel.clearAllTemplates() },
+                onLoadPresetTemplates = { viewModel.addPresetTemplates() }
+            )
+        }
+
+        // 全屏「货币和汇率」管理页面（对齐 setting_currency.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showCurrencyManagementPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            CurrencyManagementScreen(
+                customRates = customCurrencyRates,
+                wallets = wallets,
+                onBack = { showCurrencyManagementPage = false },
+                onSaveCustomRate = { code, rawRate, onDone ->
+                    viewModel.updateCustomCurrencyRate(code, rawRate, onDone)
+                },
+                onResetCurrencyRate = { code ->
+                    viewModel.resetCurrencyRate(code)
+                },
+                onResetAllCustomRates = {
+                    viewModel.resetAllCustomCurrencyRates()
+                }
+            )
+        }
+
+        // 全屏「密码保护」管理页面（对齐 setting_password.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showPasswordProtectionPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            PasswordProtectionScreen(
+                config = passwordProtectionConfig,
+                onBack = { showPasswordProtectionPage = false },
+                onVerifyPin = { pin -> viewModel.verifyAppLockPin(pin, unlockSessionOnSuccess = false) },
+                onEnableProtection = { newPin, confirmPin ->
+                    viewModel.enablePasswordProtection(newPin = newPin, confirmPin = confirmPin)
+                },
+                onChangePin = { oldPin, newPin, confirmPin ->
+                    viewModel.changeAppLockPin(oldPin = oldPin, newPin = newPin, confirmPin = confirmPin)
+                },
+                onDisableProtection = { currentPin ->
+                    viewModel.disablePasswordProtection(currentPin = currentPin)
+                },
+                onUpdateLockTimeout = { seconds ->
+                    viewModel.updateAppLockTimeout(seconds)
+                },
+                onUpdateHideRecentTaskPreview = { hide ->
+                    viewModel.updateHideRecentTaskPreview(hide)
+                },
+                onUpdatePinHint = { rawHint ->
+                    viewModel.updateAppLockPinHint(rawHint)
+                },
+                onLockNow = {
+                    viewModel.lockAppSessionNow()
+                }
+            )
+        }
+
+        // 全屏「定时提醒」管理页面（对齐 setting_time.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showReminderManagementPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            ReminderManagementScreen(
+                config = reminderSettingsConfig,
+                onBack = { showReminderManagementPage = false },
+                onSetMasterEnabled = { enabled -> viewModel.setReminderMasterEnabled(enabled) },
+                onSetSkipIfRecordedToday = { skip -> viewModel.setReminderSkipIfRecordedToday(skip) },
+                onUpsertSlot = { item, onDone -> viewModel.upsertReminderSlot(item, onDone) },
+                onToggleSlotEnabled = { slotId, enabled -> viewModel.toggleReminderSlotEnabled(slotId, enabled) },
+                onDeleteSlot = { slotId -> viewModel.deleteReminderSlot(slotId) },
+                onSendTestReminder = { viewModel.sendTestDailyReminder() }
+            )
+        }
+
+        // 全屏「外观显示」管理页面（对齐 setting_appearance.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showAppearanceManagementPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            AppearanceManagementScreen(
+                config = appearanceSettingsConfig,
+                onSelectThemeMode = { mode -> viewModel.setThemeMode(mode) },
+                onSelectAmountColorScheme = { scheme -> viewModel.setAmountColorScheme(scheme) },
+                onSelectFontScalePreset = { preset -> viewModel.setFontScalePreset(preset) },
+                onToggleShowThousandSeparator = { show -> viewModel.setShowThousandSeparator(show) },
+                onToggleHideTrailingZeroDecimals = { hide -> viewModel.setHideTrailingZeroDecimals(hide) },
+                onResetDefaults = { viewModel.resetAppearanceDefaults() },
+                onBack = { showAppearanceManagementPage = false },
+                listState = appearanceListState
             )
         }
 
@@ -608,8 +942,53 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 observabilityLogs = observabilityLogs,
                 onReplayLog = { entry -> viewModel.simulateCapturedEvent(entry.rawText, entry.packageName) },
                 onClearLogs = { viewModel.clearObservabilityLogs() },
+                onOpenAgentTriage = { viewModel.openAgentTriageSheet() },
                 onBack = { showSmartBookkeepingPage = false }
             )
+        }
+
+        // 全屏账单详情页面（05_detail_full.png）—— 位于二级页面之上，支持从标签管理/统计/日历/首页直接下钻查看
+        AnimatedVisibility(
+            visible = activeTx != null,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            cachedInspectingTx?.let { detailTx ->
+                TransactionDetailSheet(
+                    tx = detailTx,
+                    wallets = wallets,
+                    onDismiss = { inspectingTx = null },
+                    onEdit = { toEdit ->
+                        showCategoryManagementPage = false
+                        showTagManagementPage = false
+                        editingTx = toEdit
+                        showCalculatorSheet = true
+                    },
+                    onRefund = { expId, yuan, recvId, note ->
+                        viewModel.refundExpense(expId, yuan, recvId, note)
+                    },
+                    onSettleReimburse = { expId, recvId ->
+                        viewModel.settleReimbursement(expId, recvId)
+                    },
+                    onDelete = { txId ->
+                        viewModel.deleteTransaction(txId)
+                        inspectingTx = null
+                    },
+                    onSaveAsTemplate = { tplTx ->
+                        viewModel.saveTemplateFromTransaction(tplTx)
+                    },
+                    onSplitTransaction = { expId, catA, yuanA, catB, noteB ->
+                        viewModel.splitExpenseTransaction(expId, catA, yuanA, catB, noteB)
+                    },
+                    onDuplicate = { tx -> viewModel.duplicateTransactionNow(tx) }
+                )
+            }
         }
 
         // 1:1 iCost 分类+计算器记账面板（04_add_record_sheet.png，后台常驻 keepWarm 预热，点击「+」0ms 首帧 120Hz 上滑）
@@ -620,6 +999,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 ledgers = ledgers,
                 onSelectLedger = { viewModel.selectLedger(it) },
                 visible = showCalculatorSheet,
+                suspendedBySubpage = showCategoryManagementPage || showTagManagementPage || showTemplateManagementPage || showCurrencyManagementPage || showPasswordProtectionPage || showReminderManagementPage || showAppearanceManagementPage,
                 editingTransaction = editingTx,
                 initialType = calcInitialType,
                 initialSourceWalletId = calcInitialSourceWalletId,
@@ -627,15 +1007,48 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onDismiss = {
                     showCalculatorSheet = false
                     editingTx = null
+                    templateDraftForCalc = null
                 },
                 onSaveTransaction = { tx, keepOpen ->
                     viewModel.saveOrUpdateTransaction(tx)
                     if (!keepOpen) {
                         showCalculatorSheet = false
                         editingTx = null
+                        templateDraftForCalc = null
                     }
                 },
-                onOpenAiSandbox = { showAiSandboxSheet = true }
+                onOpenAiSandbox = { showAiSandboxSheet = true },
+                onOpenCategoryManagement = { isExpense ->
+                    categoryManagementInitialExpense = isExpense
+                    showCategoryManagementPage = true
+                },
+                onOpenTagManagement = {
+                    showTagManagementPage = true
+                },
+                templates = templates,
+                templateDraft = templateDraftForCalc,
+                onConsumeTemplateDraft = { templateDraftForCalc = null },
+                onOpenTemplateManagement = {
+                    templateManagementAutoCreate = false
+                    showTemplateManagementPage = true
+                },
+                onLoadPresetTemplates = { viewModel.addPresetTemplates() },
+                onOpenCurrencyManagement = {
+                    showCurrencyManagementPage = true
+                },
+                onOpenAgentTriage = { viewModel.openAgentTriageSheet() }
+            )
+        }
+
+        if (showAgentTriageSheet) {
+            AgentTriageBottomSheet(
+                report = triageReport,
+                isTriaging = isTriaging,
+                onDismiss = { viewModel.dismissAgentTriageSheet() },
+                onRescan = { viewModel.runAgentBillTriage() },
+                onApplySelected = { bills, newCats, newRules, newMemories ->
+                    viewModel.applyAgentTriageProposal(bills, newCats, newRules, newMemories)
+                }
             )
         }
         // AI 静默识账沙盒测试面板
@@ -772,6 +1185,20 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 actionColor = Color(0xFF6AA8FF)
             )
         }
+
+        // 顶层全屏安全锁解锁遮罩层：当会话处于锁定态时覆盖全部界面并拦截系统返回键
+        AnimatedVisibility(
+            visible = isAppSessionLocked && passwordProtectionConfig.enabled,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(180))
+        ) {
+            AppLockUnlockOverlay(
+                pinHint = passwordProtectionConfig.pinHint,
+                onVerifyPin = { pin ->
+                    viewModel.verifyAppLockPin(pin, unlockSessionOnSuccess = true)
+                }
+            )
+        }
     }
 
     if (showBudgetDialog) {
@@ -865,6 +1292,7 @@ private fun ICostFloatingBottomBar(
             animationSpec = spring(dampingRatio = 0.86f, stiffness = 640f),
             label = "BottomBarPillPos"
         )
+        val pillColor = ICostPillGray
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -881,8 +1309,8 @@ private fun ICostFloatingBottomBar(
                     spotColor = Color.Black.copy(alpha = 0.14f)
                 )
                 .clip(RoundedCornerShape(29.dp))
-                .background(Color.White.copy(alpha = 0.90f))
-                .border(0.8.dp, Color.White.copy(alpha = 0.96f), RoundedCornerShape(29.dp))
+                .background(ICostCardWhite.copy(alpha = 0.94f))
+                .border(0.8.dp, ICostDivider, RoundedCornerShape(29.dp))
         ) {
             Row(
                 modifier = Modifier
@@ -893,7 +1321,7 @@ private fun ICostFloatingBottomBar(
                         val pillX = slotWidth * pillIndicatorPos.coerceIn(0f, 2f)
                         val r = 25.dp.toPx()
                         drawRoundRect(
-                            color = Color(0xFFE9E9EC),
+                            color = pillColor,
                             topLeft = androidx.compose.ui.geometry.Offset(pillX, 0f),
                             size = androidx.compose.ui.geometry.Size(slotWidth, size.height),
                             cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r)
@@ -961,8 +1389,8 @@ private fun ICostFloatingBottomBar(
                     spotColor = Color.Black.copy(alpha = 0.14f)
                 )
                 .clip(CircleShape)
-                .background(Color.White.copy(alpha = 0.90f))
-                .border(0.8.dp, Color.White.copy(alpha = 0.96f), CircleShape),
+                .background(ICostCardWhite.copy(alpha = 0.94f))
+                .border(0.8.dp, ICostDivider, CircleShape),
             contentAlignment = Alignment.Center
         ) {
             ICostAssetImage(
@@ -1054,7 +1482,23 @@ private fun ICostSettingsFullScreen(
     onOpenCsvExport: () -> Unit = {},
     onOpenWebDavSync: () -> Unit = {},
     onOpenBatchReimburse: () -> Unit = {},
-    onOpenAppUpdate: () -> Unit = {}
+    onOpenAppUpdate: () -> Unit = {},
+    expenseCategoryCount: Int = 24,
+    incomeCategoryCount: Int = 10,
+    onOpenCategoryManagement: () -> Unit = {},
+    tagCount: Int = 8,
+    onOpenTagManagement: () -> Unit = {},
+    templateCount: Int = 0,
+    onOpenTemplateManagement: () -> Unit = {},
+    customCurrencyRateCount: Int = 0,
+    onOpenCurrencyManagement: () -> Unit = {},
+    passwordProtectionConfig: PasswordProtectionConfig = PasswordProtectionConfig(),
+    onOpenPasswordProtection: () -> Unit = {},
+    reminderSettingsConfig: ReminderSettingsConfig = ReminderSettingsConfig(),
+    onOpenReminderManagement: () -> Unit = {},
+    appearanceSettingsConfig: AppearanceSettingsConfig = AppearanceSettingsConfig(),
+    onOpenAppearanceManagement: () -> Unit = {},
+    listState: LazyListState = rememberLazyListState()
 ) {
     BackHandler(onBack = onBack)
 
@@ -1085,6 +1529,7 @@ private fun ICostSettingsFullScreen(
         SubpageHeader(title = "设置", onBack = onBack)
 
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(18.dp),
             contentPadding = PaddingValues(bottom = 48.dp)
@@ -1108,7 +1553,11 @@ private fun ICostSettingsFullScreen(
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "MoJi 默记 · v${BuildConfig.VERSION_NAME}",
+                                text = if (BuildConfig.IS_QA_BUILD) {
+                                    "默记 QA · v${BuildConfig.VERSION_NAME}"
+                                } else {
+                                    "MoJi 默记 · v${BuildConfig.VERSION_NAME}"
+                                },
                                 fontSize = 17.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = ICostTextPrimary
@@ -1181,13 +1630,52 @@ private fun ICostSettingsFullScreen(
                 SettingsSectionTitle("更多功能")
                 SettingsGroupCard(
                     rows = listOf(
-                        SettingRowDef("setting_category.webp", "分类管理"),
-                        SettingRowDef("setting_tag.webp", "标签管理"),
-                        SettingRowDef("setting_template.webp", "记账模板"),
-                        SettingRowDef("setting_currency.webp", "货币和汇率"),
-                        SettingRowDef("setting_password.webp", "密码保护"),
-                        SettingRowDef("setting_time.webp", "定时提醒"),
-                        SettingRowDef("setting_appearance.webp", "外观显示")
+                        SettingRowDef(
+                            "setting_category.webp",
+                            "分类管理",
+                            "${expenseCategoryCount + incomeCategoryCount} 个分类",
+                            onClick = onOpenCategoryManagement
+                        ),
+                        SettingRowDef(
+                            "setting_tag.webp",
+                            "标签管理",
+                            "$tagCount 个标签",
+                            onClick = onOpenTagManagement
+                        ),
+                        SettingRowDef(
+                            "setting_template.webp",
+                            "记账模板",
+                            "$templateCount 个模板",
+                            onClick = onOpenTemplateManagement
+                        ),
+                        SettingRowDef(
+                            "setting_currency.webp",
+                            "货币和汇率",
+                            if (customCurrencyRateCount > 0) {
+                                "已自定义 $customCurrencyRateCount 项汇率"
+                            } else {
+                                "本位币 CNY · ${CurrencyCode.entries.size} 种货币"
+                            },
+                            onClick = onOpenCurrencyManagement
+                        ),
+                        SettingRowDef(
+                            "setting_password.webp",
+                            "密码保护",
+                            passwordProtectionConfig.settingsTrailingText,
+                            onClick = onOpenPasswordProtection
+                        ),
+                        SettingRowDef(
+                            "setting_time.webp",
+                            "定时提醒",
+                            reminderSettingsConfig.settingsTrailingText,
+                            onClick = onOpenReminderManagement
+                        ),
+                        SettingRowDef(
+                            "setting_appearance.webp",
+                            "外观显示",
+                            appearanceSettingsConfig.settingsTrailingText,
+                            onClick = onOpenAppearanceManagement
+                        )
                     )
                 )
             }
@@ -1284,6 +1772,7 @@ private fun ICostSmartBookkeepingFullScreen(
     observabilityLogs: List<CaptureObservabilityLogEntry> = emptyList(),
     onReplayLog: (CaptureObservabilityLogEntry) -> Unit = {},
     onClearLogs: () -> Unit = {},
+    onOpenAgentTriage: () -> Unit = {},
     onBack: () -> Unit
 ) {
     BackHandler(onBack = onBack)
@@ -1442,8 +1931,27 @@ private fun ICostSmartBookkeepingFullScreen(
                         modifier = Modifier.weight(1f),
                         bottomPadding = 0.dp
                     )
-                    TextButton(onClick = { showAddSmartRuleDialog = true }) {
-                        Text("新增规则", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = ICostBlueAccent)
+                    TextButton(
+                        onClick = { showAddSmartRuleDialog = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("手动新增", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = ICostTextSecondary)
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xFF4F46E5),
+                        modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
+                            onOpenAgentTriage()
+                        }
+                    ) {
+                        Text(
+                            text = "✨ Agent 梳理",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
                     }
                 }
                 Surface(
@@ -2739,7 +3247,7 @@ private fun BackupAndCsvTransferSheet(
                 item {
                     ICostFormCard {
                         Text(
-                            text = "支持坚果云、Nextcloud、群晖、Alist 等标准 WebDAV 服务。坚果云地址示例：https://dav.jianguoyun.com/dav/MoJi/",
+                            text = "支持坚果云、Nextcloud、群晖、Alist 等标准 WebDAV 服务。坚果云地址示例：${WebDavSyncClient.DEFAULT_SERVER_URL}",
                             fontSize = 12.sp,
                             color = ICostTextSecondary
                         )
@@ -2747,7 +3255,7 @@ private fun BackupAndCsvTransferSheet(
                             value = davUrl,
                             onValueChange = { davUrl = it },
                             label = "服务器地址",
-                            placeholder = "https://dav.jianguoyun.com/dav/MoJi/",
+                            placeholder = WebDavSyncClient.DEFAULT_SERVER_URL,
                             modifier = Modifier.fillMaxWidth(),
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                             singleLine = true
@@ -2786,7 +3294,7 @@ private fun BackupAndCsvTransferSheet(
                             value = davFileName,
                             onValueChange = { davFileName = it },
                             label = "备份文件名",
-                            placeholder = "moji_latest.mojibackup",
+                            placeholder = WebDavSyncClient.DEFAULT_REMOTE_FILE_NAME,
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = true
                         )
@@ -2797,7 +3305,7 @@ private fun BackupAndCsvTransferSheet(
                         serverUrl = davUrl.trim(),
                         username = davUser.trim(),
                         appPassword = davPassword.trim(),
-                        remoteFileName = davFileName.trim().ifBlank { "moji_latest.mojibackup" },
+                        remoteFileName = davFileName.trim().ifBlank { WebDavSyncClient.DEFAULT_REMOTE_FILE_NAME },
                         lastSyncTimeMillis = webDavConfig.lastSyncTimeMillis
                     )
                     Row(
@@ -2877,7 +3385,7 @@ private fun BackupAndCsvTransferSheet(
                                 serverUrl = davUrl.trim(),
                                 username = davUser.trim(),
                                 appPassword = davPassword.trim(),
-                                remoteFileName = davFileName.trim().ifBlank { "moji_latest.mojibackup" },
+                                remoteFileName = davFileName.trim().ifBlank { WebDavSyncClient.DEFAULT_REMOTE_FILE_NAME },
                                 lastSyncTimeMillis = webDavConfig.lastSyncTimeMillis
                             )
                         ) { msg -> localBanner = msg }

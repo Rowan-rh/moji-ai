@@ -18,6 +18,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -58,6 +60,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -81,7 +84,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AppearanceConfigManager
+import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.TagCatalog
+import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.ui.QuickBookkeepingTemplate
 import com.moji.ai.ui.components.ICostConfirmDialog
@@ -99,8 +106,10 @@ import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
+import com.moji.ai.ui.theme.ICostExpenseColor
 import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostIncomeColor
 import com.moji.ai.ui.theme.ICostSearchBg
 import com.moji.ai.ui.theme.ICostSwipeActionRow
 import com.moji.ai.ui.theme.ICostTextPrimary
@@ -140,13 +149,17 @@ fun ICostLedgerHomeScreen(
     onClickTransaction: (TransactionEntity) -> Unit,
     templates: List<QuickBookkeepingTemplate> = emptyList(),
     onApplyTemplate: (QuickBookkeepingTemplate) -> Unit = {},
+    onOpenTemplateManagement: (autoCreate: Boolean) -> Unit = {},
+    onLoadPresetTemplates: () -> Unit = {},
     onEditTransaction: (TransactionEntity) -> Unit = {},
     onDuplicateTransaction: (TransactionEntity) -> Unit = {},
     onToggleReimburse: (TransactionEntity) -> Unit = {},
     onQuickRefund: (TransactionEntity) -> Unit = {},
-    onDeleteTransaction: (Long) -> Unit = {}
+    onDeleteTransaction: (Long) -> Unit = {},
+    onOpenAgentTriage: () -> Unit = {}
 ) {
     val walletMap = remember(wallets) { wallets.associateBy { it.id } }
+    val catalogTags by TagCatalog.tagsFlow.collectAsState()
     // 以下界面状态在切换底部 Tab 后保留
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var showQuickTemplatesBar by rememberSaveable { mutableStateOf(false) }
@@ -198,6 +211,11 @@ fun ICostLedgerHomeScreen(
     }
 
     val monthBalanceCents = monthIncomeCents - monthExpenseCents
+
+    // 待梳理账单统计（跨月份统计当前账本所有待梳理账单，提示一键交由 Agent 归档）
+    val pendingTriageList = remember(transactions, currentLedger) {
+        transactions.filter { it.ledgerName == currentLedger && CategoryCatalog.isPendingTriage(it.category) }
+    }
 
     // 报销统计
     val pendingReimburseList = remember(allMonthTransactions) {
@@ -278,6 +296,13 @@ fun ICostLedgerHomeScreen(
                                 }
                             )
                             DropdownMenuItem(
+                                text = { Text("✨ Agent 梳理账单", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFF4F46E5)) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    onOpenAgentTriage()
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("设置月度预算", fontSize = 14.sp) },
                                 onClick = {
                                     showMoreMenu = false
@@ -329,7 +354,7 @@ fun ICostLedgerHomeScreen(
 
                 Surface(
                     shape = RoundedCornerShape(14.dp),
-                    color = if (showQuickTemplatesBar) Color(0xFFFFF3E0) else Color(0xFFEBEBEB),
+                    color = if (showQuickTemplatesBar) Color(0xFFFFF3E0) else ICostSearchBg,
                     modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
                         showQuickTemplatesBar = !showQuickTemplatesBar
                     }
@@ -340,7 +365,7 @@ fun ICostLedgerHomeScreen(
                     ) {
                         ICostAssetImage(
                             assetFile = "detail_template.webp",
-                            tint = if (showQuickTemplatesBar) Color(0xFFF59E0B) else Color(0xFF666666),
+                            tint = if (showQuickTemplatesBar) Color(0xFFF59E0B) else ICostTextSecondary,
                             modifier = Modifier.size(13.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
@@ -351,9 +376,71 @@ fun ICostLedgerHomeScreen(
                                 else -> "快捷模板 (${templates.size})"
                             },
                             fontSize = 12.sp,
-                            color = if (showQuickTemplatesBar) Color(0xFFD97706) else Color(0xFF666666),
+                            color = if (showQuickTemplatesBar) Color(0xFFD97706) else ICostTextSecondary,
                             fontWeight = FontWeight.Medium
                         )
+                    }
+                }
+            }
+        }
+
+        // 2.2 当账本存在「待梳理」账单时，展示顶部醒目提示胶囊，一键唤起 Agent 梳理
+        if (pendingTriageList.isNotEmpty()) {
+            item {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFFEEF2FF),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .iCostPressScale(pressedScale = 0.96f) {
+                            onOpenAgentTriage()
+                        }
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF6366F1)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            ICostAssetImage(
+                                assetFile = "setting_auto.webp",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "有 ${pendingTriageList.size} 笔「待梳理」账单待归档",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF3730A3)
+                            )
+                            Text(
+                                text = "点击交由 Agent 自动识别分类并提炼规则",
+                                fontSize = 11.sp,
+                                color = Color(0xFF4F46E5)
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFF4F46E5)
+                        ) {
+                            Text(
+                                text = "✨ 立即梳理",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                            )
+                        }
                     }
                 }
             }
@@ -382,31 +469,107 @@ fun ICostLedgerHomeScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "快捷模板（点一下直接记账）",
+                                text = "快捷模板（点一下直接记账或预填）",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = ICostTextSecondary
                             )
-                            Text(
-                                text = "左滑账单可编辑、删除",
-                                fontSize = 11.sp,
-                                color = ICostTextSecondary
-                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = ICostCellGray,
+                                    modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
+                                        onOpenTemplateManagement(false)
+                                    }
+                                ) {
+                                    Text(
+                                        text = "管理",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary,
+                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                    )
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = ICostBlueAccent.copy(alpha = 0.12f),
+                                    modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
+                                        onOpenTemplateManagement(true)
+                                    }
+                                ) {
+                                    Text(
+                                        text = "+ 新建",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostBlueAccent,
+                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         if (templates.isEmpty()) {
-                            Text(
-                                text = "还没有模板。在账单详情点「存为模板」即可添加",
-                                fontSize = 13.sp,
-                                color = ICostTextSecondary,
-                                modifier = Modifier.padding(vertical = 6.dp)
-                            )
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "还没有快捷记账模板，可新建或一键加载常用预设",
+                                    fontSize = 12.sp,
+                                    color = ICostTextSecondary
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = ICostBlueAccent,
+                                        modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
+                                            onOpenTemplateManagement(true)
+                                        }
+                                    ) {
+                                        Text(
+                                            text = "+ 新建模板",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White,
+                                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = Color(0xFFFFF3E0),
+                                        modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
+                                            onLoadPresetTemplates()
+                                        }
+                                    ) {
+                                        Text(
+                                            text = "一键加载常用预设",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFFD97706),
+                                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                }
+                            }
                         }
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             items(templates, key = { it.id }) { tpl ->
-                                val tplType = runCatching { TransactionType.valueOf(tpl.typeName) }
-                                    .getOrDefault(TransactionType.EXPENSE)
-                                val tplIsIncome = tplType == TransactionType.INCOME
+                                val tplType = tpl.resolvedType()
+                                val amtColor = when (tplType) {
+                                    TransactionType.INCOME -> ICostIncomeColor
+                                    TransactionType.TRANSFER -> ICostAmberGold
+                                    else -> ICostExpenseColor
+                                }
+                                val amtPrefix = when (tplType) {
+                                    TransactionType.INCOME -> "+"
+                                    TransactionType.TRANSFER -> "⇄ "
+                                    else -> "-"
+                                }
                                 Surface(
                                     shape = RoundedCornerShape(14.dp),
                                     color = ICostCellGray,
@@ -419,7 +582,7 @@ fun ICostLedgerHomeScreen(
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         ICostCategoryBadge(
-                                            category = tpl.category,
+                                            category = if (tplType == TransactionType.TRANSFER) "内部转账" else tpl.category,
                                             type = tplType,
                                             size = 28.dp
                                         )
@@ -429,15 +592,26 @@ fun ICostLedgerHomeScreen(
                                                 text = tpl.title,
                                                 fontSize = 13.sp,
                                                 fontWeight = FontWeight.Bold,
-                                                color = ICostTextPrimary
+                                                color = ICostTextPrimary,
+                                                maxLines = 1
                                             )
-                                            Text(
-                                                text = (if (tplIsIncome) "+" else "-") +
-                                                    formatMoneyCents(tpl.amountCents, tpl.currency),
-                                                fontFamily = ICDinFontFamily,
-                                                fontSize = 12.sp,
-                                                color = if (tplIsIncome) ICostGreenIncome else ICostCoralRed
-                                            )
+                                            if (tpl.amountCents > 0L) {
+                                                Text(
+                                                    text = amtPrefix + formatMoneyCents(tpl.amountCents, tpl.currency),
+                                                    fontFamily = ICDinFontFamily,
+                                                    fontSize = 12.sp,
+                                                    color = amtColor,
+                                                    maxLines = 1
+                                                )
+                                            } else {
+                                                Text(
+                                                    text = "待填金额",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(0xFFD97706),
+                                                    maxLines = 1
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -537,7 +711,7 @@ fun ICostLedgerHomeScreen(
 
                 Surface(
                     shape = RoundedCornerShape(14.dp),
-                    color = Color(0xFFEBEBEB),
+                    color = ICostSearchBg,
                     modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
                         onOpenCalendar(allMonthTransactions)
                     }
@@ -545,7 +719,7 @@ fun ICostLedgerHomeScreen(
                     Text(
                         text = "收支日历",
                         fontSize = 12.sp,
-                        color = Color(0xFF666666),
+                        color = ICostTextSecondary,
                         fontWeight = FontWeight.Medium,
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
                     )
@@ -582,7 +756,7 @@ fun ICostLedgerHomeScreen(
                                             modifier = Modifier
                                                 .size(20.dp)
                                                 .clip(CircleShape)
-                                                .background(ICostCoralRed),
+                                                .background(ICostExpenseColor),
                                             contentAlignment = Alignment.Center
                                         ) {
                                             ICostAssetImage(
@@ -594,7 +768,7 @@ fun ICostLedgerHomeScreen(
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
                                             text = "总支出",
-                                            color = ICostCoralRed,
+                                            color = ICostExpenseColor,
                                             fontSize = 15.sp,
                                             fontWeight = FontWeight.Bold
                                         )
@@ -1020,6 +1194,7 @@ fun ICostLedgerHomeScreen(
                                             ICostLedgerRow(
                                                 tx = tx,
                                                 walletMap = walletMap,
+                                                catalogTags = catalogTags,
                                                 onClick = { onClickTransaction(tx) }
                                             )
                                         }
@@ -1233,6 +1408,7 @@ private fun MonthArrowButton(
 private fun ICostLedgerRow(
     tx: TransactionEntity,
     walletMap: Map<Long, WalletEntity>,
+    catalogTags: List<TagDef>,
     onClick: () -> Unit
 ) {
     val timeStr = remember(tx.timestamp) {
@@ -1293,7 +1469,8 @@ private fun ICostLedgerRow(
     val isRefundOffset = tx.type == TransactionType.REFUND_OFFSET
     val netExpenseCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
     val hasDiscountBreakdown = (tx.type == TransactionType.EXPENSE || isRefundOffset) && tx.discountCents > 0L
-    val hasTagsRow = hasDiscountBreakdown || tx.duplicateSuspected || isRefundedExpense || isRefundOffset || tx.reimbursable
+    val userTags = remember(tx.tags) { TagCatalog.parseTags(tx.tags) }
+    val hasTagsRow = hasDiscountBreakdown || tx.duplicateSuspected || isRefundedExpense || isRefundOffset || tx.reimbursable || userTags.isNotEmpty()
 
     Row(
         modifier = Modifier
@@ -1336,7 +1513,7 @@ private fun ICostLedgerRow(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (isRefundedExpense) {
                         Text(
-                            text = String.format(Locale.US, "%s%,.2f", sym, tx.amountCents / 100.0),
+                            text = "$sym${AppearanceConfigManager.formatDisplayAmount(tx.amountCents / 100.0)}",
                             fontSize = 12.sp,
                             color = ICostTextSecondary,
                             textDecoration = TextDecoration.LineThrough,
@@ -1345,28 +1522,29 @@ private fun ICostLedgerRow(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = String.format(Locale.US, "-¥%,.2f", netExpenseCents / 100.0),
+                            text = "-¥${AppearanceConfigManager.formatDisplayAmount(netExpenseCents / 100.0)}",
                             fontSize = 16.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = ICostCoralRed,
+                            color = ICostExpenseColor,
                             maxLines = 1,
                             softWrap = false
                         )
                     } else {
+                        val formattedAmt = AppearanceConfigManager.formatDisplayAmount(tx.amountCents / 100.0)
                         val amountText = when (tx.type) {
                             TransactionType.EXPENSE, TransactionType.LOAN_OUT ->
-                                String.format(Locale.US, "-%s%,.2f", sym, tx.amountCents / 100.0)
+                                "-$sym$formattedAmt"
                             TransactionType.REFUND_OFFSET ->
-                                String.format(Locale.US, "%s%,.2f", sym, tx.amountCents / 100.0)
+                                "$sym$formattedAmt"
                             TransactionType.INCOME, TransactionType.LOAN_IN ->
-                                String.format(Locale.US, "+%s%,.2f", sym, tx.amountCents / 100.0)
+                                "+$sym$formattedAmt"
                             TransactionType.TRANSFER, TransactionType.REPAYMENT ->
-                                String.format(Locale.US, "%s%,.2f", sym, tx.amountCents / 100.0)
+                                "$sym$formattedAmt"
                         }
                         val amountColor = when (tx.type) {
-                            TransactionType.EXPENSE, TransactionType.LOAN_OUT -> ICostCoralRed
+                            TransactionType.EXPENSE, TransactionType.LOAN_OUT -> ICostExpenseColor
                             TransactionType.REFUND_OFFSET -> ICostAmberGold
-                            TransactionType.INCOME, TransactionType.LOAN_IN -> ICostGreenIncome
+                            TransactionType.INCOME, TransactionType.LOAN_IN -> ICostIncomeColor
                             TransactionType.TRANSFER, TransactionType.REPAYMENT -> ICostTextPrimary
                         }
                         Text(
@@ -1411,17 +1589,17 @@ private fun ICostLedgerRow(
 
             if (hasTagsRow) {
                 Spacer(modifier = Modifier.height(5.dp))
-                Row(
+                @OptIn(ExperimentalLayoutApi::class)
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     if (hasDiscountBreakdown) {
                         val origCents = tx.amountCents + tx.discountCents
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFFFFF4EC),
-                            modifier = Modifier.weight(1f, fill = false)
+                            color = Color(0xFFFFF4EC)
                         ) {
                             Text(
                                 text = "原价${formatMoneyCents(origCents)} · 优惠${formatMoneyCents(tx.discountCents)}",
@@ -1480,6 +1658,18 @@ private fun ICostLedgerRow(
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
+                    }
+                    userTags.forEach { tagName ->
+                        val colorHex = remember(tagName, catalogTags) {
+                            TagCatalog.resolveTagColorHex(tagName)
+                        }
+                        ICostColorTagChip(
+                            tagName = tagName,
+                            colorHex = colorHex,
+                            fontSize = 10.sp,
+                            horizontalPadding = 6.dp,
+                            verticalPadding = 2.dp
+                        )
                     }
                 }
             }

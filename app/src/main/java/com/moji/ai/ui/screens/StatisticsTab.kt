@@ -14,6 +14,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -43,6 +44,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -71,6 +73,8 @@ import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.CurrencyRateManager
+import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
@@ -82,7 +86,10 @@ import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostChartPalette
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
+import com.moji.ai.ui.theme.ICostExpenseColor
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostIncomeColor
+import com.moji.ai.ui.theme.ICostPillGray
 import com.moji.ai.ui.theme.ICostTextMuted
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
@@ -297,6 +304,12 @@ private fun netWorthImpact(tx: TransactionEntity, walletMap: Map<Long, WalletEnt
     return dA to dL
 }
 
+private data class TagBreakdownItem(
+    val tagName: String,
+    val totalCents: Long,
+    val transactions: List<TransactionEntity>
+)
+
 @Composable
 fun ICostStatisticsScreen(
     transactions: List<TransactionEntity>,
@@ -306,8 +319,13 @@ fun ICostStatisticsScreen(
     @Suppress("UNUSED_PARAMETER") onOpenAiSandbox: () -> Unit = {},
     onOpenSettingsPage: () -> Unit,
     currentLedger: String? = null,
-    hideAmounts: Boolean = false
+    hideAmounts: Boolean = false,
+    onSelectTransaction: (TransactionEntity) -> Unit = {},
+    customCurrencyRates: Map<String, Double> = emptyMap()
 ) {
+    val catalogTags by TagCatalog.tagsFlow.collectAsState()
+    val observedCustomRates by CurrencyRateManager.customRatesFlow.collectAsState()
+    val effectiveCustomRates = if (customCurrencyRates.isNotEmpty()) customCurrencyRates else observedCustomRates
     var rangeMode by rememberSaveable { mutableStateOf(StatsRangeMode.MONTH) }
     var year by rememberSaveable { mutableIntStateOf(initialYear) }
     var month by rememberSaveable { mutableIntStateOf(initialMonth) }
@@ -321,10 +339,13 @@ fun ICostStatisticsScreen(
     var barChartExpanded by rememberSaveable { mutableStateOf(true) }
     var trendChartExpanded by rememberSaveable { mutableStateOf(true) }
     var donutChartExpanded by rememberSaveable { mutableStateOf(true) }
+    var tagRankExpanded by rememberSaveable { mutableStateOf(true) }
 
     var barChartMetric by rememberSaveable { mutableIntStateOf(0) } // 0: 支出, 1: 收入, 2: 结余
     var trendMetric by rememberSaveable { mutableIntStateOf(0) }    // 0: 净资产, 1: 总资产, 2: 总负债
     var donutMetric by rememberSaveable { mutableIntStateOf(0) }    // 0: 支出, 1: 收入
+    var tagRankMetric by rememberSaveable { mutableIntStateOf(0) }  // 0: 支出标签, 1: 收入标签
+    var expandedStatsTagName by rememberSaveable { mutableStateOf<String?>(null) }
 
     // 筛选的账户被删除后自动回到「全部账户」
     LaunchedEffect(wallets, filterWalletId) {
@@ -439,7 +460,7 @@ fun ICostStatisticsScreen(
     val installmentPayCents = remember(filteredTxs) {
         filteredTxs.filter { tx ->
             tx.type == TransactionType.EXPENSE &&
-                (tx.captureSource == "INSTALLMENT" || tx.tags.split(",", "，").any { it.trim() == "分期" })
+                (tx.captureSource == "INSTALLMENT" || TagCatalog.containsTag(tx.tags, "分期"))
         }.sumOf { netExpenseOf(it) }
     }
 
@@ -473,11 +494,15 @@ fun ICostStatisticsScreen(
 
     // 净资产趋势：从当前余额出发，逐笔倒推每个分桶结束时的资产与负债（仅计入净资产的账户，折算人民币）
     val walletMap = remember(wallets) { wallets.associateBy { it.id } }
-    val currentAssetsCents = wallets.filter { !it.type.isLiability && it.includeInNetWorth }.sumOf {
-        (it.balanceCents * CurrencyCode.fromCode(it.currency).defaultRateToCny).roundToLong()
+    val currentAssetsCents = remember(wallets, effectiveCustomRates) {
+        wallets.filter { !it.type.isLiability && it.includeInNetWorth }.sumOf {
+            (it.balanceCents * CurrencyRateManager.getEffectiveRateToCny(it.currency)).roundToLong()
+        }
     }
-    val currentLiabCents = wallets.filter { it.type.isLiability && it.includeInNetWorth }.sumOf {
-        (it.balanceCents * CurrencyCode.fromCode(it.currency).defaultRateToCny).roundToLong()
+    val currentLiabCents = remember(wallets, effectiveCustomRates) {
+        wallets.filter { it.type.isLiability && it.includeInNetWorth }.sumOf {
+            (it.balanceCents * CurrencyRateManager.getEffectiveRateToCny(it.currency)).roundToLong()
+        }
     }
     val currentTrendValue = when (trendMetric) {
         0 -> currentAssetsCents - currentLiabCents
@@ -525,6 +550,32 @@ fun ICostStatisticsScreen(
             .entries
             .filter { it.value.first > 0L }
             .sortedByDescending { it.value.first }
+    }
+
+    val tagBreakdown = remember(filteredTxs, tagRankMetric) {
+        val targetType = if (tagRankMetric == 0) TransactionType.EXPENSE else TransactionType.INCOME
+        val map = mutableMapOf<String, MutableList<TransactionEntity>>()
+        filteredTxs.forEach { tx ->
+            if (tx.type == targetType && !tx.isSystemBalanceAnchor()) {
+                for (token in TagCatalog.parseTags(tx.tags)) {
+                    map.getOrPut(token) { mutableListOf() }.add(tx)
+                }
+            }
+        }
+        map.map { (tagName, list) ->
+            val sum = if (targetType == TransactionType.EXPENSE) {
+                list.sumOf { netExpenseOf(it) }
+            } else {
+                list.sumOf { it.amountCnyCents }
+            }
+            TagBreakdownItem(
+                tagName = tagName,
+                totalCents = sum,
+                transactions = list.sortedByDescending { it.timestamp }
+            )
+        }
+            .filter { it.totalCents > 0L }
+            .sortedByDescending { it.totalCents }
     }
 
     LazyColumn(
@@ -630,7 +681,7 @@ fun ICostStatisticsScreen(
                     StatsRangeMode.entries.forEach { mode ->
                         val selected = rangeMode == mode
                         val segBg by animateColorAsState(
-                            targetValue = if (selected) Color(0xFFECECEE) else Color.Transparent,
+                            targetValue = if (selected) ICostPillGray else Color.Transparent,
                             animationSpec = tween(180),
                             label = "StatsRangeSegBg"
                         )
@@ -809,8 +860,8 @@ fun ICostStatisticsScreen(
                         Column(modifier = Modifier.padding(top = 14.dp)) {
                             val hasData = bars.any { it != 0L }
                             val barColor = when (barChartMetric) {
-                                0 -> ICostCoralRed
-                                1 -> ICostGreenIncome
+                                0 -> ICostExpenseColor
+                                1 -> ICostIncomeColor
                                 else -> Color(0xFF3B82F6)
                             }
 
@@ -1294,6 +1345,185 @@ fun ICostStatisticsScreen(
                                                             .height(5.dp)
                                                             .clip(RoundedCornerShape(3.dp))
                                                             .background(itemColor)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 11. 卡片七：标签排行统计（支持切换支出/收入，展示各标签莫奈色条、笔数、占比、累计金额，点击可展开关联账单列表）
+        item {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .iCostHorizontalSwipeTrigger(
+                        onSwipeRight = { tagRankMetric = (tagRankMetric + 1) % 2 },
+                        onSwipeLeft = { tagRankMetric = (tagRankMetric + 1) % 2 }
+                    ),
+                shape = RoundedCornerShape(22.dp),
+                colors = CardDefaults.cardColors(containerColor = ICostCardWhite),
+                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    StatsCardHeader(
+                        badgeAsset = "setting_tag.webp",
+                        title = if (tagRankMetric == 0) "支出标签排行" else "收入标签排行",
+                        expanded = tagRankExpanded,
+                        onToggle = { tagRankExpanded = !tagRankExpanded }
+                    )
+
+                    AnimatedVisibility(
+                        visible = tagRankExpanded,
+                        enter = expandVertically(
+                            animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+                        ) + fadeIn(tween(180)),
+                        exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(top = 14.dp),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            ChartMiniSegmentToggle(
+                                options = listOf("支出", "收入"),
+                                selectedIndex = tagRankMetric,
+                                onSelect = { tagRankMetric = it }
+                            )
+
+                            val periodTotalCents = if (tagRankMetric == 0) netExpenseCents else totalIncomeCents
+                            val denominatorCents = periodTotalCents.coerceAtLeast(1L)
+
+                            if (tagBreakdown.isEmpty()) {
+                                Text(
+                                    text = "当前周期暂无带标签的${if (tagRankMetric == 0) "支出" else "收入"}账单",
+                                    fontSize = 13.sp,
+                                    color = ICostTextSecondary,
+                                    modifier = Modifier.padding(vertical = 16.dp)
+                                )
+                            } else {
+                                HorizontalDivider(color = ICostDivider)
+
+                                tagBreakdown.forEach { item ->
+                                    val colorHex = remember(item.tagName, catalogTags) {
+                                        TagCatalog.resolveTagColorHex(item.tagName)
+                                    }
+                                    val itemColor = Color(colorHex)
+                                    val ratio = (item.totalCents.toFloat() / denominatorCents.toFloat()).coerceIn(0f, 1f)
+                                    val pctStr = String.format(Locale.US, "%.1f%%", ratio * 100f)
+                                    val isTagExpanded = expandedStatsTagName == item.tagName
+
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .clickable {
+                                                expandedStatsTagName = if (isTagExpanded) null else item.tagName
+                                            }
+                                            .padding(vertical = 4.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(36.dp)
+                                                    .clip(CircleShape)
+                                                    .background(itemColor.copy(alpha = 0.16f)),
+                                                contentAlignment = Alignment.Center
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(13.dp)
+                                                        .clip(CircleShape)
+                                                        .background(itemColor)
+                                                )
+                                            }
+                                            Spacer(modifier = Modifier.width(12.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        ICostColorTagChip(
+                                                            tagName = item.tagName,
+                                                            colorHex = colorHex,
+                                                            fontSize = 13.sp,
+                                                            horizontalPadding = 8.dp,
+                                                            verticalPadding = 3.dp
+                                                        )
+                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                        Text(
+                                                            text = pctStr,
+                                                            fontSize = 12.sp,
+                                                            color = ICostTextSecondary
+                                                        )
+                                                    }
+                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        Text(
+                                                            text = formatMoneyCents(item.totalCents, "CNY", hideAmounts),
+                                                            fontFamily = ICDinFontFamily,
+                                                            fontSize = 16.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = ICostTextPrimary
+                                                        )
+                                                        Spacer(modifier = Modifier.width(4.dp))
+                                                        Text(
+                                                            text = "${item.transactions.size}笔",
+                                                            fontSize = 11.sp,
+                                                            color = ICostTextSecondary
+                                                        )
+                                                    }
+                                                }
+                                                Spacer(modifier = Modifier.height(6.dp))
+                                                val barFrac = (ratio * donutProgress.value).coerceIn(0f, 1f)
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(5.dp)
+                                                        .clip(RoundedCornerShape(3.dp))
+                                                        .background(ICostCellGray)
+                                                ) {
+                                                    if (barFrac > 0f) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth(barFrac.coerceIn(0.025f, 1f))
+                                                                .height(5.dp)
+                                                                .clip(RoundedCornerShape(3.dp))
+                                                                .background(itemColor)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        AnimatedVisibility(
+                                            visible = isTagExpanded,
+                                            enter = expandVertically(
+                                                animationSpec = spring(dampingRatio = 0.92f, stiffness = Spring.StiffnessMedium)
+                                            ) + fadeIn(tween(150)),
+                                            exit = shrinkVertically(tween(150)) + fadeOut(tween(110))
+                                        ) {
+                                            Column(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(top = 8.dp),
+                                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                                            ) {
+                                                item.transactions.forEach { tx ->
+                                                    TagTransactionDrilldownRow(
+                                                        tx = tx,
+                                                        walletMap = walletMap,
+                                                        hideAmounts = hideAmounts,
+                                                        onClick = { onSelectTransaction(tx) }
                                                     )
                                                 }
                                             }

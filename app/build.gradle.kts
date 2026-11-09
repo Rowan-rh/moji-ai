@@ -39,9 +39,10 @@ android {
         applicationId = "com.moji.ai"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
 
+        buildConfigField("Boolean", "IS_QA_BUILD", "false")
         buildConfigField("String", "GITHUB_UPDATE_REPO", "\"${escapeForBuildConfig(githubUpdateRepo)}\"")
         buildConfigField("String", "GITHUB_UPDATE_TOKEN", "\"${escapeForBuildConfig(githubUpdateToken)}\"")
 
@@ -71,6 +72,13 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+        create("qa") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".qa"
+            versionNameSuffix = "-qa"
+            matchingFallbacks += listOf("debug")
+            buildConfigField("Boolean", "IS_QA_BUILD", "true")
         }
     }
     compileOptions {
@@ -115,4 +123,5 @@ dependencies {
     implementation(libs.mlkit.text.recognition.chinese)
 
     debugImplementation(libs.androidx.ui.tooling)
+    testImplementation(libs.junit)
 }

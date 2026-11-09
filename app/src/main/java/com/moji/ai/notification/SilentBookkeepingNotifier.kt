@@ -13,6 +13,7 @@ import android.os.Bundle
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import com.moji.ai.BuildConfig
 import com.moji.ai.MainActivity
 import com.moji.ai.MoJiApp
 import com.moji.ai.R
@@ -32,6 +33,11 @@ class SilentBookkeepingNotifier(private val context: Context) {
     companion object {
         const val CHANNEL_ID = "moji_silent_bookkeeping_v2"
         const val FLUID_CLOUD_CHANNEL_ID = "moji_fluid_cloud_silent_v2"
+        const val QA_CHANNEL_ID = "moji_silent_bookkeeping_qa_v2"
+        const val QA_FLUID_CLOUD_CHANNEL_ID = "moji_fluid_cloud_silent_qa_v2"
+        const val DAILY_REMINDER_CHANNEL_ID = "moji_daily_reminder_channel"
+        const val QA_DAILY_REMINDER_CHANNEL_ID = "moji_daily_reminder_qa_channel"
+        const val QA_ANTI_CAPTURE_MARKER = "[QA测试通知·确认付款免采集]"
         const val ACTION_UNDO_TRANSACTION = "com.moji.ai.ACTION_UNDO_TRANSACTION"
         const val ACTION_CYCLE_CATEGORY = "com.moji.ai.ACTION_CYCLE_CATEGORY"
         const val ACTION_MARK_REIMBURSABLE = "com.moji.ai.ACTION_MARK_REIMBURSABLE"
@@ -68,6 +74,18 @@ class SilentBookkeepingNotifier(private val context: Context) {
         }
     }
 
+    private val standardChannelId: String
+        get() = if (BuildConfig.IS_QA_BUILD) QA_CHANNEL_ID else CHANNEL_ID
+
+    private val fluidChannelId: String
+        get() = if (BuildConfig.IS_QA_BUILD) QA_FLUID_CLOUD_CHANNEL_ID else FLUID_CLOUD_CHANNEL_ID
+
+    private val dailyReminderChannelId: String
+        get() = if (BuildConfig.IS_QA_BUILD) QA_DAILY_REMINDER_CHANNEL_ID else DAILY_REMINDER_CHANNEL_ID
+
+    private fun activeChannelId(isOnePlus: Boolean): String =
+        if (isOnePlus) fluidChannelId else standardChannelId
+
     init {
         createChannelIfNeeded()
     }
@@ -81,9 +99,14 @@ class SilentBookkeepingNotifier(private val context: Context) {
             nm.deleteNotificationChannel("moji_fluid_cloud_live")
         }
 
+        val standardChannelName = if (BuildConfig.IS_QA_BUILD) {
+            "【QA测试】AI 自动静默入账提醒"
+        } else {
+            "AI 自动静默入账提醒"
+        }
         val standardChannel = NotificationChannel(
-            CHANNEL_ID,
-            "AI 自动静默入账提醒",
+            standardChannelId,
+            standardChannelName,
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "当检测到付款、转账、还款或退款时，后台自动记账并在通知栏提供撤销与分类切换"
@@ -92,9 +115,14 @@ class SilentBookkeepingNotifier(private val context: Context) {
         }
         nm.createNotificationChannel(standardChannel)
 
+        val fluidChannelName = if (BuildConfig.IS_QA_BUILD) {
+            "【QA测试】一加流体云 · 自动记账通知中心卡片"
+        } else {
+            "一加流体云 · 自动记账通知中心卡片"
+        }
         val fluidCloudChannel = NotificationChannel(
-            FLUID_CLOUD_CHANNEL_ID,
-            "一加流体云 · 自动记账通知中心卡片",
+            fluidChannelId,
+            fluidChannelName,
             NotificationManager.IMPORTANCE_LOW
         ).apply {
             description = "在通知中心保留自动记账详情与疑似重复确认按钮，不与顶部 120Hz 流体云实况胶囊冲突"
@@ -103,6 +131,21 @@ class SilentBookkeepingNotifier(private val context: Context) {
             setShowBadge(true)
         }
         nm.createNotificationChannel(fluidCloudChannel)
+
+        val reminderChannelName = if (BuildConfig.IS_QA_BUILD) {
+            "【QA测试】每日记账提醒"
+        } else {
+            "每日记账提醒"
+        }
+        val reminderChannel = NotificationChannel(
+            dailyReminderChannelId,
+            reminderChannelName,
+            NotificationManager.IMPORTANCE_DEFAULT
+        ).apply {
+            description = "按设定的定时提醒时段推送记账提醒，点击通知直达记账计算器面板"
+            setShowBadge(true)
+        }
+        nm.createNotificationChannel(reminderChannel)
     }
 
     /**
@@ -119,7 +162,7 @@ class SilentBookkeepingNotifier(private val context: Context) {
         }
 
         val isOnePlus = isOnePlusFluidCloudSupported()
-        val activeChannelId = if (isOnePlus) FLUID_CLOUD_CHANNEL_ID else CHANNEL_ID
+        val activeChannelId = activeChannelId(isOnePlus)
 
         val walletMap = wallets.associateBy { it.id }
         val currencySymbol = CurrencyCode.fromCode(tx.currency).symbol
@@ -178,11 +221,15 @@ class SilentBookkeepingNotifier(private val context: Context) {
             if (tx.note.isNotBlank()) {
                 append("\n备注：").append(tx.note)
             }
+            if (BuildConfig.IS_QA_BUILD) {
+                append("\n").append(QA_ANTI_CAPTURE_MARKER)
+            }
         }
 
         val notifId = (tx.id % Int.MAX_VALUE).toInt().coerceAtLeast(1001)
 
         val openIntent = Intent(context, MainActivity::class.java).apply {
+            setPackage(context.packageName)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                 Intent.FLAG_ACTIVITY_SINGLE_TOP or
                 Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -196,6 +243,7 @@ class SilentBookkeepingNotifier(private val context: Context) {
         )
 
         val undoIntent = Intent(context, TransactionActionReceiver::class.java).apply {
+            setPackage(context.packageName)
             action = ACTION_UNDO_TRANSACTION
             putExtra(EXTRA_TRANSACTION_ID, tx.id)
             putExtra(EXTRA_NOTIFICATION_ID, notifId)
@@ -208,6 +256,7 @@ class SilentBookkeepingNotifier(private val context: Context) {
         )
 
         val cycleCatIntent = Intent(context, TransactionActionReceiver::class.java).apply {
+            setPackage(context.packageName)
             action = ACTION_CYCLE_CATEGORY
             putExtra(EXTRA_TRANSACTION_ID, tx.id)
             putExtra(EXTRA_NOTIFICATION_ID, notifId)
@@ -220,6 +269,7 @@ class SilentBookkeepingNotifier(private val context: Context) {
         )
 
         val reimburseIntent = Intent(context, TransactionActionReceiver::class.java).apply {
+            setPackage(context.packageName)
             action = ACTION_MARK_REIMBURSABLE
             putExtra(EXTRA_TRANSACTION_ID, tx.id)
             putExtra(EXTRA_NOTIFICATION_ID, notifId)
@@ -250,7 +300,15 @@ class SilentBookkeepingNotifier(private val context: Context) {
         val builder = NotificationCompat.Builder(context, activeChannelId)
             .setSmallIcon(R.drawable.ic_fluid_cloud_moji)
             .setColor(0xFF0EA5E9.toInt())
-            .setSubText(if (isOnePlus) "流体云 · 默记" else "默记 AI")
+            .setSubText(
+                if (BuildConfig.IS_QA_BUILD) {
+                    "默记 QA"
+                } else if (isOnePlus) {
+                    "流体云 · 默记"
+                } else {
+                    "默记 AI"
+                }
+            )
             .setContentTitle(title)
             .setContentText(bodyText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(expandedDetails))
@@ -288,7 +346,7 @@ class SilentBookkeepingNotifier(private val context: Context) {
         }
 
         val isOnePlus = isOnePlusFluidCloudSupported()
-        val activeChannelId = if (isOnePlus) FLUID_CLOUD_CHANNEL_ID else CHANNEL_ID
+        val activeChannelId = activeChannelId(isOnePlus)
         val walletMap = wallets.associateBy { it.id }
         val sourceWallet = tx.sourceWalletId?.let { walletMap[it] }
         val walletLabel = sourceWallet?.let { w ->
@@ -302,6 +360,7 @@ class SilentBookkeepingNotifier(private val context: Context) {
         val notifId = (candidateId % Int.MAX_VALUE).toInt().coerceAtLeast(50001)
 
         val openIntent = Intent(context, MainActivity::class.java).apply {
+            setPackage(context.packageName)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                 Intent.FLAG_ACTIVITY_SINGLE_TOP or
                 Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -317,6 +376,7 @@ class SilentBookkeepingNotifier(private val context: Context) {
         )
 
         val forceRecordIntent = Intent(context, TransactionActionReceiver::class.java).apply {
+            setPackage(context.packageName)
             action = ACTION_FORCE_RECORD_DUPLICATE
             putExtra(EXTRA_CANDIDATE_ID, candidateId)
             putExtra(EXTRA_NOTIFICATION_ID, notifId)
@@ -329,6 +389,7 @@ class SilentBookkeepingNotifier(private val context: Context) {
         )
 
         val dismissIntent = Intent(context, TransactionActionReceiver::class.java).apply {
+            setPackage(context.packageName)
             action = ACTION_DISMISS_DUPLICATE
             putExtra(EXTRA_CANDIDATE_ID, candidateId)
             putExtra(EXTRA_NOTIFICATION_ID, notifId)
@@ -352,6 +413,9 @@ class SilentBookkeepingNotifier(private val context: Context) {
                 append("\n订单唯一Key：").append(tx.orderKey)
             }
             append("\n判定原因：").append(duplicateReason).append("（默认不重复录入，点击下方「录入」可强制入账）")
+            if (BuildConfig.IS_QA_BUILD) {
+                append("\n").append(QA_ANTI_CAPTURE_MARKER)
+            }
         }
 
         val fluidExtras = Bundle().apply {
@@ -370,7 +434,15 @@ class SilentBookkeepingNotifier(private val context: Context) {
         val builder = NotificationCompat.Builder(context, activeChannelId)
             .setSmallIcon(R.drawable.ic_fluid_cloud_moji)
             .setColor(0xFFF59E0B.toInt())
-            .setSubText(if (isOnePlus) "流体云 · 防重保护" else "默记防重")
+            .setSubText(
+                if (BuildConfig.IS_QA_BUILD) {
+                    "默记 QA"
+                } else if (isOnePlus) {
+                    "流体云 · 防重保护"
+                } else {
+                    "默记防重"
+                }
+            )
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
@@ -386,6 +458,77 @@ class SilentBookkeepingNotifier(private val context: Context) {
 
         NotificationManagerCompat.from(context).notify(notifId, builder.build())
     }
+
+    /**
+     * 发送每日定时记账提醒通知（点击后打开 MainActivity 并自动拉起记账计算器面板）
+     */
+    fun sendDailyReminderNotification(
+        title: String,
+        message: String,
+        slotId: String = "test",
+        isTest: Boolean = false
+    ): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ActivityCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                return false
+            }
+        }
+        val nmCompat = NotificationManagerCompat.from(context)
+        if (!nmCompat.areNotificationsEnabled()) {
+            return false
+        }
+
+        val cleanTitle = title.trim().ifEmpty { "记账提醒" }
+        val cleanMessage = message.trim().ifEmpty { "今天的花销都记下了吗？花 10 秒随手记一笔吧～" }
+        val notifId = if (isTest) 88001 else (88000 + (slotId.hashCode() and 0x7FFF))
+
+        val openIntent = Intent(context, MainActivity::class.java).apply {
+            setPackage(context.packageName)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP
+            putExtra(MainActivity.EXTRA_OPEN_BOOKKEEPING_SHEET, true)
+        }
+        val openPending = PendingIntent.getActivity(
+            context,
+            notifId,
+            openIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val expandedText = buildString {
+            append(cleanMessage)
+            append("\n点击通知即可直接打开记账面板快速记一笔")
+            if (BuildConfig.IS_QA_BUILD) {
+                append("\n").append(QA_ANTI_CAPTURE_MARKER)
+            }
+        }
+
+        val builder = NotificationCompat.Builder(context, dailyReminderChannelId)
+            .setSmallIcon(R.drawable.ic_fluid_cloud_moji)
+            .setColor(0xFF0EA5E9.toInt())
+            .setSubText(if (BuildConfig.IS_QA_BUILD) "默记 QA · 定时提醒" else "默记 · 定时提醒")
+            .setContentTitle(cleanTitle)
+            .setContentText(cleanMessage)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(expandedText))
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setCategory(NotificationCompat.CATEGORY_REMINDER)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setAutoCancel(true)
+            .setContentIntent(openPending)
+
+        nmCompat.notify(notifId, builder.build())
+        return true
+    }
+
+    fun sendTestReminderNotification(
+        title: String = "记账提醒",
+        message: String = "今天的花销都记下了吗？花 10 秒随手记一笔吧～"
+    ): Boolean = sendDailyReminderNotification(title = title, message = message, slotId = "test", isTest = true)
 }
 
 class TransactionActionReceiver : BroadcastReceiver() {

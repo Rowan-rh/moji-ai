@@ -130,15 +130,61 @@ interface TransactionDao {
     @Update
     suspend fun updateTransaction(tx: TransactionEntity)
 
+    @Query(
+        """
+        UPDATE transactions
+        SET category = :newCategory,
+            updatedAtMillis = :nowMillis,
+            syncRevision = syncRevision + 1,
+            syncDirty = 1
+        WHERE id = :id
+        """
+    )
+    suspend fun updateTransactionCategoryById(
+        id: Long,
+        newCategory: String,
+        nowMillis: Long
+    )
+
+    @Query(
+        """
+        UPDATE transactions
+        SET tags = :newTags,
+            updatedAtMillis = :nowMillis,
+            syncRevision = syncRevision + 1,
+            syncDirty = 1
+        WHERE id = :id
+        """
+    )
+    suspend fun updateTransactionTagsById(
+        id: Long,
+        newTags: String,
+        nowMillis: Long
+    )
+
     @Delete
     suspend fun deleteTransaction(tx: TransactionEntity)
 
     @Query("DELETE FROM transactions")
     suspend fun deleteAllTransactions()
+
+    @Query(
+        """
+        SELECT COUNT(*) FROM transactions
+        WHERE deletedAtMillis IS NULL
+          AND timestamp BETWEEN :startMillis AND :endMillis
+          AND captureSource != 'BALANCE_ANCHOR'
+          AND category != '平账'
+        """
+    )
+    suspend fun countNonAnchorTransactionsInRange(startMillis: Long, endMillis: Long): Int
 }
 
 @Dao
 interface CaptureEvidenceDao {
+    @Query("SELECT * FROM capture_evidences ORDER BY capturedAtMillis DESC")
+    suspend fun getAllEvidences(): List<CaptureEvidenceEntity>
+
     @Query("SELECT * FROM capture_evidences WHERE transactionId = :txId ORDER BY capturedAtMillis DESC")
     suspend fun getEvidencesForTransaction(txId: Long): List<CaptureEvidenceEntity>
 
@@ -168,6 +214,21 @@ interface RecurringRuleDao {
 
     @Update
     suspend fun updateRule(rule: RecurringRuleEntity)
+
+    @Query(
+        """
+        UPDATE recurring_rules
+        SET category = :newCategory,
+            updatedAtMillis = :nowMillis,
+            syncDirty = 1
+        WHERE id = :id
+        """
+    )
+    suspend fun updateRuleCategoryById(
+        id: Long,
+        newCategory: String,
+        nowMillis: Long
+    )
 
     @Delete
     suspend fun deleteRule(rule: RecurringRuleEntity)

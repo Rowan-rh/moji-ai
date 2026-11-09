@@ -8,7 +8,7 @@
 
 ## 项目结构与技术栈
 
-- **包名与应用**：`com.moji.ai`（默记 MoJi）
+- **包名与应用**：`com.moji.ai`（默记 MoJi，正式版 / Debug 包）；`com.moji.ai.qa`（默记 QA，真机独立测试包）
 - **核心架构**：Kotlin + Jetpack Compose（Material 3，对标 iCost 卡片与交互体系）+ Room 本地持久化
 - **核心模块**：
   - `app/src/main/java/com/moji/ai/data/`：枚举定义、分类目录、Room 实体/DAO、`LedgerRepository` 账务引擎（含真实余额锚点平账、单笔账单多分类拆分 `splitExpenseTransaction`、批量报销结算 `batchSettleReimbursements`）、`BackupAndCsvTransferEngine` 全量备份恢复/CSV 导入导出引擎与 `WebDavSyncClient` 自托管云同步客户端
@@ -26,9 +26,14 @@
 1. **编译校验**：
    ```bash
    ./gradlew assembleDebug
+   ./gradlew assembleQa
    ```
 2. **真机安装与界面验证（连接真机时）**：
-   - 安装调试包：`adb install -r -g app/build/outputs/apk/debug/app-debug.apk`
+   - 安装 QA 独立测试包（与正式版 `com.moji.ai` 并存，互不串数据）：
+     ```bash
+     adb install -r -g app/build/outputs/apk/qa/app-qa.apk
+     ```
+   - **真机数据安全铁律**：用户手机上的 `com.moji.ai` 存放真实日常账本，禁止将开发分支覆盖安装到 `com.moji.ai`，**所有真机写操作（新增/编辑/删除账单、导入恢复等）只能在 `com.moji.ai.qa` 中进行**。
    - 启动或注入测试操作前，先检查当前前台窗口（`adb shell dumpsys window | grep mFocusedApp`），避免打断用户正在使用的其他前台应用。
    - 改动可见界面时，在 PR 正文中附上截图或说明界面验证结果。
 3. **数据安全与高风险改动**：

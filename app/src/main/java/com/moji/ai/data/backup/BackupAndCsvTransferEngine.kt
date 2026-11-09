@@ -7,10 +7,19 @@ import com.moji.ai.ai.WeightedCategoryClassifier
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AppearanceConfigManager
+import com.moji.ai.data.model.CategoryCatalog
+import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.RecurrenceFrequency
+import com.moji.ai.data.model.ReminderConfigManager
+import com.moji.ai.data.model.TagCatalog
+import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.WalletType
+import com.moji.ai.ui.QuickBookkeepingTemplate
+import com.moji.ai.ui.QuickTemplateHelper
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -116,7 +125,14 @@ data class MoJiFullBackupSnapshot(
     val wallets: List<BackupWalletDto> = emptyList(),
     val transactions: List<BackupTransactionDto> = emptyList(),
     val recurringRules: List<BackupRecurringRuleDto> = emptyList(),
-    val merchantMemories: List<MerchantMemoryEntry> = emptyList()
+    val merchantMemories: List<MerchantMemoryEntry> = emptyList(),
+    val customExpenseCategories: List<CategoryDef> = emptyList(),
+    val customIncomeCategories: List<CategoryDef> = emptyList(),
+    val customTags: List<TagDef> = emptyList(),
+    val quickTemplates: List<QuickBookkeepingTemplate> = emptyList(),
+    val customCurrencyRates: Map<String, Double> = emptyMap(),
+    val reminderSettingsJson: String = "",
+    val appearanceSettingsJson: String = ""
 )
 
 data class CsvParsePreviewResult(
@@ -156,7 +172,14 @@ object BackupAndCsvTransferEngine {
         wallets: List<WalletEntity>,
         transactions: List<TransactionEntity>,
         recurringRules: List<RecurringRuleEntity>,
-        merchantMemories: List<MerchantMemoryEntry>
+        merchantMemories: List<MerchantMemoryEntry>,
+        customExpenseCategories: List<CategoryDef> = CategoryCatalog.expenseCategories,
+        customIncomeCategories: List<CategoryDef> = CategoryCatalog.incomeCategories,
+        customTags: List<TagDef> = TagCatalog.tags,
+        quickTemplates: List<QuickBookkeepingTemplate> = emptyList(),
+        customCurrencyRates: Map<String, Double> = CurrencyRateManager.customRates,
+        reminderSettingsJson: String = ReminderConfigManager.exportConfigJson(),
+        appearanceSettingsJson: String = AppearanceConfigManager.exportConfigJson()
     ): String {
         val snapshot = MoJiFullBackupSnapshot(
             schemaVersion = 1,
@@ -240,14 +263,25 @@ object BackupAndCsvTransferEngine {
                     enabled = r.enabled
                 )
             },
-            merchantMemories = merchantMemories
+            merchantMemories = merchantMemories,
+            customExpenseCategories = customExpenseCategories,
+            customIncomeCategories = customIncomeCategories,
+            customTags = customTags,
+            quickTemplates = QuickTemplateHelper.sanitizeTemplates(quickTemplates),
+            customCurrencyRates = CurrencyRateManager.sanitizeRatesMap(customCurrencyRates),
+            reminderSettingsJson = reminderSettingsJson,
+            appearanceSettingsJson = appearanceSettingsJson
         )
         return backupJson.encodeToString(snapshot)
     }
 
     fun parseFullBackupJson(rawJson: String): Triple<List<WalletEntity>, List<TransactionEntity>, MoJiFullBackupSnapshot>? {
-        val snapshot = runCatching { backupJson.decodeFromString<MoJiFullBackupSnapshot>(rawJson.trim()) }.getOrNull()
+        val rawSnapshot = runCatching { backupJson.decodeFromString<MoJiFullBackupSnapshot>(rawJson.trim()) }.getOrNull()
             ?: return null
+        val snapshot = rawSnapshot.copy(
+            quickTemplates = QuickTemplateHelper.sanitizeTemplates(rawSnapshot.quickTemplates),
+            customCurrencyRates = CurrencyRateManager.sanitizeRatesMap(rawSnapshot.customCurrencyRates)
+        )
         val wallets = snapshot.wallets.map { dto ->
             WalletEntity(
                 id = dto.id,
@@ -567,7 +601,7 @@ object BackupAndCsvTransferEngine {
                 ).trim()
 
             val currencyStr = normalizeCurrencyCode(colMap["币种"] ?: colMap["货币"] ?: "CNY")
-            val rate = CurrencyCode.fromCode(currencyStr).defaultRateToCny
+            val rate = CurrencyRateManager.getEffectiveRateToCny(currencyStr)
             val amountCnyCents = (amountCents * rate).roundToLong()
 
             val discountCents = (((parseCleanMoney(colMap["优惠(元)"] ?: colMap["优惠"] ?: colMap["优惠金额"] ?: "0") ?: 0.0).let { kotlin.math.abs(it) }) * 100.0)
@@ -737,12 +771,19 @@ object BackupAndCsvTransferEngine {
 
     private fun parseCleanMoney(raw: String): Double? {
         val cleaned = raw
+            .replace("JP¥", "")
+            .replace("HK$", "")
+            .replace("NT$", "")
+            .replace("S$", "")
+            .replace("A$", "")
+            .replace("C$", "")
             .replace("¥", "")
             .replace("￥", "")
             .replace("$", "")
             .replace("€", "")
             .replace("£", "")
-            .replace("HK$", "")
+            .replace("₩", "")
+            .replace("฿", "")
             .replace(",", "")
             .replace("元", "")
             .trim()
@@ -756,8 +797,14 @@ object BackupAndCsvTransferEngine {
             u in setOf("USD", "美元", "$") -> "USD"
             u in setOf("HKD", "港币", "港元", "HK$") -> "HKD"
             u in setOf("EUR", "欧元", "€") -> "EUR"
-            u in setOf("JPY", "日元", "日币") -> "JPY"
+            u in setOf("JPY", "日元", "日币", "JP¥") -> "JPY"
             u in setOf("GBP", "英镑", "£") -> "GBP"
+            u in setOf("KRW", "韩元", "韩币", "₩") -> "KRW"
+            u in setOf("TWD", "新台币", "台币", "NT$") -> "TWD"
+            u in setOf("SGD", "新加坡元", "新币", "S$") -> "SGD"
+            u in setOf("AUD", "澳元", "澳币", "A$") -> "AUD"
+            u in setOf("CAD", "加元", "加币", "C$") -> "CAD"
+            u in setOf("THB", "泰铢", "฿") -> "THB"
             else -> CurrencyCode.fromCode(u).name
         }
     }

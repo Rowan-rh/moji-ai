@@ -7,7 +7,10 @@ import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.CurrencyRateManager
+import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import kotlin.math.roundToLong
 
@@ -71,8 +74,34 @@ class LedgerRepository(private val db: AppDatabase) {
     suspend fun insertCaptureEvidence(evidence: com.moji.ai.data.local.CaptureEvidenceEntity): Long =
         db.captureEvidenceDao().insertEvidence(evidence)
 
+    suspend fun getAllCaptureEvidences(): List<com.moji.ai.data.local.CaptureEvidenceEntity> =
+        db.captureEvidenceDao().getAllEvidences()
+
     suspend fun getEvidencesForTransaction(txId: Long): List<com.moji.ai.data.local.CaptureEvidenceEntity> =
         db.captureEvidenceDao().getEvidencesForTransaction(txId)
+
+    /**
+     * 检查本地自然日（00:00:00.000 ~ 23:59:59.999）内是否存在未删除的非系统平账流水，
+     * 用于定时记账提醒的「今日已记账则免打扰」静默跳过判断。
+     */
+    suspend fun hasRecordedTransactionToday(
+        nowMillis: Long = System.currentTimeMillis(),
+        timeZone: java.util.TimeZone = java.util.TimeZone.getDefault()
+    ): Boolean {
+        val startCal = java.util.Calendar.getInstance(timeZone).apply {
+            timeInMillis = nowMillis
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val startOfDay = startCal.timeInMillis
+        val endCal = (startCal.clone() as java.util.Calendar).apply {
+            add(java.util.Calendar.DAY_OF_YEAR, 1)
+        }
+        val endOfDay = endCal.timeInMillis - 1L
+        return db.transactionDao().countNonAnchorTransactionsInRange(startOfDay, endOfDay) > 0
+    }
 
     /**
      * 账户真实余额锚点登记 + 差额自动生成平账流水（对标 blue-whale-keeper 与 moneywallet）：
@@ -98,7 +127,7 @@ class LedgerRepository(private val db: AppDatabase) {
             return@withTransaction null
         }
 
-        val rate = CurrencyCode.fromCode(wallet.currency).defaultRateToCny
+        val rate = CurrencyRateManager.getEffectiveRateToCny(wallet.currency)
         val absDiff = kotlin.math.abs(diff)
         val absCnyCents = (absDiff * rate).roundToLong()
 
@@ -308,7 +337,11 @@ class LedgerRepository(private val db: AppDatabase) {
     suspend fun recordTransaction(tx: TransactionEntity): Long = db.withTransaction {
         val txDao = db.transactionDao()
         val finalTx = applyWalletImpact(tx)
-        txDao.insertTransaction(finalTx)
+        val id = txDao.insertTransaction(finalTx)
+        if (!finalTx.isSystemBalanceAnchor() && finalTx.tags.isNotBlank()) {
+            TagCatalog.syncDiscoveredTagsFromHistory(listOf(finalTx.tags))
+        }
+        id
     }
 
     /**
@@ -320,6 +353,9 @@ class LedgerRepository(private val db: AppDatabase) {
         revertWalletImpact(oldTx)
         val applied = applyWalletImpact(updatedTx)
         txDao.updateTransaction(applied)
+        if (!applied.isSystemBalanceAnchor() && applied.tags.isNotBlank()) {
+            TagCatalog.syncDiscoveredTagsFromHistory(listOf(applied.tags))
+        }
         true
     }
 
@@ -562,11 +598,133 @@ class LedgerRepository(private val db: AppDatabase) {
 
     suspend fun deleteRecurringRule(rule: RecurringRuleEntity) = db.recurringRuleDao().deleteRule(rule)
 
+    private fun TransactionType.matchesDirectionFilter(isExpense: Boolean?): Boolean = when (isExpense) {
+        true -> this == TransactionType.EXPENSE
+        false -> this == TransactionType.INCOME
+        null -> true
+    }
+
+    /**
+     * 统计指定分类（含可选二级分类前缀）关联的未删除历史账单数量（排除系统平账流水）
+     */
+    suspend fun countTransactionsByCategory(
+        category: String,
+        includeSubPrefix: Boolean,
+        isExpense: Boolean? = null
+    ): Int {
+        return db.transactionDao().getAllTransactions().count { tx ->
+            !tx.isSystemBalanceAnchor() &&
+                tx.type.matchesDirectionFilter(isExpense) &&
+                CategoryCatalog.matchesCategoryScope(tx.category, category, includeSubPrefix)
+        }
+    }
+
+    /**
+     * 在 Room 事务中原子级联更新历史账单与周期性规则的分类字段，并刷新 updatedAtMillis 与 syncDirty
+     * @return 实际受影响更新的历史账单笔数
+     */
+    suspend fun migrateCategoryCascade(
+        oldCategory: String,
+        newCategory: String,
+        includeSubPrefix: Boolean,
+        preserveSubSuffix: Boolean,
+        isExpense: Boolean? = null
+    ): Int = db.withTransaction {
+        val now = System.currentTimeMillis()
+        val txDao = db.transactionDao()
+        val ruleDao = db.recurringRuleDao()
+        var updatedTxCount = 0
+
+        for (tx in txDao.getAllTransactions()) {
+            if (tx.isSystemBalanceAnchor()) continue
+            if (!tx.type.matchesDirectionFilter(isExpense)) continue
+            val mapped = CategoryCatalog.remapCascadedCategory(
+                current = tx.category,
+                oldCategory = oldCategory,
+                newCategory = newCategory,
+                includeSubPrefix = includeSubPrefix,
+                preserveSubSuffix = preserveSubSuffix
+            )
+            if (mapped != null) {
+                txDao.updateTransactionCategoryById(tx.id, mapped, now)
+                updatedTxCount++
+            }
+        }
+
+        for (rule in ruleDao.getAllRules()) {
+            if (!rule.type.matchesDirectionFilter(isExpense)) continue
+            val mapped = CategoryCatalog.remapCascadedCategory(
+                current = rule.category,
+                oldCategory = oldCategory,
+                newCategory = newCategory,
+                includeSubPrefix = includeSubPrefix,
+                preserveSubSuffix = preserveSubSuffix
+            )
+            if (mapped != null) {
+                ruleDao.updateRuleCategoryById(rule.id, mapped, now)
+            }
+        }
+        updatedTxCount
+    }
+
+    /**
+     * 在 Room 事务中批量更新指定账单的分类字段（用于 Agent 梳理结果一键采纳生效）
+     */
+    suspend fun batchUpdateTransactionCategories(
+        updates: Map<Long, String>
+    ): Int = db.withTransaction {
+        if (updates.isEmpty()) return@withTransaction 0
+        val now = System.currentTimeMillis()
+        val txDao = db.transactionDao()
+        var updatedCount = 0
+        for ((txId, newCat) in updates) {
+            if (txId > 0L && newCat.isNotBlank()) {
+                txDao.updateTransactionCategoryById(txId, newCat.trim(), now)
+                updatedCount++
+            }
+        }
+        updatedCount
+    }
+
+    /**
+     * 统计包含指定标签 Token 的未删除历史账单数量（排除系统平账流水）
+     */
+    suspend fun countTransactionsByTag(tagName: String): Int {
+        return db.transactionDao().getAllTransactions().count { tx ->
+            !tx.isSystemBalanceAnchor() && TagCatalog.containsTag(tx.tags, tagName)
+        }
+    }
+
+    /**
+     * 在 Room 事务中按精确标签 Token 拆分并级联替换或移除历史账单中的标签（自动去重并刷新 updatedAtMillis / syncRevision / syncDirty）
+     * @param oldTag 原标签名称
+     * @param newTag 新标签名称（传入 null 或空串表示从账单标签中移除 oldTag）
+     * @return 实际受影响更新的历史账单笔数
+     */
+    suspend fun migrateTagCascade(
+        oldTag: String,
+        newTag: String?
+    ): Int = db.withTransaction {
+        val now = System.currentTimeMillis()
+        val txDao = db.transactionDao()
+        var updatedTxCount = 0
+
+        for (tx in txDao.getAllTransactions()) {
+            if (tx.isSystemBalanceAnchor()) continue
+            val mapped = TagCatalog.remapTagsString(tx.tags, oldTag, newTag)
+            if (mapped != null) {
+                txDao.updateTransactionTagsById(tx.id, mapped, now)
+                updatedTxCount++
+            }
+        }
+        updatedTxCount
+    }
+
     suspend fun processDueRecurringRules(nowMillis: Long = System.currentTimeMillis()): List<TransactionEntity> {
         val dueRules = db.recurringRuleDao().getDueRules(nowMillis)
         val created = mutableListOf<TransactionEntity>()
         for (rule in dueRules) {
-            val rate = CurrencyCode.fromCode(rule.currency).defaultRateToCny
+            val rate = CurrencyRateManager.getEffectiveRateToCny(rule.currency)
             val cnyCents = (rule.amountCents * rate).roundToLong()
             val tx = TransactionEntity(
                 type = rule.type,
@@ -784,7 +942,7 @@ class LedgerRepository(private val db: AppDatabase) {
     ): Long {
         if (fromCurrency.equals(toCurrency, ignoreCase = true)) return amountCents
         val cnyCents = amountCents * fromRateToCny
-        val toRate = CurrencyCode.fromCode(toCurrency).defaultRateToCny
+        val toRate = CurrencyRateManager.getEffectiveRateToCny(toCurrency)
         return (cnyCents / toRate).roundToLong()
     }
 }

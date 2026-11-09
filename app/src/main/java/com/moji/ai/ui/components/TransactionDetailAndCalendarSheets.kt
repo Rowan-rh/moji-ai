@@ -17,6 +17,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -48,6 +50,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -73,9 +76,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.ui.screens.ICostColorTagChip
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
 import com.moji.ai.ui.theme.ICostAssetImage
@@ -87,8 +93,10 @@ import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
+import com.moji.ai.ui.theme.ICostExpenseColor
 import com.moji.ai.ui.theme.ICostFormField
-import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostIncomeColor
+import com.moji.ai.ui.theme.ICostSearchBg
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
 import com.moji.ai.ui.theme.WalletBrandAvatar
@@ -133,13 +141,6 @@ internal fun ICostConfirmDialog(
             TextButton(onClick = onDismiss) { Text(dismissText) }
         }
     )
-}
-
-/** 拆分账单可选的支出分类（主分类及「主-子」二级分类），与记账面板保持同一份目录 */
-private val splitCategoryOptions: List<String> by lazy {
-    CategoryCatalog.expenseCategories.flatMap { cat ->
-        listOf(cat.name) + cat.subCategories.map { "${cat.name}-${it.name}" }
-    }
 }
 
 /**
@@ -273,13 +274,14 @@ fun TransactionDetailSheet(
                     else -> ""
                 }
                 val amountColor = when (tx.type) {
-                    TransactionType.EXPENSE, TransactionType.LOAN_OUT -> ICostCoralRed
+                    TransactionType.EXPENSE, TransactionType.LOAN_OUT -> ICostExpenseColor
                     TransactionType.REFUND_OFFSET -> ICostAmberGold
-                    TransactionType.INCOME, TransactionType.LOAN_IN -> ICostGreenIncome
+                    TransactionType.INCOME, TransactionType.LOAN_IN -> ICostIncomeColor
                     else -> ICostTextPrimary
                 }
+                val formattedMainAmount = "${CurrencyCode.fromCode(tx.currency).symbol}${AppearanceConfigManager.formatDisplayAmount(tx.amountCents / 100.0)}"
                 Text(
-                    text = "$prefix${formatMoneyCents(tx.amountCents, tx.currency)}",
+                    text = "$prefix$formattedMainAmount",
                     fontFamily = ICDinFontFamily,
                     fontSize = 30.sp,
                     fontWeight = FontWeight.Bold,
@@ -291,7 +293,7 @@ fun TransactionDetailSheet(
                     Spacer(modifier = Modifier.height(6.dp))
                     Surface(
                         shape = RoundedCornerShape(10.dp),
-                        color = Color(0xFFFFF4EC)
+                        color = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF332418) else Color(0xFFFFF4EC)
                     ) {
                         Text(
                             text = "原价 ${formatMoneyCents(origCents, tx.currency)}  ·  优惠 ${formatMoneyCents(tx.discountCents, tx.currency)}  ·  实扣 ${formatMoneyCents(tx.amountCents, tx.currency)}",
@@ -388,8 +390,45 @@ fun TransactionDetailSheet(
                 if (tx.reimbursable) {
                     DetailKeyValueRow("报销状态", if (tx.reimbursed) "已报销" else "待报销", singleLine = true)
                 }
-                if (tx.tags.isNotBlank()) {
-                    DetailKeyValueRow("标签", "#${tx.tags}", singleLine = true)
+                val catalogTags by TagCatalog.tagsFlow.collectAsState()
+                val detailTags = remember(tx.tags) { TagCatalog.parseTags(tx.tags) }
+                if (detailTags.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "标签",
+                            fontSize = 14.sp,
+                            color = ICostTextSecondary,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        @OptIn(ExperimentalLayoutApi::class)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.End),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            detailTags.forEach { tagName ->
+                                val colorHex = remember(tagName, catalogTags) {
+                                    TagCatalog.resolveTagColorHex(tagName)
+                                }
+                                ICostColorTagChip(
+                                    tagName = tagName,
+                                    colorHex = colorHex,
+                                    fontSize = 12.sp,
+                                    horizontalPadding = 8.dp,
+                                    verticalPadding = 3.dp,
+                                    showDot = true
+                                )
+                            }
+                        }
+                    }
                 }
                 val merchant = tx.merchant.trim()
                 val cleanedNote = tx.note
@@ -823,6 +862,12 @@ private fun SplitCategoryPicker(
     value: String,
     onValueChange: (String) -> Unit
 ) {
+    val expenseCategories by CategoryCatalog.expenseCategoriesFlow.collectAsState()
+    val splitCategoryOptions = remember(expenseCategories) {
+        expenseCategories.flatMap { cat ->
+            listOf(cat.name) + cat.subCategories.map { "${cat.name}-${it.name}" }
+        }
+    }
     var expanded by remember { mutableStateOf(false) }
     Box {
         Surface(
@@ -1199,14 +1244,14 @@ fun MonthlyCalendarSheet(
                         )
                     },
                     shape = RoundedCornerShape(14.dp),
-                    color = Color(0xFFEBEBEB),
+                    color = ICostSearchBg,
                     modifier = Modifier.heightIn(min = 40.dp)
                 ) {
                     Box(contentAlignment = Alignment.Center, modifier = Modifier.heightIn(min = 40.dp)) {
                         Text(
                             text = "今日",
                             fontSize = 13.sp,
-                            color = Color(0xFF666666),
+                            color = ICostTextSecondary,
                             fontWeight = FontWeight.Medium,
                             modifier = Modifier.padding(horizontal = 14.dp)
                         )
@@ -1261,11 +1306,12 @@ fun MonthlyCalendarSheet(
                                         val isSelected = safeSelectedDay == dayNum
                                         val hasExp = dayExp > 0L
 
+                                        val isDark = AppearanceConfigManager.isDarkThemeActive
                                         val targetCellBg = when {
-                                            isSelected -> ICostCoralRed
-                                            hasExp -> Color(0xFFFDECE9)
-                                            dayInc > 0L -> Color(0xFFE8F8F0)
-                                            else -> Color(0xFFF7F7F8)
+                                            isSelected -> ICostExpenseColor
+                                            hasExp -> ICostExpenseColor.copy(alpha = if (isDark) 0.20f else 0.10f)
+                                            dayInc > 0L -> ICostIncomeColor.copy(alpha = if (isDark) 0.20f else 0.10f)
+                                            else -> ICostCellGray
                                         }
                                         val cellBg by animateColorAsState(
                                             targetValue = targetCellBg,
@@ -1294,7 +1340,7 @@ fun MonthlyCalendarSheet(
                                                 Text(
                                                     text = "-${formatCalendarCellAmount(dayExp)}",
                                                     fontSize = 10.sp,
-                                                    color = if (isSelected) Color.White else ICostCoralRed,
+                                                    color = if (isSelected) Color.White else ICostExpenseColor,
                                                     maxLines = 1,
                                                     softWrap = false
                                                 )
@@ -1302,7 +1348,7 @@ fun MonthlyCalendarSheet(
                                                 Text(
                                                     text = "+${formatCalendarCellAmount(dayInc)}",
                                                     fontSize = 10.sp,
-                                                    color = if (isSelected) Color.White else ICostGreenIncome,
+                                                    color = if (isSelected) Color.White else ICostIncomeColor,
                                                     maxLines = 1,
                                                     softWrap = false
                                                 )
@@ -1338,8 +1384,8 @@ fun MonthlyCalendarSheet(
                         .padding(vertical = 12.dp, horizontal = 14.dp),
                     horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
-                    CalendarSummaryMetric("总支出", formatMoneyCents(dayExpenseCents), ICostCoralRed)
-                    CalendarSummaryMetric("总收入", formatMoneyCents(dayIncomeCents), ICostGreenIncome)
+                    CalendarSummaryMetric("总支出", formatMoneyCents(dayExpenseCents), ICostExpenseColor)
+                    CalendarSummaryMetric("总收入", formatMoneyCents(dayIncomeCents), ICostIncomeColor)
                     if (dayRefundCents > 0L) {
                         CalendarSummaryMetric("退款", formatMoneyCents(dayRefundCents), ICostAmberGold)
                     } else {
@@ -1439,20 +1485,24 @@ fun MonthlyCalendarSheet(
                                 }
                                 if (isRefunded) {
                                     Text(
-                                        text = String.format(Locale.US, "%s%,.2f", sym, item.amountCents / 100.0),
+                                        text = "$sym${AppearanceConfigManager.formatDisplayAmount(item.amountCents / 100.0)}",
                                         fontSize = 12.sp,
                                         color = ICostTextSecondary,
                                         textDecoration = TextDecoration.LineThrough
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = String.format(Locale.US, "-¥%,.2f", netExp / 100.0),
+                                        text = "-¥${AppearanceConfigManager.formatDisplayAmount(netExp / 100.0)}",
                                         fontSize = 16.sp,
                                         fontWeight = FontWeight.SemiBold,
-                                        color = ICostCoralRed
+                                        color = ICostExpenseColor
                                     )
                                 } else {
-                                    val amtColor = resolveTransactionBadgeColor(item.type)
+                                    val amtColor = when (item.type) {
+                                        TransactionType.EXPENSE, TransactionType.LOAN_OUT -> ICostExpenseColor
+                                        TransactionType.INCOME, TransactionType.LOAN_IN -> ICostIncomeColor
+                                        else -> resolveTransactionBadgeColor(item.type)
+                                    }
                                     val prefix = when (item.type) {
                                         TransactionType.EXPENSE, TransactionType.LOAN_OUT -> "-"
                                         TransactionType.INCOME, TransactionType.LOAN_IN -> "+"

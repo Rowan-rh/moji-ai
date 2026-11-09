@@ -2,6 +2,7 @@ package com.moji.ai.ai
 
 import android.content.Context
 import com.moji.ai.data.local.TransactionEntity
+import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.TransactionType
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -55,7 +56,7 @@ class MerchantMemoryManager(context: Context) {
         if (tx.type != TransactionType.EXPENSE && tx.type != TransactionType.INCOME) return
         val normalized = normalizeMerchantKey(tx.merchant)
         if (normalized.length < 2 || normalized in GENERIC_MERCHANT_STOPWORDS) return
-        if (tx.category.isBlank()) return
+        if (tx.category.isBlank() || CategoryCatalog.isPendingTriage(tx.category)) return
 
         val current = _memoriesFlow.value.toMutableList()
         val idx = current.indexOfFirst { it.merchantKeyword.equals(normalized, ignoreCase = true) }
@@ -84,7 +85,7 @@ class MerchantMemoryManager(context: Context) {
 
     fun upsertMemory(keyword: String, category: String, preferredWalletId: Long? = null) {
         val normalized = normalizeMerchantKey(keyword)
-        if (normalized.length < 2 || category.isBlank()) return
+        if (normalized.length < 2 || category.isBlank() || CategoryCatalog.isPendingTriage(category)) return
         val current = _memoriesFlow.value.toMutableList()
         val idx = current.indexOfFirst { it.merchantKeyword.equals(normalized, ignoreCase = true) }
         if (idx >= 0) {
@@ -113,6 +114,36 @@ class MerchantMemoryManager(context: Context) {
     fun deleteMemory(keyword: String) {
         val updated = _memoriesFlow.value.filterNot { it.merchantKeyword.equals(keyword, ignoreCase = true) }
         saveEntries(updated)
+    }
+
+    /**
+     * 当分类被重命名或删除迁移时，同步级联更新商户记忆库中的目标分类
+     */
+    fun migrateCategoryCascade(
+        oldCategory: String,
+        newCategory: String,
+        includeSubPrefix: Boolean,
+        preserveSubSuffix: Boolean
+    ) {
+        var changed = false
+        val updated = _memoriesFlow.value.map { entry ->
+            val mapped = CategoryCatalog.remapCascadedCategory(
+                current = entry.category,
+                oldCategory = oldCategory,
+                newCategory = newCategory,
+                includeSubPrefix = includeSubPrefix,
+                preserveSubSuffix = preserveSubSuffix
+            )
+            if (mapped != null) {
+                changed = true
+                entry.copy(category = mapped, updatedAtMillis = System.currentTimeMillis())
+            } else {
+                entry
+            }
+        }
+        if (changed) {
+            saveEntries(updated)
+        }
     }
 
     /**
@@ -197,7 +228,7 @@ object WeightedCategoryClassifier {
             itemKeywords = listOf("珍珠奶茶", "芝士茶", "柠檬茶", "杨枝甘露", "伯牙绝弦")
         ),
         WeightedCategoryRule(
-            category = "餐饮-买菜",
+            category = "餐饮-蔬菜",
             strongKeywords = listOf("买菜", "生鲜", "菜市场", "农贸"),
             brandKeywords = listOf("盒马", "叮咚买菜", "朴朴超市", "小象超市", "美团买菜", "钱大妈", "百果园"),
             itemKeywords = listOf("蔬菜", "猪肉", "牛肉", "鸡蛋", "海鲜", "生鲜配送"),
@@ -255,13 +286,13 @@ object WeightedCategoryClassifier {
             itemKeywords = listOf("经济舱", "值机", "机建燃油")
         ),
         WeightedCategoryRule(
-            category = "交通-加油",
+            category = "汽车-加油",
             strongKeywords = listOf("加油", "充电桩", "特来电", "星星充电"),
             brandKeywords = listOf("中国石化", "中国石油", "壳牌", "中海油", "小桔充电", "蔚来能源"),
             itemKeywords = listOf("92号", "95号", "柴油", "充电服务费")
         ),
         WeightedCategoryRule(
-            category = "交通-停车",
+            category = "汽车-停车",
             strongKeywords = listOf("停车费", "停车场", "泊车", "ETC"),
             brandKeywords = listOf("捷停车", "ETCP", "蜜蜂停车"),
             itemKeywords = listOf("临停", "车牌缴费")
@@ -325,12 +356,12 @@ object WeightedCategoryClassifier {
             brandKeywords = listOf("自如", "泊寓", "龙湖冠寓", "相寓")
         ),
         WeightedCategoryRule(
-            category = "住房-水电煤",
+            category = "住房-水电费",
             strongKeywords = listOf("电费", "水费", "燃气费", "暖气费", "生活缴费"),
             brandKeywords = listOf("国家电网", "南方电网", "自来水公司", "燃气集团", "网上国网")
         ),
         WeightedCategoryRule(
-            category = "住房-物业",
+            category = "住房-物业费",
             strongKeywords = listOf("物业费", "物业管理", "垃圾处理费"),
             brandKeywords = listOf("万科物业", "万物云", "碧桂园服务", "绿城服务", "保利物业")
         ),
@@ -374,13 +405,26 @@ object WeightedCategoryClassifier {
         )
     )
 
+    private val defaultExpenseMainNames: Set<String> by lazy {
+        CategoryCatalog.defaultExpenseCategories.map { it.name }.toSet()
+    }
+
+    private val defaultExpenseSubNames: Set<String> by lazy {
+        CategoryCatalog.defaultExpenseCategories
+            .flatMap { cat -> cat.subCategories.map { it.name } }
+            .toSet()
+    }
+
     fun classifyExpense(rawText: String, merchant: String = ""): Pair<String, Float> {
         val combined = "$merchant $rawText"
-        var bestCategory = "餐饮"
+        val activeExpenseCats = CategoryCatalog.expenseCategories
+        var bestCategory = activeExpenseCats.firstOrNull()?.name ?: "餐饮"
         var bestScore = 0
+        val excludedCategories = mutableSetOf<String>()
 
         for (rule in rules) {
             if (rule.excludeKeywords.any { combined.contains(it, ignoreCase = true) }) {
+                excludedCategories.add(rule.category)
                 continue
             }
             var score = 0
@@ -397,6 +441,57 @@ object WeightedCategoryClassifier {
                 bestScore = score
                 bestCategory = rule.category
             }
+        }
+
+        // 动态感知用户在 CategoryCatalog 中新增的自定义一级/二级分类名称（不绕过 excludeKeywords，也不覆盖已命中的内置默认规则）
+        for (cat in activeExpenseCats) {
+            for (sub in cat.subCategories) {
+                val fullSub = "${cat.name}-${sub.name}"
+                if (fullSub in excludedCategories) continue
+                val isCustomSub = sub.name !in defaultExpenseSubNames
+                if (sub.name.length >= 2 && combined.contains(sub.name, ignoreCase = true)) {
+                    if (isCustomSub && (bestScore == 0 || bestCategory == cat.name || bestCategory.startsWith("${cat.name}-"))) {
+                        bestScore = maxOf(bestScore, 14)
+                        bestCategory = fullSub
+                    } else if (bestScore == 0) {
+                        bestScore = 10
+                        bestCategory = fullSub
+                    }
+                }
+            }
+            if (cat.name in excludedCategories) continue
+            val isCustomMain = cat.name !in defaultExpenseMainNames
+            if (cat.name.length >= 2 && combined.contains(cat.name, ignoreCase = true)) {
+                if (isCustomMain && bestScore < 11) {
+                    bestScore = 11
+                    bestCategory = cat.name
+                } else if (bestScore == 0) {
+                    bestScore = 8
+                    bestCategory = cat.name
+                }
+            }
+        }
+
+        // 若内置规则产出的分类已被用户重命名或删除，回退到当前有效分类
+        val parts = bestCategory.split("-")
+        val mainPart = parts.firstOrNull().orEmpty()
+        val subPart = parts.getOrNull(1)
+        val matchedMain = activeExpenseCats.firstOrNull { it.name == mainPart }
+        if (matchedMain == null) {
+            val matchedBySub = if (!subPart.isNullOrBlank()) {
+                activeExpenseCats.firstNotNullOfOrNull { c ->
+                    c.subCategories.firstOrNull { it.name == subPart }?.let { "${c.name}-${it.name}" }
+                }
+            } else null
+            bestCategory = matchedBySub
+                ?: activeExpenseCats.firstOrNull { it.name == "其他" }?.name
+                ?: activeExpenseCats.firstOrNull()?.name
+                ?: bestCategory
+        } else if (!subPart.isNullOrBlank() && matchedMain.subCategories.none { it.name == subPart }) {
+            val matchedElsewhere = activeExpenseCats.firstNotNullOfOrNull { c ->
+                c.subCategories.firstOrNull { it.name == subPart }?.let { "${c.name}-${it.name}" }
+            }
+            bestCategory = matchedElsewhere ?: matchedMain.name
         }
 
         val confidence = when {

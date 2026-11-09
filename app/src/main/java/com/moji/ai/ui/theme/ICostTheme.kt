@@ -51,6 +51,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -100,6 +101,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.R
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AmountColorScheme
+import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
@@ -127,21 +130,42 @@ val QuicksandFontFamily = FontFamily(
     Font(R.font.quicksand_bold, FontWeight.Bold)
 )
 
-// 1:1 iCost 标准色彩体系
-val ICostBgGray = Color(0xFFF6F6F6)
-val ICostCardWhite = Color(0xFFFFFFFF)
-val ICostCellGray = Color(0xFFF7F7F8)
+// 1:1 iCost 标准色彩体系（支持浅色/深色动态语义调色板与收支配色方案）
+val ICostBgGray: Color
+    get() = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF111318) else Color(0xFFF6F6F6)
+val ICostCardWhite: Color
+    get() = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF1C1F26) else Color(0xFFFFFFFF)
+val ICostCellGray: Color
+    get() = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF252932) else Color(0xFFF7F7F8)
 val ICostCoralRed = Color(0xFFE65540)
 val ICostAmberGold = Color(0xFFF5B400)
 val ICostBlueAccent = Color(0xFF1677FF)
 val ICostGreenIncome = Color(0xFF22B573)
-val ICostTextPrimary = Color(0xFF141414)
-val ICostTextSecondary = Color(0xFF8C8C8C)
-val ICostTextMuted = Color(0xFFAEAEAE)
-val ICostSearchBg = Color(0xFFEBEBEB)
-val ICostPillGray = Color(0xFFECECEE)
-val ICostDivider = Color(0xFFF1F1F1)
-val ICostSlateIcon = Color(0xFF434957)
+val ICostExpenseColor: Color
+    get() {
+        val scheme = AppearanceConfigManager.currentConfig.amountColorScheme
+        return if (AppearanceConfigManager.isDarkThemeActive && scheme == AmountColorScheme.MONOCHROME) {
+            Color(0xFF94A3B8)
+        } else {
+            Color(scheme.expenseHex)
+        }
+    }
+val ICostIncomeColor: Color
+    get() = Color(AppearanceConfigManager.currentConfig.amountColorScheme.incomeHex)
+val ICostTextPrimary: Color
+    get() = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFFF3F4F6) else Color(0xFF141414)
+val ICostTextSecondary: Color
+    get() = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF9CA3AF) else Color(0xFF8C8C8C)
+val ICostTextMuted: Color
+    get() = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF6B7280) else Color(0xFFAEAEAE)
+val ICostSearchBg: Color
+    get() = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF222630) else Color(0xFFEBEBEB)
+val ICostPillGray: Color
+    get() = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF282C37) else Color(0xFFECECEE)
+val ICostDivider: Color
+    get() = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF2A2E39) else Color(0xFFF1F1F1)
+val ICostSlateIcon: Color
+    get() = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFFD1D5DB) else Color(0xFF434957)
 
 private val assetBitmapCache = ConcurrentHashMap<String, ImageBitmap>()
 @Volatile
@@ -446,7 +470,7 @@ fun formatMoneyCents(
     if (hide) return "****"
     val sym = CurrencyCode.fromCode(currency).symbol
     val sign = if (cents < 0) "-" else ""
-    return String.format(Locale.US, "%s%s%,.2f", sign, sym, abs(cents) / 100.0)
+    return "$sign$sym${AppearanceConfigManager.formatDisplayAmount(abs(cents) / 100.0)}"
 }
 
 fun formatSignedExpenseCents(
@@ -454,7 +478,7 @@ fun formatSignedExpenseCents(
     currency: String = "CNY"
 ): String {
     val sym = CurrencyCode.fromCode(currency).symbol
-    return String.format(Locale.US, "-%s%,.2f", sym, abs(cents) / 100.0)
+    return "-$sym${AppearanceConfigManager.formatDisplayAmount(abs(cents) / 100.0)}"
 }
 
 fun formatWalletDisplayName(wallet: WalletEntity?, fallback: String = "账户余额"): String {
@@ -1165,10 +1189,16 @@ fun WalletBrandAvatar(wallet: WalletEntity, size: Dp = 40.dp) {
 /**
  * 解析交易分类对应的 iCost 原生线性图标文件名（支持二级分类如 "餐饮-零食"）
  */
+fun resolveCategoryIconAsset(
+    category: String,
+    type: TransactionType = TransactionType.EXPENSE
+): String = resolveCategoryAssetFile(category, type)
+
 fun resolveCategoryAssetFile(
     category: String,
     type: TransactionType = TransactionType.EXPENSE
 ): String {
+    if (CategoryCatalog.isPendingTriage(category)) return "setting_auto.webp"
     if (type == TransactionType.REFUND_OFFSET) return "cat_refund.webp"
     if (type == TransactionType.TRANSFER) return "transfer_swift.webp"
     if (type == TransactionType.REPAYMENT) return "card_outcome_icon.webp"
@@ -1178,24 +1208,42 @@ fun resolveCategoryAssetFile(
     val mainPart = parts.firstOrNull() ?: category
     val subPart = parts.getOrNull(1)
 
-    val allCats = CategoryCatalog.expenseCategories + CategoryCatalog.incomeCategories
-
-    // 优先精确匹配二级分类图标（如 零食 -> sub_snacks.webp）
-    if (!subPart.isNullOrBlank()) {
-        allCats.forEach { cat ->
-            cat.subCategories.firstOrNull { it.name == subPart }?.let { return it.assetFile }
-        }
+    val primaryList = if (type == TransactionType.INCOME) {
+        CategoryCatalog.incomeCategories
+    } else {
+        CategoryCatalog.expenseCategories
+    }
+    val secondaryList = if (type == TransactionType.INCOME) {
+        CategoryCatalog.expenseCategories
+    } else {
+        CategoryCatalog.incomeCategories
     }
 
-    // 再匹配整个名称是否直接命中二级分类或一级分类
-    allCats.forEach { cat ->
-        if (cat.name == category || cat.name == mainPart) {
-            return cat.assetFile
+    fun matchFromList(cats: List<com.moji.ai.data.model.CategoryDef>): String? {
+        if (!subPart.isNullOrBlank()) {
+            // 1. 优先精确匹配「主分类名 + 子分类名」
+            cats.firstOrNull { it.name == mainPart }
+                ?.subCategories
+                ?.firstOrNull { it.name == subPart }
+                ?.let { return it.assetFile }
+            // 2. 次优匹配任意一级分类下的同名二级分类
+            cats.forEach { cat ->
+                cat.subCategories.firstOrNull { it.name == subPart }?.let { return it.assetFile }
+            }
         }
-        cat.subCategories.firstOrNull { it.name == category || it.name == mainPart }?.let {
-            return it.assetFile
+        // 3. 精确匹配一级分类名
+        cats.firstOrNull { it.name == category || it.name == mainPart }?.let { return it.assetFile }
+        // 4. 精确匹配二级分类名
+        cats.forEach { cat ->
+            cat.subCategories.firstOrNull { it.name == category || it.name == mainPart }?.let {
+                return it.assetFile
+            }
         }
+        return null
     }
+
+    matchFromList(primaryList)?.let { return it }
+    matchFromList(secondaryList)?.let { return it }
 
     // 语义模糊兜底
     return when {
@@ -1262,9 +1310,9 @@ fun resolveCategoryAssetFile(
 }
 
 fun resolveTransactionBadgeColor(type: TransactionType): Color = when (type) {
-    TransactionType.EXPENSE -> ICostCoralRed
+    TransactionType.EXPENSE -> ICostExpenseColor
     TransactionType.REFUND_OFFSET -> ICostAmberGold
-    TransactionType.INCOME -> ICostGreenIncome
+    TransactionType.INCOME -> ICostIncomeColor
     TransactionType.TRANSFER -> ICostBlueAccent
     TransactionType.REPAYMENT -> ICostBlueAccent
     TransactionType.LOAN_IN -> Color(0xFF4B5563)
@@ -1272,17 +1320,20 @@ fun resolveTransactionBadgeColor(type: TransactionType): Color = when (type) {
 }
 
 /**
- * 1:1 iCost 彩色实心圆 + 纯白线性分类图标徽章
+ * 1:1 iCost 彩色实心圆 + 纯白线性分类图标徽章（订阅 CategoryCatalog.versionFlow，改图标后全端实时重组）
  */
 @Composable
 fun ICostCategoryBadge(
     category: String,
     type: TransactionType,
     size: Dp = 42.dp,
-    badgeColor: Color = resolveTransactionBadgeColor(type),
+    badgeColor: Color = if (CategoryCatalog.isPendingTriage(category)) Color(0xFF6366F1) else resolveTransactionBadgeColor(type),
     iconRatio: Float = 0.56f
 ) {
-    val assetFile = resolveCategoryAssetFile(category, type)
+    val catalogVersion by CategoryCatalog.versionFlow.collectAsState()
+    val assetFile = remember(category, type, catalogVersion) {
+        resolveCategoryAssetFile(category, type)
+    }
     Box(
         modifier = Modifier
             .size(size)
@@ -1417,20 +1468,21 @@ fun ICostFormField(
     readOnly: Boolean = false,
     minLines: Int = 1,
     maxLines: Int = if (singleLine) 1 else 6,
-    containerColor: Color = Color(0xFFF3F4F6),
+    containerColor: Color = ICostCellGray,
     keyboardOptions: KeyboardOptions = KeyboardOptions.Default,
     visualTransformation: VisualTransformation = VisualTransformation.None,
     trailingContent: (@Composable () -> Unit)? = null
 ) {
     var isFocused by remember { mutableStateOf(false) }
+    val isDark = AppearanceConfigManager.isDarkThemeActive
     val borderColor = when {
         isError -> ICostCoralRed
         isFocused -> ICostBlueAccent
         else -> Color.Transparent
     }
     val bgColor = when {
-        isError -> Color(0xFFFFF5F3)
-        isFocused -> Color(0xFFEFF5FF)
+        isError -> if (isDark) Color(0xFF2D1B1B) else Color(0xFFFFF5F3)
+        isFocused -> if (isDark) Color(0xFF1A253A) else Color(0xFFEFF5FF)
         else -> containerColor
     }
 
@@ -1522,7 +1574,7 @@ fun iCostUnifiedSwitchColors() = SwitchDefaults.colors(
     checkedThumbColor = Color.White,
     checkedTrackColor = ICostBlueAccent,
     uncheckedThumbColor = Color.White,
-    uncheckedTrackColor = Color(0xFFE0E0E5),
+    uncheckedTrackColor = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF3A3F4B) else Color(0xFFE0E0E5),
     uncheckedBorderColor = Color.Transparent
 )
 

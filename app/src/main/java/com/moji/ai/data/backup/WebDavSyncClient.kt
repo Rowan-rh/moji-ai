@@ -1,6 +1,7 @@
 package com.moji.ai.data.backup
 
 import android.content.Context
+import com.moji.ai.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -15,10 +16,10 @@ import java.util.concurrent.TimeUnit
 
 @Serializable
 data class WebDavConfig(
-    val serverUrl: String = "https://dav.jianguoyun.com/dav/MoJi/",
+    val serverUrl: String = WebDavSyncClient.DEFAULT_SERVER_URL,
     val username: String = "",
     val appPassword: String = "",
-    val remoteFileName: String = "moji_latest.mojibackup",
+    val remoteFileName: String = WebDavSyncClient.DEFAULT_REMOTE_FILE_NAME,
     val lastSyncTimeMillis: Long = 0L
 ) {
     val isConfigured: Boolean
@@ -30,6 +31,20 @@ data class WebDavConfig(
  * 支持坚果云、Nextcloud、OwnCloud、群晖 Synology、Alist 等任意标准 WebDAV 服务。
  */
 object WebDavSyncClient {
+
+    val DEFAULT_SERVER_URL: String
+        get() = if (BuildConfig.IS_QA_BUILD) {
+            "https://dav.jianguoyun.com/dav/MoJi-QA/"
+        } else {
+            "https://dav.jianguoyun.com/dav/MoJi/"
+        }
+
+    val DEFAULT_REMOTE_FILE_NAME: String
+        get() = if (BuildConfig.IS_QA_BUILD) {
+            "moji_qa_latest.mojibackup"
+        } else {
+            "moji_latest.mojibackup"
+        }
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
@@ -54,26 +69,36 @@ object WebDavSyncClient {
         prefs.edit().putString("webdav_config_json", jsonCodec.encodeToString(config)).apply()
     }
 
-    private fun buildNormalizedTargetUrl(config: WebDavConfig): Pair<String, String> {
+    private fun buildNormalizedTargetUrl(config: WebDavConfig): Triple<String, String, String> {
         val dirUrl = if (config.serverUrl.trim().endsWith("/")) {
             config.serverUrl.trim()
         } else {
             "${config.serverUrl.trim()}/"
         }
-        val fileName = config.remoteFileName.trim().ifBlank { "moji_latest.mojibackup" }
-        return dirUrl to "$dirUrl$fileName"
+        val fileName = config.remoteFileName.trim().ifBlank { DEFAULT_REMOTE_FILE_NAME }
+        return Triple(dirUrl, "$dirUrl$fileName", fileName)
     }
 
     suspend fun uploadSnapshot(
         config: WebDavConfig,
         backupJson: String
     ): Result<String> = withContext(Dispatchers.IO) {
+        val (dirUrl, fileUrl, resolvedFileName) = buildNormalizedTargetUrl(config)
+        if (BuildConfig.IS_QA_BUILD) {
+            val pointsToProdDir = dirUrl.contains("/MoJi/", ignoreCase = true) &&
+                !dirUrl.contains("QA", ignoreCase = true)
+            val isProdFileName = resolvedFileName.equals("moji_latest.mojibackup", ignoreCase = true)
+            if (isProdFileName || pointsToProdDir) {
+                return@withContext Result.failure(
+                    IllegalArgumentException("QA 独立测试包禁止覆盖正式云备份（请使用含 QA 的目录如 /dav/MoJi-QA/ 及文件名 moji_qa_latest.mojibackup）")
+                )
+            }
+        }
         if (!config.isConfigured) {
             return@withContext Result.failure(IllegalArgumentException("请先填写完整的 WebDAV 服务器地址、账号与应用密码"))
         }
         try {
             val authHeader = Credentials.basic(config.username.trim(), config.appPassword.trim())
-            val (dirUrl, fileUrl) = buildNormalizedTargetUrl(config)
 
             // 1. 尝试 MKCOL 创建目录（若已存在会返回 405 Method Not Allowed，忽略即可）
             val mkcolReq = Request.Builder()
@@ -109,7 +134,7 @@ object WebDavSyncClient {
         }
         try {
             val authHeader = Credentials.basic(config.username.trim(), config.appPassword.trim())
-            val (_, fileUrl) = buildNormalizedTargetUrl(config)
+            val (_, fileUrl, _) = buildNormalizedTargetUrl(config)
 
             val getReq = Request.Builder()
                 .url(fileUrl)
