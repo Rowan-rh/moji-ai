@@ -481,21 +481,21 @@ fun TagManagementScreen(
                                 }
                                 .padding(horizontal = 14.dp, vertical = 13.dp)
                         ) {
+                            // 第一行：莫奈色圆点徽标 + #标签名胶囊 + 所属分组胶囊（预留充裕水平空间，严防分组胶囊折行或被挤压）
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                // 莫奈色圆点徽标
                                 Box(
                                     modifier = Modifier
-                                        .size(38.dp)
+                                        .size(32.dp)
                                         .clip(CircleShape)
                                         .background(tagColor.copy(alpha = 0.16f)),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Box(
                                         modifier = Modifier
-                                            .size(14.dp)
+                                            .size(12.dp)
                                             .clip(CircleShape)
                                             .background(tagColor)
                                     )
@@ -503,96 +503,112 @@ fun TagManagementScreen(
 
                                 Spacer(modifier = Modifier.width(10.dp))
 
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Row(
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                Row(
+                                    modifier = Modifier.weight(1f),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    ICostColorTagChip(
+                                        tagName = tag.name,
+                                        colorHex = tag.colorHex,
+                                        fontSize = 13.sp,
+                                        horizontalPadding = 9.dp,
+                                        verticalPadding = 3.dp,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = ICostCellGray
                                     ) {
-                                        ICostColorTagChip(
-                                            tagName = tag.name,
-                                            colorHex = tag.colorHex,
-                                            fontSize = 13.sp,
-                                            horizontalPadding = 9.dp,
-                                            verticalPadding = 3.dp
+                                        Text(
+                                            text = tag.groupName,
+                                            fontSize = 11.sp,
+                                            color = ICostTextSecondary,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
                                         )
-                                        Surface(
-                                            shape = RoundedCornerShape(6.dp),
-                                            color = ICostCellGray
-                                        ) {
-                                            Text(
-                                                text = tag.groupName,
-                                                fontSize = 10.sp,
-                                                color = ICostTextSecondary,
-                                                fontWeight = FontWeight.Medium,
-                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                            )
-                                        }
                                     }
+                                }
+                            }
 
-                                    Spacer(modifier = Modifier.height(5.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
 
-                                    Text(
-                                        text = buildString {
-                                            append("${txCount} 笔账单")
-                                            if (netExpenseCents > 0L) {
-                                                append(" · 支出 ${formatMoneyCents(netExpenseCents)}")
+                            // 第二行：左侧关联账单收支统计 + 右侧 5 个快捷操作按钮
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = buildString {
+                                        append("${txCount} 笔账单")
+                                        if (netExpenseCents > 0L) {
+                                            append(" · 支出 ${formatMoneyCents(netExpenseCents)}")
+                                        }
+                                        if (totalIncomeCents > 0L) {
+                                            append(" · 收入 ${formatMoneyCents(totalIncomeCents)}")
+                                        }
+                                        if (txCount > 0) {
+                                            append(if (isExpanded) " · 收起明细" else " · 展开明细")
+                                        }
+                                    },
+                                    fontSize = 11.sp,
+                                    color = ICostTextSecondary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = 6.dp)
+                                )
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    // 上移
+                                    TagSmallActionBtn(
+                                        icon = Icons.Default.KeyboardArrowUp,
+                                        contentDescription = "上移${tag.name}",
+                                        enabled = globalIndex > 0,
+                                        onClick = { onMoveTag(globalIndex, -1) }
+                                    )
+                                    // 下移
+                                    TagSmallActionBtn(
+                                        icon = Icons.Default.KeyboardArrowDown,
+                                        contentDescription = "下移${tag.name}",
+                                        enabled = globalIndex < tags.lastIndex,
+                                        onClick = { onMoveTag(globalIndex, 1) }
+                                    )
+                                    // 合并标签
+                                    TagSmallActionBtn(
+                                        icon = Icons.AutoMirrored.Filled.CallMerge,
+                                        contentDescription = "合并${tag.name}",
+                                        enabled = canMerge,
+                                        tint = ICostAmberGold,
+                                        onClick = {
+                                            if (canMerge) {
+                                                mergingSourceTag = tag
                                             }
-                                            if (totalIncomeCents > 0L) {
-                                                append(" · 收入 ${formatMoneyCents(totalIncomeCents)}")
-                                            }
-                                            if (txCount > 0) {
-                                                append(if (isExpanded) " · 点击收起明细" else " · 点击展开明细")
-                                            }
-                                        },
-                                        fontSize = 11.sp,
-                                        color = ICostTextSecondary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        }
+                                    )
+                                    // 编辑标签
+                                    TagSmallActionBtn(
+                                        icon = Icons.Default.Edit,
+                                        contentDescription = "编辑${tag.name}",
+                                        enabled = true,
+                                        tint = ICostBlueAccent,
+                                        onClick = { editingTarget = tag }
+                                    )
+                                    // 删除标签
+                                    TagSmallActionBtn(
+                                        icon = Icons.Default.DeleteOutline,
+                                        contentDescription = "删除${tag.name}",
+                                        enabled = true,
+                                        tint = ICostCoralRed,
+                                        onClick = { deletingTargetTag = tag }
                                     )
                                 }
-
-                                // 上移
-                                TagSmallActionBtn(
-                                    icon = Icons.Default.KeyboardArrowUp,
-                                    contentDescription = "上移${tag.name}",
-                                    enabled = globalIndex > 0,
-                                    onClick = { onMoveTag(globalIndex, -1) }
-                                )
-                                // 下移
-                                TagSmallActionBtn(
-                                    icon = Icons.Default.KeyboardArrowDown,
-                                    contentDescription = "下移${tag.name}",
-                                    enabled = globalIndex < tags.lastIndex,
-                                    onClick = { onMoveTag(globalIndex, 1) }
-                                )
-                                // 合并标签
-                                TagSmallActionBtn(
-                                    icon = Icons.AutoMirrored.Filled.CallMerge,
-                                    contentDescription = "合并${tag.name}",
-                                    enabled = canMerge,
-                                    tint = ICostAmberGold,
-                                    onClick = {
-                                        if (canMerge) {
-                                            mergingSourceTag = tag
-                                        }
-                                    }
-                                )
-                                // 编辑标签
-                                TagSmallActionBtn(
-                                    icon = Icons.Default.Edit,
-                                    contentDescription = "编辑${tag.name}",
-                                    enabled = true,
-                                    tint = ICostBlueAccent,
-                                    onClick = { editingTarget = tag }
-                                )
-                                // 删除标签
-                                TagSmallActionBtn(
-                                    icon = Icons.Default.DeleteOutline,
-                                    contentDescription = "删除${tag.name}",
-                                    enabled = true,
-                                    tint = ICostCoralRed,
-                                    onClick = { deletingTargetTag = tag }
-                                )
                             }
 
                             // 点击展开该标签下的关联账单明细列表（按时间倒序）
@@ -729,6 +745,7 @@ fun TagManagementScreen(
 internal fun TagTransactionDrilldownRow(
     tx: TransactionEntity,
     walletMap: Map<Long, WalletEntity>,
+    hideAmounts: Boolean = false,
     onClick: () -> Unit
 ) {
     val dateStr = remember(tx.timestamp) {
@@ -740,10 +757,14 @@ internal fun TagTransactionDrilldownRow(
         else -> formatWalletDisplayName(tx.sourceWalletId?.let { walletMap[it] })
     }
     val netExp = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
-    val amountText = when (tx.type) {
-        TransactionType.EXPENSE -> "-${formatMoneyCents(netExp)}"
-        TransactionType.INCOME -> "+${formatMoneyCents(tx.amountCnyCents)}"
-        else -> formatMoneyCents(tx.amountCnyCents)
+    val amountText = if (hideAmounts) {
+        formatMoneyCents(netExp, "CNY", true)
+    } else {
+        when (tx.type) {
+            TransactionType.EXPENSE -> "-${formatMoneyCents(netExp)}"
+            TransactionType.INCOME -> "+${formatMoneyCents(tx.amountCnyCents)}"
+            else -> formatMoneyCents(tx.amountCnyCents)
+        }
     }
     val amountColor = when (tx.type) {
         TransactionType.EXPENSE -> ICostCoralRed

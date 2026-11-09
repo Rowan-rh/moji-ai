@@ -1386,8 +1386,7 @@ fun ICostStatisticsScreen(
                             )
 
                             val periodTotalCents = if (tagRankMetric == 0) netExpenseCents else totalIncomeCents
-                            val totalTagSumCents = tagBreakdown.sumOf { it.totalCents }.coerceAtLeast(1L)
-                            val denominatorCents = max(periodTotalCents, totalTagSumCents).coerceAtLeast(1L)
+                            val denominatorCents = periodTotalCents.coerceAtLeast(1L)
 
                             if (tagBreakdown.isEmpty()) {
                                 Text(
@@ -1512,6 +1511,7 @@ fun ICostStatisticsScreen(
                                                     TagTransactionDrilldownRow(
                                                         tx = tx,
                                                         walletMap = walletMap,
+                                                        hideAmounts = hideAmounts,
                                                         onClick = { onSelectTransaction(tx) }
                                                     )
                                                 }

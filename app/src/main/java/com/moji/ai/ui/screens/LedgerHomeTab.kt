@@ -86,6 +86,7 @@ import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TagCatalog
+import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.ui.QuickBookkeepingTemplate
 import com.moji.ai.ui.components.ICostConfirmDialog
@@ -151,6 +152,7 @@ fun ICostLedgerHomeScreen(
     onDeleteTransaction: (Long) -> Unit = {}
 ) {
     val walletMap = remember(wallets) { wallets.associateBy { it.id } }
+    val catalogTags by TagCatalog.tagsFlow.collectAsState()
     // 以下界面状态在切换底部 Tab 后保留
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var showQuickTemplatesBar by rememberSaveable { mutableStateOf(false) }
@@ -1024,6 +1026,7 @@ fun ICostLedgerHomeScreen(
                                             ICostLedgerRow(
                                                 tx = tx,
                                                 walletMap = walletMap,
+                                                catalogTags = catalogTags,
                                                 onClick = { onClickTransaction(tx) }
                                             )
                                         }
@@ -1237,6 +1240,7 @@ private fun MonthArrowButton(
 private fun ICostLedgerRow(
     tx: TransactionEntity,
     walletMap: Map<Long, WalletEntity>,
+    catalogTags: List<TagDef>,
     onClick: () -> Unit
 ) {
     val timeStr = remember(tx.timestamp) {
@@ -1297,7 +1301,6 @@ private fun ICostLedgerRow(
     val isRefundOffset = tx.type == TransactionType.REFUND_OFFSET
     val netExpenseCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
     val hasDiscountBreakdown = (tx.type == TransactionType.EXPENSE || isRefundOffset) && tx.discountCents > 0L
-    val catalogTags by TagCatalog.tagsFlow.collectAsState()
     val userTags = remember(tx.tags) { TagCatalog.parseTags(tx.tags) }
     val hasTagsRow = hasDiscountBreakdown || tx.duplicateSuspected || isRefundedExpense || isRefundOffset || tx.reimbursable || userTags.isNotEmpty()
 

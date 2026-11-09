@@ -8,7 +8,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
-import kotlin.math.abs
 
 @Serializable
 data class TagDef(
@@ -255,7 +254,7 @@ object TagCatalog {
         if (clean.isEmpty()) return DEFAULT_TAG_COLOR_HEX
         _tagsFlow.value.firstOrNull { it.name == clean }?.let { return it.colorHex }
         defaultTags.firstOrNull { it.name == clean }?.let { return it.colorHex }
-        val idx = abs(clean.hashCode()) % presetColors.size
+        val idx = (clean.hashCode() and Int.MAX_VALUE) % presetColors.size
         return presetColors[idx].colorHex
     }
 
@@ -273,7 +272,7 @@ object TagCatalog {
                 if (!isValidSanitizedTagName(token)) continue
                 if (token in existingSet || token in _mutedTagNames) continue
                 val preset = defaultTags.firstOrNull { it.name == token }
-                val colorHex = preset?.colorHex ?: presetColors[abs(token.hashCode()) % presetColors.size].colorHex
+                val colorHex = preset?.colorHex ?: presetColors[(token.hashCode() and Int.MAX_VALUE) % presetColors.size].colorHex
                 val groupName = preset?.groupName ?: "日常"
                 current.add(TagDef(name = token, colorHex = colorHex, groupName = groupName))
                 existingSet.add(token)

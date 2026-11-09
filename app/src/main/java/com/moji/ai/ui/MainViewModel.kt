@@ -1261,7 +1261,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                 } else {
-                    TagCatalog.recordTagRemap(oldTag = tagName, newTag = null)
                     postMessage("已从标签列表中移除「#$tagName」（保留历史账单上的标签记录）")
                 }
             }
