@@ -143,6 +143,7 @@ import com.moji.ai.service.RomKeepAliveGuideHelper
 import com.moji.ai.update.AppUpdateConfig
 import com.moji.ai.update.ReleaseUpdateInfo
 import com.moji.ai.update.UpdateCheckState
+import com.moji.ai.ui.components.AgentTriageBottomSheet
 import com.moji.ai.ui.components.ICostCalculatorSheet
 import com.moji.ai.ui.components.MonthlyCalendarSheet
 import com.moji.ai.ui.components.TransactionDetailSheet
@@ -211,6 +212,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val incomeCategories by viewModel.incomeCategories.collectAsState()
     val tags by viewModel.tags.collectAsState()
     val customCurrencyRates by viewModel.customCurrencyRates.collectAsState()
+    val triageReport by viewModel.triageReport.collectAsState()
+    val isTriaging by viewModel.isTriaging.collectAsState()
+    val showAgentTriageSheet by viewModel.showAgentTriageSheet.collectAsState()
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) } // 0: 账本, 1: 资产, 2: 统计
     // 每个 Tab 独立保存 rememberSaveable 状态（搜索词、折叠状态、统计周期等），切换 Tab 回来不丢失
@@ -422,7 +426,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                             viewModel.refundExpense(tx.id, remainYuan, tx.sourceWalletId, "侧滑快捷全额退款")
                         }
                     },
-                    onDeleteTransaction = { txId -> viewModel.deleteTransaction(txId) }
+                    onDeleteTransaction = { txId -> viewModel.deleteTransaction(txId) },
+                    onOpenAgentTriage = { viewModel.openAgentTriageSheet() }
             )
         }
 
@@ -647,7 +652,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 },
                 onCountCategoryTransactions = { cat, includeSub, isExp ->
                     viewModel.countTransactionsByCategory(cat, includeSub, isExp)
-                }
+                },
+                onOpenAgentTriage = { viewModel.openAgentTriageSheet() }
             )
         }
 
@@ -784,6 +790,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 observabilityLogs = observabilityLogs,
                 onReplayLog = { entry -> viewModel.simulateCapturedEvent(entry.rawText, entry.packageName) },
                 onClearLogs = { viewModel.clearObservabilityLogs() },
+                onOpenAgentTriage = { viewModel.openAgentTriageSheet() },
                 onBack = { showSmartBookkeepingPage = false }
             )
         }
@@ -876,6 +883,19 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onLoadPresetTemplates = { viewModel.addPresetTemplates() },
                 onOpenCurrencyManagement = {
                     showCurrencyManagementPage = true
+                },
+                onOpenAgentTriage = { viewModel.openAgentTriageSheet() }
+            )
+        }
+
+        if (showAgentTriageSheet) {
+            AgentTriageBottomSheet(
+                report = triageReport,
+                isTriaging = isTriaging,
+                onDismiss = { viewModel.dismissAgentTriageSheet() },
+                onRescan = { viewModel.runAgentBillTriage() },
+                onApplySelected = { bills, newCats, newRules, newMemories ->
+                    viewModel.applyAgentTriageProposal(bills, newCats, newRules, newMemories)
                 }
             )
         }
@@ -1562,6 +1582,7 @@ private fun ICostSmartBookkeepingFullScreen(
     observabilityLogs: List<CaptureObservabilityLogEntry> = emptyList(),
     onReplayLog: (CaptureObservabilityLogEntry) -> Unit = {},
     onClearLogs: () -> Unit = {},
+    onOpenAgentTriage: () -> Unit = {},
     onBack: () -> Unit
 ) {
     BackHandler(onBack = onBack)
@@ -1720,8 +1741,27 @@ private fun ICostSmartBookkeepingFullScreen(
                         modifier = Modifier.weight(1f),
                         bottomPadding = 0.dp
                     )
-                    TextButton(onClick = { showAddSmartRuleDialog = true }) {
-                        Text("新增规则", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = ICostBlueAccent)
+                    TextButton(
+                        onClick = { showAddSmartRuleDialog = true },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Text("手动新增", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = ICostTextSecondary)
+                    }
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = Color(0xFF4F46E5),
+                        modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
+                            onOpenAgentTriage()
+                        }
+                    ) {
+                        Text(
+                            text = "✨ Agent 梳理",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
                     }
                 }
                 Surface(

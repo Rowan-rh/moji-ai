@@ -5,9 +5,15 @@ import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.moji.ai.MoJiApp
+import com.moji.ai.ai.AgentBillTriageEngine
+import com.moji.ai.ai.AgentTriageReport
 import com.moji.ai.ai.AiConfig
 import com.moji.ai.ai.MerchantMemoryEntry
+import com.moji.ai.ai.ProposedCategoryItem
+import com.moji.ai.ai.ProposedMemoryItem
+import com.moji.ai.ai.ProposedRuleItem
 import com.moji.ai.ai.SmartConditionRule
+import com.moji.ai.ai.TriageBillItem
 import com.moji.ai.data.backup.BackupAndCsvTransferEngine
 import com.moji.ai.data.backup.CsvParsePreviewResult
 import com.moji.ai.data.backup.WebDavConfig
@@ -643,6 +649,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isParsing = MutableStateFlow(false)
     val isParsing: StateFlow<Boolean> = _isParsing.asStateFlow()
+
+    private val agentTriageEngine = AgentBillTriageEngine(
+        configManager = configManager,
+        merchantMemoryManager = app.merchantMemoryManager,
+        smartRuleEngine = app.smartRuleEngine
+    )
+
+    private val _triageReport = MutableStateFlow<AgentTriageReport?>(null)
+    val triageReport: StateFlow<AgentTriageReport?> = _triageReport.asStateFlow()
+
+    private val _isTriaging = MutableStateFlow(false)
+    val isTriaging: StateFlow<Boolean> = _isTriaging.asStateFlow()
+
+    private val _showAgentTriageSheet = MutableStateFlow(false)
+    val showAgentTriageSheet: StateFlow<Boolean> = _showAgentTriageSheet.asStateFlow()
 
     private val _templates = MutableStateFlow(loadSavedTemplates())
     val templates: StateFlow<List<QuickBookkeepingTemplate>> = _templates.asStateFlow()
@@ -1831,5 +1852,88 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun restoreDefaultTags(mergeOnly: Boolean = true) {
         TagCatalog.restoreDefaultTags(mergeOnly = mergeOnly)
         postMessage(if (mergeOnly) "已补全缺失的默认标签" else "已重置为默认标签列表")
+    }
+
+    fun openAgentTriageSheet() {
+        _showAgentTriageSheet.value = true
+        runAgentBillTriage()
+    }
+
+    fun dismissAgentTriageSheet() {
+        _showAgentTriageSheet.value = false
+    }
+
+    fun runAgentBillTriage() {
+        if (_isTriaging.value) return
+        viewModelScope.launch {
+            _isTriaging.value = true
+            try {
+                val allTxs = repository.getAllTransactions()
+                val report = agentTriageEngine.analyzeBills(
+                    transactions = allTxs,
+                    existingRules = smartRules.value,
+                    existingMemories = merchantMemories.value,
+                    expenseCategories = CategoryCatalog.expenseCategories,
+                    incomeCategories = CategoryCatalog.incomeCategories
+                )
+                _triageReport.value = report
+            } finally {
+                _isTriaging.value = false
+            }
+        }
+    }
+
+    fun applyAgentTriageProposal(
+        bills: List<TriageBillItem>,
+        newCategories: List<ProposedCategoryItem>,
+        newRules: List<ProposedRuleItem>,
+        newMemories: List<ProposedMemoryItem>
+    ) {
+        viewModelScope.launch {
+            var createdCatCount = 0
+            // 1. 先创建建议新增的一级/二级分类
+            for (cat in newCategories) {
+                if (CategoryCatalog.ensureCategoryPathExists(cat.fullCategoryPath, cat.isExpense, cat.iconAsset)) {
+                    createdCatCount++
+                }
+            }
+
+            // 2. 若勾选归档的账单引用了某新分类但用户未单独取消该账单，确保目标分类树节点存在
+            for (bill in bills) {
+                val isExp = bill.type != TransactionType.INCOME
+                if (CategoryCatalog.ensureCategoryPathExists(bill.suggestedCategory, isExp)) {
+                    createdCatCount++
+                }
+            }
+
+            // 3. 在 Room 事务中原子批量更新账单分类
+            val updatesMap = bills.associate { it.transactionId to it.suggestedCategory }
+            val updatedBillCount = repository.batchUpdateTransactionCategories(updatesMap)
+
+            // 4. 写入自动条件规则与商户记忆
+            var addedRuleCount = 0
+            for (r in newRules) {
+                app.smartRuleEngine.upsertRule(r.rule)
+                addedRuleCount++
+            }
+            var addedMemCount = 0
+            for (m in newMemories) {
+                app.merchantMemoryManager.upsertMemory(
+                    keyword = m.merchantKeyword,
+                    category = m.targetCategory,
+                    preferredWalletId = m.preferredWalletId
+                )
+                addedMemCount++
+            }
+
+            val summaryParts = mutableListOf<String>()
+            if (updatedBillCount > 0) summaryParts.add("归档 $updatedBillCount 笔账单")
+            if (createdCatCount > 0) summaryParts.add("新增 $createdCatCount 个分类")
+            if (addedRuleCount + addedMemCount > 0) summaryParts.add("生效 ${addedRuleCount + addedMemCount} 条规则与记忆")
+            if (summaryParts.isNotEmpty()) {
+                postMessage("✨ Agent 梳理已生效：${summaryParts.joinToString(" · ")}")
+            }
+            runAgentBillTriage()
+        }
     }
 }
