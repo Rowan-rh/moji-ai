@@ -445,7 +445,12 @@ private fun BaseCurrencyAndConverterCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(end = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Box(
                         modifier = Modifier
                             .size(38.dp)
@@ -462,13 +467,14 @@ private fun BaseCurrencyAndConverterCard(
                         )
                     }
                     Spacer(modifier = Modifier.width(10.dp))
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
                                 text = "人民币 (CNY)",
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = ICostTextPrimary
+                                color = ICostTextPrimary,
+                                maxLines = 1
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Surface(
@@ -480,14 +486,17 @@ private fun BaseCurrencyAndConverterCard(
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold,
                                     color = ICostCoralRed,
+                                    maxLines = 1,
                                     modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                 )
                             }
                         }
                         Text(
-                            text = "所有外币账单与外币资产均按生效汇率折合 CNY 汇总",
+                            text = "外币账单与资产均按生效汇率折合 CNY 汇总",
                             fontSize = 11.sp,
-                            color = ICostTextSecondary
+                            color = ICostTextSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
                     }
                 }
@@ -496,7 +505,9 @@ private fun BaseCurrencyAndConverterCard(
                     fontFamily = ICDinFontFamily,
                     fontSize = 17.sp,
                     fontWeight = FontWeight.Bold,
-                    color = ICostTextPrimary
+                    color = ICostTextPrimary,
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
 
@@ -664,7 +675,8 @@ private fun ForeignCurrencyRateCard(
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold,
                     color = if (isCustom) ICostBlueAccent else ICostTextPrimary,
-                    maxLines = 1
+                    maxLines = 1,
+                    softWrap = false
                 )
             }
 
