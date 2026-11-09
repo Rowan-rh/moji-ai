@@ -143,7 +143,7 @@ val ICostBlueAccent = Color(0xFF1677FF)
 val ICostGreenIncome = Color(0xFF22B573)
 val ICostExpenseColor: Color
     get() {
-        val scheme = AppearanceConfigManager.configFlow.value.amountColorScheme
+        val scheme = AppearanceConfigManager.currentConfig.amountColorScheme
         return if (AppearanceConfigManager.isDarkThemeActive && scheme == AmountColorScheme.MONOCHROME) {
             Color(0xFF94A3B8)
         } else {
@@ -151,7 +151,7 @@ val ICostExpenseColor: Color
         }
     }
 val ICostIncomeColor: Color
-    get() = Color(AppearanceConfigManager.configFlow.value.amountColorScheme.incomeHex)
+    get() = Color(AppearanceConfigManager.currentConfig.amountColorScheme.incomeHex)
 val ICostTextPrimary: Color
     get() = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFFF3F4F6) else Color(0xFF141414)
 val ICostTextSecondary: Color

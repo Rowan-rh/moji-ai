@@ -21,7 +21,6 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Density
@@ -124,10 +123,8 @@ class MainActivity : ComponentActivity() {
             )
             CompositionLocalProvider(LocalDensity provides scaledDensity) {
                 MaterialTheme(colorScheme = if (isDark) MoJiDarkColorScheme else MoJiLightColorScheme) {
-                    key(appearanceConfig, isDark) {
-                        Surface(color = ICostBgGray) {
-                            MoJiMainScreen(viewModel = viewModel)
-                        }
+                    Surface(color = ICostBgGray) {
+                        MoJiMainScreen(viewModel = viewModel)
                     }
                 }
             }

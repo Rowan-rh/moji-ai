@@ -2,6 +2,9 @@ package com.moji.ai.data.model
 
 import android.content.Context
 import android.content.SharedPreferences
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -87,11 +90,17 @@ object AppearanceConfigManager {
     var isSystemDarkActive: Boolean = false
         private set
 
+    private var composeSystemDarkState by mutableStateOf(false)
+    private var composeConfigState by mutableStateOf(AppearanceSettingsConfig())
+
     private val _configFlow = MutableStateFlow(AppearanceSettingsConfig())
     val configFlow: StateFlow<AppearanceSettingsConfig> = _configFlow.asStateFlow()
 
+    val currentConfig: AppearanceSettingsConfig
+        get() = composeConfigState
+
     val isDarkThemeActive: Boolean
-        get() = resolveIsDarkTheme(_configFlow.value, isSystemDarkActive)
+        get() = resolveIsDarkTheme(composeConfigState, composeSystemDarkState)
 
     @Synchronized
     fun init(context: Context) {
@@ -101,6 +110,7 @@ object AppearanceConfigManager {
         if (raw.isNullOrBlank()) {
             val initial = AppearanceSettingsConfig()
             _configFlow.value = initial
+            composeConfigState = initial
             persist(initial)
             return
         }
@@ -108,21 +118,24 @@ object AppearanceConfigManager {
             jsonCodec.decodeFromString<AppearanceSettingsConfig>(raw)
         }.getOrNull() ?: AppearanceSettingsConfig()
         _configFlow.value = decoded
+        composeConfigState = decoded
     }
 
     @Synchronized
     private fun persist(config: AppearanceSettingsConfig) {
         _configFlow.value = config
+        composeConfigState = config
         prefs?.edit()?.putString(KEY_APPEARANCE_SETTINGS_JSON, jsonCodec.encodeToString(config))?.apply()
     }
 
     fun updateSystemDarkState(systemDark: Boolean) {
         isSystemDarkActive = systemDark
+        composeSystemDarkState = systemDark
     }
 
     fun resolveIsDarkTheme(
-        config: AppearanceSettingsConfig = _configFlow.value,
-        systemDark: Boolean = isSystemDarkActive
+        config: AppearanceSettingsConfig = composeConfigState,
+        systemDark: Boolean = composeSystemDarkState
     ): Boolean = when (config.themeMode) {
         AppThemeMode.LIGHT -> false
         AppThemeMode.DARK -> true
@@ -130,12 +143,12 @@ object AppearanceConfigManager {
     }
 
     fun settingsTrailingSummary(
-        config: AppearanceSettingsConfig = _configFlow.value
+        config: AppearanceSettingsConfig = composeConfigState
     ): String = "${config.themeMode.label} · ${config.amountColorScheme.label}"
 
     fun formatDisplayAmount(
         amount: Double,
-        config: AppearanceSettingsConfig = _configFlow.value
+        config: AppearanceSettingsConfig = composeConfigState
     ): String {
         val safeAmount = abs(amount)
         val pattern = if (config.showThousandSeparator) "%,.2f" else "%.2f"
@@ -190,6 +203,7 @@ object AppearanceConfigManager {
         systemDark: Boolean = false
     ) {
         isSystemDarkActive = systemDark
+        composeSystemDarkState = systemDark
         persist(config)
     }
 }

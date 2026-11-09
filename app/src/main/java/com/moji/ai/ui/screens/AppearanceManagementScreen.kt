@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -74,7 +76,8 @@ fun AppearanceManagementScreen(
     onToggleShowThousandSeparator: (Boolean) -> Unit,
     onToggleHideTrailingZeroDecimals: (Boolean) -> Unit,
     onResetDefaults: () -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    listState: LazyListState = rememberLazyListState()
 ) {
     BackHandler(onBack = onBack)
     val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
@@ -133,6 +136,7 @@ fun AppearanceManagementScreen(
         }
 
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)

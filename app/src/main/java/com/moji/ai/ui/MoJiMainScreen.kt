@@ -56,6 +56,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -265,18 +267,20 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     // 全屏二级页面状态：账单详情、收支日历、设置页、智能记账页、分类管理页、标签管理页、模板管理页、资产子页面
     var inspectingTx by remember { mutableStateOf<TransactionEntity?>(null) }
     var calendarMonthTxs by remember { mutableStateOf<List<TransactionEntity>?>(null) }
-    var showSettingsPage by remember { mutableStateOf(false) }
-    var showSmartBookkeepingPage by remember { mutableStateOf(false) }
-    var showCategoryManagementPage by remember { mutableStateOf(false) }
-    var categoryManagementInitialExpense by remember { mutableStateOf(true) }
-    var showTagManagementPage by remember { mutableStateOf(false) }
-    var showTemplateManagementPage by remember { mutableStateOf(false) }
-    var templateManagementAutoCreate by remember { mutableStateOf(false) }
-    var showCurrencyManagementPage by remember { mutableStateOf(false) }
-    var showPasswordProtectionPage by remember { mutableStateOf(false) }
-    var showReminderManagementPage by remember { mutableStateOf(false) }
-    var showAppearanceManagementPage by remember { mutableStateOf(false) }
-    var isAssetSubpageOpen by remember { mutableStateOf(false) }
+    var showSettingsPage by rememberSaveable { mutableStateOf(false) }
+    var showSmartBookkeepingPage by rememberSaveable { mutableStateOf(false) }
+    var showCategoryManagementPage by rememberSaveable { mutableStateOf(false) }
+    var categoryManagementInitialExpense by rememberSaveable { mutableStateOf(true) }
+    var showTagManagementPage by rememberSaveable { mutableStateOf(false) }
+    var showTemplateManagementPage by rememberSaveable { mutableStateOf(false) }
+    var templateManagementAutoCreate by rememberSaveable { mutableStateOf(false) }
+    var showCurrencyManagementPage by rememberSaveable { mutableStateOf(false) }
+    var showPasswordProtectionPage by rememberSaveable { mutableStateOf(false) }
+    var showReminderManagementPage by rememberSaveable { mutableStateOf(false) }
+    var showAppearanceManagementPage by rememberSaveable { mutableStateOf(false) }
+    var isAssetSubpageOpen by rememberSaveable { mutableStateOf(false) }
+    val settingsListState = rememberLazyListState()
+    val appearanceListState = rememberLazyListState()
 
     val hasFullScreenOverlay = inspectingTx != null ||
         calendarMonthTxs != null ||
@@ -660,7 +664,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 appearanceSettingsConfig = appearanceSettingsConfig,
                 onOpenAppearanceManagement = {
                     showAppearanceManagementPage = true
-                }
+                },
+                listState = settingsListState
             )
         }
 
@@ -905,7 +910,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onToggleShowThousandSeparator = { show -> viewModel.setShowThousandSeparator(show) },
                 onToggleHideTrailingZeroDecimals = { hide -> viewModel.setHideTrailingZeroDecimals(hide) },
                 onResetDefaults = { viewModel.resetAppearanceDefaults() },
-                onBack = { showAppearanceManagementPage = false }
+                onBack = { showAppearanceManagementPage = false },
+                listState = appearanceListState
             )
         }
 
@@ -1491,7 +1497,8 @@ private fun ICostSettingsFullScreen(
     reminderSettingsConfig: ReminderSettingsConfig = ReminderSettingsConfig(),
     onOpenReminderManagement: () -> Unit = {},
     appearanceSettingsConfig: AppearanceSettingsConfig = AppearanceSettingsConfig(),
-    onOpenAppearanceManagement: () -> Unit = {}
+    onOpenAppearanceManagement: () -> Unit = {},
+    listState: LazyListState = rememberLazyListState()
 ) {
     BackHandler(onBack = onBack)
 
@@ -1522,6 +1529,7 @@ private fun ICostSettingsFullScreen(
         SubpageHeader(title = "设置", onBack = onBack)
 
         LazyColumn(
+            state = listState,
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(18.dp),
             contentPadding = PaddingValues(bottom = 48.dp)

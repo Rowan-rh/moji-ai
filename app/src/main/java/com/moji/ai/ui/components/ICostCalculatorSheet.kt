@@ -2331,9 +2331,9 @@ private fun CalculatorTemplatePickerSheet(
                     templates.forEach { tpl ->
                         val resolvedType = tpl.resolvedType()
                         val amtColor = when (resolvedType) {
-                            TransactionType.INCOME -> ICostGreenIncome
+                            TransactionType.INCOME -> ICostIncomeColor
                             TransactionType.TRANSFER -> ICostAmberGold
-                            else -> ICostCoralRed
+                            else -> ICostExpenseColor
                         }
                         Surface(
                             shape = RoundedCornerShape(16.dp),
