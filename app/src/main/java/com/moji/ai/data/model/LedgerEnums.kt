@@ -1,6 +1,7 @@
 package com.moji.ai.data.model
 
 import kotlinx.serialization.Serializable
+import java.util.Calendar
 
 /**
  * 钱包（资产/负债/借贷账户）类型
@@ -39,7 +40,25 @@ enum class RecurrenceFrequency(val displayName: String, val daysInterval: Int) {
     DAILY("每天", 1),
     WEEKLY("每周", 7),
     MONTHLY("每月", 30),
-    YEARLY("每年", 365)
+    YEARLY("每年", 365);
+
+    /**
+     * 按自然日历（月/年/周/天）递推下一次触发时间，避免固定 30 天 / 365 天产生长期漂移。
+     */
+    fun computeNextTriggerMillis(baseMillis: Long, nowMillis: Long = baseMillis): Long {
+        val cal = Calendar.getInstance().apply {
+            timeInMillis = if (baseMillis > 0L) baseMillis else nowMillis
+        }
+        do {
+            when (this) {
+                DAILY -> cal.add(Calendar.DAY_OF_YEAR, 1)
+                WEEKLY -> cal.add(Calendar.DAY_OF_YEAR, 7)
+                MONTHLY -> cal.add(Calendar.MONTH, 1)
+                YEARLY -> cal.add(Calendar.YEAR, 1)
+            }
+        } while (cal.timeInMillis <= nowMillis)
+        return cal.timeInMillis
+    }
 }
 
 /**

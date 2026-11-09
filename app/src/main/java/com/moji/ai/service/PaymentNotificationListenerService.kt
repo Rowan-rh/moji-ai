@@ -40,7 +40,8 @@ class PaymentNotificationListenerService : NotificationListenerService() {
         app.captureCoordinator.onRawFinancialEventCaptured(
             rawText = combined,
             packageName = pkg,
-            captureSource = "AI_NOTIFICATION"
+            captureSource = "AI_NOTIFICATION",
+            capturedAtMillis = sbn.postTime.takeIf { it > 0L } ?: System.currentTimeMillis()
         )
     }
 }

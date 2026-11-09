@@ -180,6 +180,15 @@ class AiAccountingEngine(
             referenceMillis: Long = System.currentTimeMillis()
         ): Boolean = extractOccurredTimeMillis(text = text, referenceMillis = referenceMillis) != null
 
+        private val LOGISTICS_TRACE_REGEX = Regex("""物流轨迹[:：][^|]*""")
+        private val CN_TIME_UNIT_REGEX = Regex("""(\d{1,2})时(\d{1,2})分(?:(\d{1,2})秒)?""")
+        private val TRAILING_COLON_REGEX = Regex(""":(?=\s|$)""")
+        private val SPLIT_DATE_PIPE_TIME_REGEX = Regex("""(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?)\s*\|\s*(\d{1,2}:\d{2}(?::\d{2})?)""")
+        private val COMPACT_CN_DATE_TIME_REGEX = Regex("""(20\d{2}年\d{1,2}月\d{1,2}日)(\d{1,2}:\d{2}(?::\d{2})?)""")
+        private val FULL_DATE_TIME_REGEX = Regex("""(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?\s+\d{1,2}:\d{2}(?::\d{2})?)""")
+        private val RELATIVE_DAY_TIME_REGEX = Regex("""(今天|昨天|前天)\s*(\d{1,2}):(\d{2})(?::(\d{2}))?""")
+        private val MONTH_DAY_TIME_REGEX = Regex("""(?<!\d)(?:(\d{1,2})月(\d{1,2})日\s*|(\d{1,2})-(\d{1,2})\s+)(\d{1,2}):(\d{2})(?::(\d{2}))?""")
+
         /**
          * 从账单文本提取「实际购物/交易发生时间（毫秒）」：
          * 支持 `2026-11-06 21:18:53`、`2026年11月5日 18:24:25`、`2026年11月01日 15时56分23秒`、`昨天 21:18`、`11-05 20:23` 等格式。
@@ -192,29 +201,14 @@ class AiAccountingEngine(
             referenceMillis: Long = System.currentTimeMillis(),
             @Suppress("UNUSED_PARAMETER") orderKey: String = ""
         ): Long? {
-            val textWithoutLogistics = text.replace(
-                Regex("""物流轨迹[:：][^|]*"""),
-                " "
-            )
+            val textWithoutLogistics = text.replace(LOGISTICS_TRACE_REGEX, " ")
             val normalized = textWithoutLogistics
-                .replace(
-                    Regex("""(\d{1,2})时(\d{1,2})分(?:(\d{1,2})秒)?"""),
-                    "$1:$2:$3"
-                )
+                .replace(CN_TIME_UNIT_REGEX, "$1:$2:$3")
                 .replace(":|", "00|")
-                .replace(Regex(""":(?=\s|$)"""), ":00")
-                .replace(
-                    Regex("""(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?)\s*\|\s*(\d{1,2}:\d{2}(?::\d{2})?)"""),
-                    "$1 $2"
-                )
-                .replace(
-                    Regex("""(20\d{2}年\d{1,2}月\d{1,2}日)(\d{1,2}:\d{2}(?::\d{2})?)"""),
-                    "$1 $2"
-                )
-            val fullDateRegex = Regex(
-                """(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?\s+\d{1,2}:\d{2}(?::\d{2})?)"""
-            )
-            fullDateRegex.find(normalized)?.groupValues?.getOrNull(1)?.trim()?.let { rawDate ->
+                .replace(TRAILING_COLON_REGEX, ":00")
+                .replace(SPLIT_DATE_PIPE_TIME_REGEX, "$1 $2")
+                .replace(COMPACT_CN_DATE_TIME_REGEX, "$1 $2")
+            FULL_DATE_TIME_REGEX.find(normalized)?.groupValues?.getOrNull(1)?.trim()?.let { rawDate ->
                 for (pattern in fullDatePatterns) {
                     val parsed = runCatching {
                         SimpleDateFormat(pattern, Locale.CHINA).apply { isLenient = false }.parse(rawDate)?.time
@@ -223,8 +217,7 @@ class AiAccountingEngine(
                 }
             }
 
-            val relativeRegex = Regex("""(今天|昨天|前天)\s*(\d{1,2}):(\d{2})(?::(\d{2}))?""")
-            relativeRegex.find(textWithoutLogistics)?.let { m ->
+            RELATIVE_DAY_TIME_REGEX.find(textWithoutLogistics)?.let { m ->
                 val dayWord = m.groupValues[1]
                 val hour = m.groupValues[2].toIntOrNull() ?: return@let
                 val minute = m.groupValues[3].toIntOrNull() ?: return@let
@@ -243,8 +236,7 @@ class AiAccountingEngine(
                 return cal.timeInMillis
             }
 
-            val monthDayRegex = Regex("""(?<!\d)(?:(\d{1,2})月(\d{1,2})日\s*|(\d{1,2})-(\d{1,2})\s+)(\d{1,2}):(\d{2})(?::(\d{2}))?""")
-            monthDayRegex.find(textWithoutLogistics)?.let { m ->
+            MONTH_DAY_TIME_REGEX.find(textWithoutLogistics)?.let { m ->
                 val monthStr = m.groupValues[1].ifBlank { m.groupValues[3] }
                 val dayStr = m.groupValues[2].ifBlank { m.groupValues[4] }
                 val month = (monthStr.toIntOrNull() ?: return@let) - 1
@@ -329,10 +321,13 @@ class AiAccountingEngine(
             .ifBlank { resolvedTxNo }
             .ifBlank { resolvedMerchantNo }
         val resolvedPayMethod = finalResult.paymentMethodRaw.ifBlank { localFallback?.paymentMethodRaw.orEmpty() }
-        // 严禁把当前采集/截图时间 (capturedAtMillis) 冒充为支付时间：若页面没有任何明确时间，直接拦截不予录入！
+        // 严禁把屏幕/截图采集时间冒充为历史账单支付时间；但实时系统通知（自带 postTime）与演练沙盒允许回退到事件发生时刻
         val resolvedOccurredAt = extractOccurredTimeMillis(rawText, capturedAtMillis)
             ?: localFallback?.occurredAtMillis
             ?: finalResult.occurredAtMillis
+            ?: capturedAtMillis.takeIf {
+                captureMode == "AI_NOTIFICATION" || captureMode == "AI_SANDBOX"
+            }
             ?: return@withContext null
 
         val resolvedQuantity = if (finalResult.itemQuantity > 1) {
