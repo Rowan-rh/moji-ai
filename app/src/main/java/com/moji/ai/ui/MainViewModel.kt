@@ -29,10 +29,14 @@ import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.PasswordProtectionConfig
 import com.moji.ai.data.model.PinVerifyResult
 import com.moji.ai.data.model.RecurrenceFrequency
+import com.moji.ai.data.model.ReminderConfigManager
+import com.moji.ai.data.model.ReminderSettingsConfig
+import com.moji.ai.data.model.ReminderSlotItem
 import com.moji.ai.data.model.SubCategoryDef
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.notification.DailyReminderScheduler
 import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.update.AppUpdateConfig
 import com.moji.ai.update.ReleaseUpdateInfo
@@ -575,6 +579,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val isAppSessionLocked: StateFlow<Boolean> = AppLockManager.isSessionLockedFlow
 
+    val reminderSettingsConfig: StateFlow<ReminderSettingsConfig> = ReminderConfigManager.configFlow
+
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = app.captureCoordinator.observabilityLogs
 
     val appUpdateConfig: StateFlow<AppUpdateConfig> = app.appUpdateManager.configFlow
@@ -598,6 +604,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun consumePendingOpenTransactionDetail() {
         _pendingOpenTransactionId.value = null
+    }
+
+    private val _pendingOpenBookkeepingSheet = MutableStateFlow(false)
+    val pendingOpenBookkeepingSheet: StateFlow<Boolean> = _pendingOpenBookkeepingSheet.asStateFlow()
+
+    fun requestOpenBookkeepingSheet() {
+        _pendingOpenBookkeepingSheet.value = true
+    }
+
+    fun consumePendingOpenBookkeepingSheet() {
+        _pendingOpenBookkeepingSheet.value = false
     }
 
     suspend fun getTransactionByIdDirect(txId: Long): TransactionEntity? {
@@ -1148,7 +1165,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             customIncomeCategories = CategoryCatalog.incomeCategories,
             customTags = TagCatalog.tags,
             quickTemplates = _templates.value,
-            customCurrencyRates = CurrencyRateManager.customRates
+            customCurrencyRates = CurrencyRateManager.customRates,
+            reminderSettingsJson = ReminderConfigManager.exportConfigJson()
         )
     }
 
@@ -1247,6 +1265,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (snapshot.monthlyBudgetCents > 0L) {
                 _monthlyBudgetCents.value = snapshot.monthlyBudgetCents
                 uiPrefs.edit().putLong("monthly_budget_cents", snapshot.monthlyBudgetCents).apply()
+            }
+            if (snapshot.reminderSettingsJson.isNotBlank()) {
+                if (ReminderConfigManager.restoreFromBackupJson(snapshot.reminderSettingsJson)) {
+                    DailyReminderScheduler.rescheduleAll(app)
+                }
             }
             onResult("恢复完成：${backupWallets.size} 个账户、$txCount 笔账单")
         }
@@ -1917,6 +1940,66 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun lockAppSessionNow() {
         AppLockManager.lockNow()
+    }
+
+    fun setReminderMasterEnabled(enabled: Boolean) {
+        val updated = ReminderConfigManager.setMasterEnabled(enabled)
+        DailyReminderScheduler.rescheduleAll(app, updated)
+        postMessage(if (enabled) "已开启定时记账提醒" else "已关闭定时记账提醒")
+    }
+
+    fun setReminderSkipIfRecordedToday(skip: Boolean) {
+        ReminderConfigManager.setSkipIfRecordedToday(skip)
+        postMessage(if (skip) "已开启今日已记账免打扰" else "已关闭今日已记账免打扰")
+    }
+
+    fun upsertReminderSlot(
+        item: ReminderSlotItem,
+        onDone: (Result<ReminderSettingsConfig>) -> Unit = {}
+    ) {
+        val isEditing = ReminderConfigManager.configFlow.value.items.any { it.id == item.id }
+        val res = ReminderConfigManager.upsertSlot(item)
+        res.onSuccess { updated ->
+            DailyReminderScheduler.rescheduleAll(app, updated)
+            val timeStr = ReminderConfigManager.formatTimeHm(item.hour, item.minute)
+            postMessage(if (isEditing) "已更新 $timeStr 提醒「${item.title.trim()}」" else "已新增 $timeStr 提醒「${item.title.trim()}」")
+        }.onFailure { err ->
+            postMessage(err.message ?: "提醒配置无效")
+        }
+        onDone(res)
+    }
+
+    fun toggleReminderSlotEnabled(slotId: String, enabled: Boolean) {
+        val updated = ReminderConfigManager.toggleSlotEnabled(slotId, enabled)
+        DailyReminderScheduler.rescheduleAll(app, updated)
+    }
+
+    fun deleteReminderSlot(slotId: String) {
+        val target = ReminderConfigManager.configFlow.value.items.firstOrNull { it.id == slotId }
+        val updated = ReminderConfigManager.deleteSlot(slotId)
+        DailyReminderScheduler.rescheduleAll(app, updated)
+        if (target != null) {
+            postMessage("已删除「${target.title}」")
+        }
+    }
+
+    fun sendTestDailyReminder(): Boolean {
+        val cfg = ReminderConfigManager.configFlow.value
+        val sampleSlot = cfg.items.firstOrNull { it.enabled }
+            ?: cfg.items.firstOrNull()
+            ?: ReminderConfigManager.defaultEveningSlot()
+        val sent = app.notifier.sendDailyReminderNotification(
+            title = sampleSlot.title,
+            message = sampleSlot.message,
+            slotId = "test",
+            isTest = true
+        )
+        if (sent) {
+            postMessage("已发送测试记账提醒，请下拉通知栏查看或点击通知体验秒记")
+        } else {
+            postMessage("系统通知权限未开启，请先开启通知权限后再试")
+        }
+        return sent
     }
 
     fun openAgentTriageSheet() {
