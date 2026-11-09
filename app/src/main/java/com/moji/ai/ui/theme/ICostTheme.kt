@@ -1175,6 +1175,7 @@ fun resolveCategoryAssetFile(
     category: String,
     type: TransactionType = TransactionType.EXPENSE
 ): String {
+    if (CategoryCatalog.isPendingTriage(category)) return "setting_auto.webp"
     if (type == TransactionType.REFUND_OFFSET) return "cat_refund.webp"
     if (type == TransactionType.TRANSFER) return "transfer_swift.webp"
     if (type == TransactionType.REPAYMENT) return "card_outcome_icon.webp"
@@ -1303,7 +1304,7 @@ fun ICostCategoryBadge(
     category: String,
     type: TransactionType,
     size: Dp = 42.dp,
-    badgeColor: Color = resolveTransactionBadgeColor(type),
+    badgeColor: Color = if (CategoryCatalog.isPendingTriage(category)) Color(0xFF6366F1) else resolveTransactionBadgeColor(type),
     iconRatio: Float = 0.56f
 ) {
     val catalogVersion by CategoryCatalog.versionFlow.collectAsState()

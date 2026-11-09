@@ -642,6 +642,25 @@ class LedgerRepository(private val db: AppDatabase) {
     }
 
     /**
+     * 在 Room 事务中批量更新指定账单的分类字段（用于 Agent 梳理结果一键采纳生效）
+     */
+    suspend fun batchUpdateTransactionCategories(
+        updates: Map<Long, String>
+    ): Int = db.withTransaction {
+        if (updates.isEmpty()) return@withTransaction 0
+        val now = System.currentTimeMillis()
+        val txDao = db.transactionDao()
+        var updatedCount = 0
+        for ((txId, newCat) in updates) {
+            if (txId > 0L && newCat.isNotBlank()) {
+                txDao.updateTransactionCategoryById(txId, newCat.trim(), now)
+                updatedCount++
+            }
+        }
+        updatedCount
+    }
+
+    /**
      * 统计包含指定标签 Token 的未删除历史账单数量（排除系统平账流水）
      */
     suspend fun countTransactionsByTag(tagName: String): Int {

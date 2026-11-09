@@ -37,6 +37,7 @@ object CategoryCatalog {
     private const val KEY_EXPENSE_JSON = "custom_expense_categories_json"
     private const val KEY_INCOME_JSON = "custom_income_categories_json"
     const val SYSTEM_BALANCE_ANCHOR_CATEGORY = "平账"
+    const val PENDING_TRIAGE_CATEGORY = "待梳理"
 
     private val jsonCodec = Json {
         ignoreUnknownKeys = true
@@ -322,6 +323,7 @@ object CategoryCatalog {
     private fun isValidSanitizedName(trimmed: String): Boolean {
         return trimmed.isNotEmpty() &&
             trimmed != SYSTEM_BALANCE_ANCHOR_CATEGORY &&
+            trimmed != PENDING_TRIAGE_CATEGORY &&
             trimmed.length <= 12 &&
             trimmed.none { it == '-' || it == '/' || it == '·' }
     }
@@ -399,6 +401,9 @@ object CategoryCatalog {
         if (trimmed.isEmpty()) return "分类名称不能为空"
         if (trimmed == SYSTEM_BALANCE_ANCHOR_CATEGORY) {
             return "「$SYSTEM_BALANCE_ANCHOR_CATEGORY」为系统平账保留分类"
+        }
+        if (trimmed == PENDING_TRIAGE_CATEGORY) {
+            return "「$PENDING_TRIAGE_CATEGORY」为系统待梳理保留状态"
         }
         if (trimmed.any { it == '-' || it == '/' || it == '·' }) {
             return "名称不能包含 -、/ 或 · 分隔符"
@@ -660,5 +665,130 @@ object CategoryCatalog {
             }
         }
         return result
+    }
+
+    fun isPendingTriage(category: String): Boolean {
+        val trimmed = category.trim()
+        return trimmed == PENDING_TRIAGE_CATEGORY || trimmed.startsWith("$PENDING_TRIAGE_CATEGORY-")
+    }
+
+    /**
+     * 判断「一级分类」或「一级-二级分类」是否已存在于指定分类列表中
+     */
+    fun hasCategoryInList(fullCategory: String, list: List<CategoryDef>): Boolean {
+        val parts = fullCategory.split("-", "·", "/").map { it.trim() }.filter { it.isNotEmpty() }
+        val mainName = parts.firstOrNull() ?: return false
+        val subName = parts.getOrNull(1)
+        val parent = list.firstOrNull { it.name == mainName } ?: return false
+        if (subName.isNullOrBlank()) return true
+        return parent.subCategories.any { it.name == subName }
+    }
+
+    /**
+     * 判断「一级分类」或「一级-二级分类」是否已存在于当前分类树中
+     */
+    fun hasCategoryPath(fullCategory: String, isExpense: Boolean = true): Boolean {
+        val list = if (isExpense) expenseCategories else incomeCategories
+        return hasCategoryInList(fullCategory, list)
+    }
+
+    /**
+     * 确保「一级分类」或「一级-二级分类」在分类树中存在（若缺失则自动创建并匹配最佳图标）
+     * @return 是否实际新建了分类节点
+     */
+    fun ensureCategoryPathExists(
+        fullCategory: String,
+        isExpense: Boolean = true,
+        iconAssetOverride: String? = null
+    ): Boolean {
+        if (isPendingTriage(fullCategory) || hasCategoryPath(fullCategory, isExpense)) return false
+        val parts = fullCategory.split("-", "·", "/").map { it.trim() }.filter { it.isNotEmpty() }
+        val mainName = parts.firstOrNull() ?: return false
+        val subName = parts.getOrNull(1)
+        var createdAny = false
+        val currentList = if (isExpense) expenseCategories else incomeCategories
+        if (currentList.none { it.name == mainName }) {
+            val mainIcon = if (subName.isNullOrBlank() && !iconAssetOverride.isNullOrBlank()) {
+                iconAssetOverride
+            } else {
+                matchBestIconAsset(mainName, null, isExpense)
+            }
+            if (addPrimaryCategory(isExpense, mainName, mainIcon).isSuccess) {
+                createdAny = true
+            }
+        }
+        if (!subName.isNullOrBlank()) {
+            val subIcon = iconAssetOverride?.takeIf { it.isNotBlank() }
+                ?: matchBestIconAsset(subName, mainName, isExpense)
+            if (addSubCategory(isExpense, mainName, subName, subIcon).isSuccess) {
+                createdAny = true
+            }
+        }
+        return createdAny
+    }
+
+    /**
+     * 根据分类名称与父分类语义，从 81 枚 iCost 线性图标库中自动匹配最契合的 `.webp` 图标
+     */
+    fun matchBestIconAsset(
+        name: String,
+        parentName: String? = null,
+        isExpense: Boolean = true
+    ): String {
+        val combined = listOfNotNull(parentName, name).joinToString("-")
+        val allIcons = iconGroups.flatMap { it.icons }
+        allIcons.firstOrNull { it.label == name.trim() }?.let { return it.assetFile }
+        allIcons.firstOrNull { name.contains(it.label) || it.label.contains(name.trim()) }?.let {
+            return it.assetFile
+        }
+        return when {
+            combined.contains("夜宵") || combined.contains("烧烤") || combined.contains("聚餐") ||
+                combined.contains("早餐") || combined.contains("午餐") || combined.contains("晚餐") -> "sub_meals.webp"
+            combined.contains("咖啡") || combined.contains("星巴克") || combined.contains("瑞幸") -> "sub_coffee.webp"
+            combined.contains("奶茶") || combined.contains("茶饮") || combined.contains("果茶") -> "sub_milktea.webp"
+            combined.contains("甜品") || combined.contains("烘焙") || combined.contains("面包") ||
+                combined.contains("零食") -> "sub_snacks.webp"
+            combined.contains("水果") || combined.contains("生鲜") -> "sub_fruit.webp"
+            combined.contains("买菜") || combined.contains("蔬菜") -> "sub_vegetable.webp"
+            combined.contains("餐") || combined.contains("食") -> "cat_dining.webp"
+            combined.contains("球") || combined.contains("健身") || combined.contains("游泳") ||
+                combined.contains("跑步") || combined.contains("运动") -> "cat_sports.webp"
+            combined.contains("猫") || combined.contains("狗") || combined.contains("宠") -> "cat_pet.webp"
+            combined.contains("云") || combined.contains("AI") || combined.contains("算力") ||
+                combined.contains("订阅") || combined.contains("会员") || combined.contains("软件") -> "cat_app_software.webp"
+            combined.contains("打车") || combined.contains("网约车") || combined.contains("代驾") -> "sub_taxi.webp"
+            combined.contains("地铁") -> "sub_subway.webp"
+            combined.contains("公交") || combined.contains("单车") -> "sub_bus.webp"
+            combined.contains("高铁") || combined.contains("火车") -> "sub_train.webp"
+            combined.contains("机票") || combined.contains("航班") -> "sub_flight.webp"
+            combined.contains("充电") || combined.contains("加油") -> "sub_fuel.webp"
+            combined.contains("停车") || combined.contains("高速") || combined.contains("过路") -> "sub_parking.webp"
+            combined.contains("车") -> "cat_car.webp"
+            combined.contains("药") -> "sub_medicine.webp"
+            combined.contains("牙") -> "sub_dental.webp"
+            combined.contains("体检") -> "sub_checkup.webp"
+            combined.contains("医") || combined.contains("诊") -> "cat_medical.webp"
+            combined.contains("书") || combined.contains("阅读") -> "sub_books.webp"
+            combined.contains("课") || combined.contains("培训") -> "sub_course.webp"
+            combined.contains("学") || combined.contains("考") -> "cat_study.webp"
+            combined.contains("电影") || combined.contains("演出") || combined.contains("游戏") ||
+                combined.contains("播客") || combined.contains("娱乐") -> "cat_entertainment.webp"
+            combined.contains("红包") -> "cat_red_packet.webp"
+            combined.contains("礼") -> "cat_gift.webp"
+            combined.contains("酒") || combined.contains("烟") -> "cat_tobacco_alcohol.webp"
+            combined.contains("旅") || combined.contains("酒店") || combined.contains("民宿") -> "cat_travel.webp"
+            combined.contains("房租") -> "sub_rent.webp"
+            combined.contains("水电") || combined.contains("燃气") -> "sub_utilities.webp"
+            combined.contains("物业") -> "sub_property_fee.webp"
+            combined.contains("话费") || combined.contains("宽带") || combined.contains("流量") -> "cat_telecom.webp"
+            !isExpense && (combined.contains("薪") || combined.contains("工资")) -> "cat_salary.webp"
+            !isExpense && combined.contains("奖") -> "cat_bonus.webp"
+            !isExpense && (combined.contains("兼职") || combined.contains("副业") || combined.contains("稿费")) -> "cat_parttime.webp"
+            !isExpense && (combined.contains("理财") || combined.contains("分红") || combined.contains("利息")) -> "cat_investment.webp"
+            else -> {
+                val list = if (isExpense) expenseCategories else incomeCategories
+                list.firstOrNull { it.name == parentName }?.assetFile ?: "cat_other.webp"
+            }
+        }
     }
 }
