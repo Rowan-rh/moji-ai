@@ -49,16 +49,25 @@ enum class RecurrenceFrequency(val displayName: String, val daysInterval: Int) {
 enum class CurrencyCode(
     val symbol: String,
     val displayName: String,
-    val defaultRateToCny: Double
+    val defaultRateToCny: Double,
+    val isCommonForeign: Boolean = false
 ) {
-    CNY("¥", "人民币 (CNY)", 1.0),
-    USD("$", "美元 (USD)", 7.22),
-    HKD("HK$", "港币 (HKD)", 0.93),
-    EUR("€", "欧元 (EUR)", 7.75),
-    JPY("JP¥", "日元 (JPY)", 0.048),
-    GBP("£", "英镑 (GBP)", 9.20);
+    CNY("¥", "人民币 (CNY)", 1.0, isCommonForeign = false),
+    USD("$", "美元 (USD)", 7.22, isCommonForeign = true),
+    HKD("HK$", "港币 (HKD)", 0.93, isCommonForeign = true),
+    EUR("€", "欧元 (EUR)", 7.75, isCommonForeign = true),
+    JPY("JP¥", "日元 (JPY)", 0.048, isCommonForeign = true),
+    GBP("£", "英镑 (GBP)", 9.20, isCommonForeign = true),
+    KRW("₩", "韩元 (KRW)", 0.0052, isCommonForeign = true),
+    TWD("NT$", "新台币 (TWD)", 0.225, isCommonForeign = false),
+    SGD("S$", "新加坡元 (SGD)", 5.38, isCommonForeign = true),
+    AUD("A$", "澳元 (AUD)", 4.72, isCommonForeign = false),
+    CAD("C$", "加元 (CAD)", 5.20, isCommonForeign = false),
+    THB("฿", "泰铢 (THB)", 0.21, isCommonForeign = true);
 
     companion object {
+        val foreignEntries: List<CurrencyCode> = entries.filter { it != CNY }
+
         fun fromCode(code: String?): CurrencyCode {
             if (code.isNullOrBlank()) return CNY
             return entries.firstOrNull { it.name.equals(code.trim(), ignoreCase = true) } ?: CNY

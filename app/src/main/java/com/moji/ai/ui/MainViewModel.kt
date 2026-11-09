@@ -18,6 +18,7 @@ import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.SubCategoryDef
 import com.moji.ai.data.model.TagCatalog
@@ -445,7 +446,7 @@ object QuickTemplateHelper {
                 message = "已填入模板「${tpl.title}」，请输入本次记账金额"
             )
         }
-        val rate = CurrencyCode.fromCode(tpl.currency).defaultRateToCny
+        val rate = CurrencyRateManager.getEffectiveRateToCny(tpl.currency)
         val cnyCents = (tpl.amountCents * rate).roundToLong()
         val normalizedTags = TagCatalog.joinTags(TagCatalog.parseTags(tpl.tags))
 
@@ -558,6 +559,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val incomeCategories: StateFlow<List<CategoryDef>> = CategoryCatalog.incomeCategoriesFlow
 
     val tags: StateFlow<List<TagDef>> = TagCatalog.tagsFlow
+
+    val customCurrencyRates: StateFlow<Map<String, Double>> = CurrencyRateManager.customRatesFlow
 
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = app.captureCoordinator.observabilityLogs
 
@@ -812,6 +815,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } else {
             postMessage("常用预设模板已全部存在")
         }
+    }
+
+    fun updateCustomCurrencyRate(
+        currencyCode: String,
+        rawRateInput: String,
+        onDone: (Result<Double>) -> Unit = {}
+    ) {
+        val res = CurrencyRateManager.setCustomRate(currencyCode, rawRateInput)
+        res.fold(
+            onSuccess = { rate ->
+                val code = CurrencyCode.fromCode(currencyCode)
+                postMessage("已更新 ${code.displayName} 汇率为 1 ${code.name} = ¥${CurrencyRateManager.formatRate(rate)}")
+            },
+            onFailure = { err ->
+                postMessage(err.message ?: "汇率格式无效")
+            }
+        )
+        onDone(res)
+    }
+
+    fun resetCurrencyRate(currencyCode: String) {
+        val code = CurrencyCode.fromCode(currencyCode)
+        if (code == CurrencyCode.CNY) return
+        CurrencyRateManager.resetCurrencyRate(code.name)
+        postMessage("已恢复 ${code.displayName} 默认汇率（1 ${code.name} = ¥${CurrencyRateManager.formatRate(code.defaultRateToCny)}）")
+    }
+
+    fun resetAllCustomCurrencyRates() {
+        CurrencyRateManager.resetAllCustomRates()
+        postMessage("已恢复全部币种默认参考汇率")
     }
 
     fun applyQuickTemplateNow(tpl: QuickBookkeepingTemplate) {
@@ -1086,7 +1119,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             customExpenseCategories = CategoryCatalog.expenseCategories,
             customIncomeCategories = CategoryCatalog.incomeCategories,
             customTags = TagCatalog.tags,
-            quickTemplates = _templates.value
+            quickTemplates = _templates.value,
+            customCurrencyRates = CurrencyRateManager.customRates
         )
     }
 
@@ -1171,6 +1205,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (snapshot.quickTemplates.isNotEmpty()) {
                 persistTemplates(snapshot.quickTemplates)
+            }
+            if (snapshot.customCurrencyRates.isNotEmpty()) {
+                CurrencyRateManager.replaceAllCustomRates(snapshot.customCurrencyRates)
             }
             TagCatalog.syncDiscoveredTagsFromHistory(
                 backupTxs.map { it.tags } + snapshot.quickTemplates.map { it.tags }
@@ -1331,13 +1368,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val cents = (amountYuan * 100.0).roundToLong()
             if (cents <= 0L) return@launch
+            val rate = CurrencyRateManager.getEffectiveRateToCny(creditWallet.currency)
             val tx = TransactionEntity(
                 ledgerName = _currentLedger.value,
                 type = TransactionType.REPAYMENT,
                 amountCents = cents,
                 currency = creditWallet.currency,
-                exchangeRateToCny = CurrencyCode.fromCode(creditWallet.currency).defaultRateToCny,
-                amountCnyCents = (cents * CurrencyCode.fromCode(creditWallet.currency).defaultRateToCny).roundToLong(),
+                exchangeRateToCny = rate,
+                amountCnyCents = (cents * rate).roundToLong(),
                 category = "信用还款",
                 merchant = "偿还 ${creditWallet.name}",
                 sourceWalletId = fromAssetWalletId,

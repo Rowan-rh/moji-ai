@@ -96,6 +96,7 @@ import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.SubCategoryDef
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
@@ -203,13 +204,15 @@ fun ICostCalculatorSheet(
     templateDraft: QuickBookkeepingTemplate? = null,
     onConsumeTemplateDraft: () -> Unit = {},
     onOpenTemplateManagement: () -> Unit = {},
-    onLoadPresetTemplates: () -> Unit = {}
+    onLoadPresetTemplates: () -> Unit = {},
+    onOpenCurrencyManagement: () -> Unit = {}
 ) {
     val isEditing = editingTransaction != null
     val expenseCategories by CategoryCatalog.expenseCategoriesFlow.collectAsState()
     val incomeCategories by CategoryCatalog.incomeCategoriesFlow.collectAsState()
     val catalogTags by TagCatalog.tagsFlow.collectAsState()
     val tagRemapHistory by TagCatalog.remapHistoryFlow.collectAsState()
+    val customCurrencyRates by CurrencyRateManager.customRatesFlow.collectAsState()
     var quickAddSubParent by remember { mutableStateOf<Pair<Boolean, CategoryDef>?>(null) }
     var showQuickAddTagSheet by remember { mutableStateOf(false) }
     // 1:1 iCost 顶部三态：支出 | 收入 | 转账（若外部传入 REPAYMENT 则归在转账 tab 并在保存时自动判断目标账户）
@@ -539,7 +542,15 @@ fun ICostCalculatorSheet(
             flashError("金额需大于 0")
             return
         }
-        val rate = CurrencyCode.fromCode(currency).defaultRateToCny
+        val rate = if (
+            editingTransaction != null &&
+            editingTransaction.currency.equals(currency, ignoreCase = true) &&
+            editingTransaction.exchangeRateToCny > 0.0
+        ) {
+            editingTransaction.exchangeRateToCny
+        } else {
+            CurrencyRateManager.getEffectiveRateToCny(currency)
+        }
         val cnyCents = (cents * rate).roundToLong()
         val discountCents = if (txType == TransactionType.EXPENSE) parseYuanToCents(discountYuanStr) ?: 0L else 0L
         // 非转账账单没有手续费输入框：编辑时保留原有手续费（如自动识别出的手续费），避免余额被悄悄改动
@@ -1349,6 +1360,42 @@ fun ICostCalculatorSheet(
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.graphicsLayer { translationX = amountShake.value * density }
                     )
+                    if (currency != "CNY") {
+                        val effectiveRate = remember(currency, customCurrencyRates) {
+                            CurrencyRateManager.getEffectiveRateToCny(currency)
+                        }
+                        val isCustom = customCurrencyRates.containsKey(currency)
+                        val previewVal = evaluateExpr(expr)?.takeIf { it > 0.0 } ?: 0.0
+                        val previewCny = String.format(Locale.US, "%.2f", previewVal * effectiveRate)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 2.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "≈ ¥$previewCny CNY · 1 $currency = ¥${CurrencyRateManager.formatRate(effectiveRate)}" +
+                                    if (isCustom) " (自定义)" else "",
+                                fontFamily = ICDinFontFamily,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostBlueAccent,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "汇率设置",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostBlueAccent,
+                                modifier = Modifier
+                                    .clickable { onOpenCurrencyManagement() }
+                                    .padding(start = 8.dp, top = 2.dp, bottom = 2.dp)
+                            )
+                        }
+                    }
                     AnimatedVisibility(
                         visible = inlineError != null,
                         enter = expandVertically(tween(160)) + fadeIn(tween(160)),
@@ -1636,28 +1683,104 @@ fun ICostCalculatorSheet(
     }
 
     if (showCurrencyPicker) {
+        val currentExprValue = evaluateExpr(expr)?.takeIf { it > 0.0 } ?: 0.0
         AlertDialog(
             onDismissRequest = { showCurrencyPicker = false },
             containerColor = ICostCardWhite,
-            title = { Text("切换记账币种", fontWeight = FontWeight.Bold) },
+            title = {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("切换记账币种", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = ICostBlueAccent.copy(alpha = 0.12f),
+                        modifier = Modifier.clickable {
+                            showCurrencyPicker = false
+                            onOpenCurrencyManagement()
+                        }
+                    ) {
+                        Text(
+                            text = "汇率设置",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ICostBlueAccent,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                        )
+                    }
+                }
+            },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 380.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
                     CurrencyCode.entries.forEach { item ->
+                        val isSelected = currency == item.name
+                        val rate = customCurrencyRates[item.name] ?: item.defaultRateToCny
+                        val isCustom = item != CurrencyCode.CNY && customCurrencyRates.containsKey(item.name)
                         Surface(
                             onClick = {
                                 currency = item.name
                                 showCurrencyPicker = false
                             },
                             shape = RoundedCornerShape(12.dp),
-                            color = if (currency == item.name) Color(0xFFEAF2FF) else ICostCellGray,
+                            color = if (isSelected) Color(0xFFEAF2FF) else ICostCellGray,
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text(
-                                text = "${item.displayName} (${item.symbol})",
-                                fontWeight = if (currency == item.name) FontWeight.Bold else FontWeight.Medium,
-                                color = if (currency == item.name) ICostBlueAccent else ICostTextPrimary,
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-                            )
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 10.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "${item.displayName} (${item.symbol})",
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                        color = if (isSelected) ICostBlueAccent else ICostTextPrimary,
+                                        fontSize = 14.sp,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    if (item == CurrencyCode.CNY) {
+                                        Text(
+                                            text = "本位币",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ICostTextSecondary
+                                        )
+                                    } else {
+                                        Text(
+                                            text = "1 ${item.name} = ¥${CurrencyRateManager.formatRate(rate)}" +
+                                                if (isCustom) " (自定义)" else "",
+                                            fontFamily = ICDinFontFamily,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = if (isCustom || isSelected) ICostBlueAccent else ICostTextSecondary
+                                        )
+                                    }
+                                }
+                                if (item != CurrencyCode.CNY && currentExprValue > 0.0) {
+                                    val cnyPreview = String.format(Locale.US, "%.2f", currentExprValue * rate)
+                                    Text(
+                                        text = "当次 ${item.symbol}${String.format(Locale.US, "%.2f", currentExprValue)} ≈ ¥$cnyPreview CNY",
+                                        fontFamily = ICDinFontFamily,
+                                        fontSize = 11.sp,
+                                        color = ICostTextSecondary,
+                                        modifier = Modifier.padding(top = 2.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
