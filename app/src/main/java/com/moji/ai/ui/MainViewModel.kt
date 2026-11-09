@@ -15,10 +15,13 @@ import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AppLockManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.CurrencyRateManager
+import com.moji.ai.data.model.PasswordProtectionConfig
+import com.moji.ai.data.model.PinVerifyResult
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.SubCategoryDef
 import com.moji.ai.data.model.TagCatalog
@@ -561,6 +564,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val tags: StateFlow<List<TagDef>> = TagCatalog.tagsFlow
 
     val customCurrencyRates: StateFlow<Map<String, Double>> = CurrencyRateManager.customRatesFlow
+
+    val passwordProtectionConfig: StateFlow<PasswordProtectionConfig> = AppLockManager.configFlow
+
+    val isAppSessionLocked: StateFlow<Boolean> = AppLockManager.isSessionLockedFlow
 
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = app.captureCoordinator.observabilityLogs
 
@@ -1831,5 +1838,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun restoreDefaultTags(mergeOnly: Boolean = true) {
         TagCatalog.restoreDefaultTags(mergeOnly = mergeOnly)
         postMessage(if (mergeOnly) "已补全缺失的默认标签" else "已重置为默认标签列表")
+    }
+
+    fun verifyAppLockPin(pin: String, unlockSessionOnSuccess: Boolean = true): PinVerifyResult {
+        return AppLockManager.verifyPin(pin = pin, unlockSessionOnSuccess = unlockSessionOnSuccess)
+    }
+
+    fun enablePasswordProtection(
+        newPin: String,
+        confirmPin: String,
+        hint: String = ""
+    ): Result<PasswordProtectionConfig> {
+        val res = AppLockManager.enablePasswordProtection(newPin, confirmPin, hint)
+        res.onSuccess {
+            postMessage("已开启密码保护")
+        }
+        return res
+    }
+
+    fun changeAppLockPin(
+        oldPin: String,
+        newPin: String,
+        confirmPin: String
+    ): Result<PasswordProtectionConfig> {
+        val res = AppLockManager.changePin(oldPin = oldPin, newPin = newPin, confirmPin = confirmPin)
+        res.onSuccess {
+            postMessage("安全密码已修改")
+        }
+        return res
+    }
+
+    fun disablePasswordProtection(currentPin: String): Result<PasswordProtectionConfig> {
+        val res = AppLockManager.disablePasswordProtection(currentPin)
+        res.onSuccess {
+            postMessage("已关闭密码保护")
+        }
+        return res
+    }
+
+    fun updateAppLockTimeout(timeoutSeconds: Int) {
+        val updated = AppLockManager.updateLockTimeout(timeoutSeconds)
+        postMessage("自动锁定已设为「${updated.timeoutDisplayLabel}」")
+    }
+
+    fun updateHideRecentTaskPreview(hide: Boolean) {
+        AppLockManager.updateHideRecentTaskPreview(hide)
+        postMessage(if (hide) "已开启多任务模糊与防截屏保护" else "已关闭多任务模糊与防截屏保护")
+    }
+
+    fun updateAppLockPinHint(rawHint: String): Result<PasswordProtectionConfig> {
+        val res = AppLockManager.updatePinHint(rawHint)
+        res.onSuccess { updated ->
+            postMessage(if (updated.pinHint.isNotBlank()) "已保存密码提示语" else "已清空密码提示语")
+        }
+        return res
+    }
+
+    fun lockAppSessionNow() {
+        AppLockManager.lockNow()
     }
 }
