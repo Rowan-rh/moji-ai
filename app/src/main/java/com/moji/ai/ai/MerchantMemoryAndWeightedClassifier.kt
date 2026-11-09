@@ -56,7 +56,7 @@ class MerchantMemoryManager(context: Context) {
         if (tx.type != TransactionType.EXPENSE && tx.type != TransactionType.INCOME) return
         val normalized = normalizeMerchantKey(tx.merchant)
         if (normalized.length < 2 || normalized in GENERIC_MERCHANT_STOPWORDS) return
-        if (tx.category.isBlank()) return
+        if (tx.category.isBlank() || CategoryCatalog.isPendingTriage(tx.category)) return
 
         val current = _memoriesFlow.value.toMutableList()
         val idx = current.indexOfFirst { it.merchantKeyword.equals(normalized, ignoreCase = true) }
@@ -85,7 +85,7 @@ class MerchantMemoryManager(context: Context) {
 
     fun upsertMemory(keyword: String, category: String, preferredWalletId: Long? = null) {
         val normalized = normalizeMerchantKey(keyword)
-        if (normalized.length < 2 || category.isBlank()) return
+        if (normalized.length < 2 || category.isBlank() || CategoryCatalog.isPendingTriage(category)) return
         val current = _memoriesFlow.value.toMutableList()
         val idx = current.indexOfFirst { it.merchantKeyword.equals(normalized, ignoreCase = true) }
         if (idx >= 0) {

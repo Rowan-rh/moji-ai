@@ -5,9 +5,15 @@ import android.content.Context
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.moji.ai.MoJiApp
+import com.moji.ai.ai.AgentBillTriageEngine
+import com.moji.ai.ai.AgentTriageReport
 import com.moji.ai.ai.AiConfig
 import com.moji.ai.ai.MerchantMemoryEntry
+import com.moji.ai.ai.ProposedCategoryItem
+import com.moji.ai.ai.ProposedMemoryItem
+import com.moji.ai.ai.ProposedRuleItem
 import com.moji.ai.ai.SmartConditionRule
+import com.moji.ai.ai.TriageBillItem
 import com.moji.ai.data.backup.BackupAndCsvTransferEngine
 import com.moji.ai.data.backup.CsvParsePreviewResult
 import com.moji.ai.data.backup.WebDavConfig
@@ -650,6 +656,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _isParsing = MutableStateFlow(false)
     val isParsing: StateFlow<Boolean> = _isParsing.asStateFlow()
+
+    private val agentTriageEngine = AgentBillTriageEngine(
+        configManager = configManager,
+        merchantMemoryManager = app.merchantMemoryManager,
+        smartRuleEngine = app.smartRuleEngine
+    )
+
+    private val _triageReport = MutableStateFlow<AgentTriageReport?>(null)
+    val triageReport: StateFlow<AgentTriageReport?> = _triageReport.asStateFlow()
+
+    private val _isTriaging = MutableStateFlow(false)
+    val isTriaging: StateFlow<Boolean> = _isTriaging.asStateFlow()
+
+    private val _showAgentTriageSheet = MutableStateFlow(false)
+    val showAgentTriageSheet: StateFlow<Boolean> = _showAgentTriageSheet.asStateFlow()
 
     private val _templates = MutableStateFlow(loadSavedTemplates())
     val templates: StateFlow<List<QuickBookkeepingTemplate>> = _templates.asStateFlow()
@@ -1896,5 +1917,137 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun lockAppSessionNow() {
         AppLockManager.lockNow()
+    }
+
+    fun openAgentTriageSheet() {
+        _showAgentTriageSheet.value = true
+        runAgentBillTriage()
+    }
+
+    fun dismissAgentTriageSheet() {
+        _showAgentTriageSheet.value = false
+    }
+
+    fun runAgentBillTriage() {
+        if (_isTriaging.value) return
+        viewModelScope.launch {
+            _isTriaging.value = true
+            try {
+                val currentLedgerName = _currentLedger.value
+                val ledgerTxs = repository.getAllTransactions().filter { it.ledgerName == currentLedgerName }
+                val allEvidences = repository.getAllCaptureEvidences()
+                val report = agentTriageEngine.analyzeBills(
+                    transactions = ledgerTxs,
+                    captureEvidences = allEvidences,
+                    existingRules = smartRules.value,
+                    existingMemories = merchantMemories.value,
+                    expenseCategories = CategoryCatalog.expenseCategories,
+                    incomeCategories = CategoryCatalog.incomeCategories
+                )
+                _triageReport.value = report
+            } finally {
+                _isTriaging.value = false
+            }
+        }
+    }
+
+    private fun resolveFallbackCategoryIfRejected(
+        targetCategory: String,
+        isExpense: Boolean,
+        approvedNewPaths: Set<String>,
+        rejectedNewPaths: Set<String>
+    ): String? {
+        if (targetCategory in approvedNewPaths) return targetCategory
+        if (targetCategory !in rejectedNewPaths && CategoryCatalog.hasCategoryPath(targetCategory, isExpense)) {
+            return targetCategory
+        }
+        val parentName = targetCategory.substringBefore('-').trim()
+        return if (parentName.isNotEmpty() && CategoryCatalog.hasCategoryPath(parentName, isExpense)) {
+            parentName
+        } else {
+            null
+        }
+    }
+
+    fun applyAgentTriageProposal(
+        bills: List<TriageBillItem>,
+        newCategories: List<ProposedCategoryItem>,
+        newRules: List<ProposedRuleItem>,
+        newMemories: List<ProposedMemoryItem>
+    ) {
+        viewModelScope.launch {
+            val approvedNewPaths = newCategories.map { it.fullCategoryPath }.toSet()
+            val rejectedNewPaths = _triageReport.value?.proposedNewCategories.orEmpty()
+                .map { it.fullCategoryPath }
+                .filter { it !in approvedNewPaths }
+                .toSet()
+
+            var createdCatCount = 0
+            // 1. 仅创建用户已勾选的建议新增一级/二级分类（尊重用户取消勾选的选择）
+            for (cat in newCategories) {
+                if (CategoryCatalog.ensureCategoryPathExists(cat.fullCategoryPath, cat.isExpense, cat.iconAsset)) {
+                    createdCatCount++
+                }
+            }
+
+            // 2. 校验每笔勾选账单的目标分类：若用户取消勾选了对应的新子分类，则回退归入已有的一级父分类，绝不强行创建被拒绝的新子分类
+            val updatesMap = linkedMapOf<Long, String>()
+            for (bill in bills) {
+                val isExp = bill.type != TransactionType.INCOME
+                val effectiveCat = if (bill.isNewCategoryProposal || bill.suggestedCategory in rejectedNewPaths) {
+                    resolveFallbackCategoryIfRejected(bill.suggestedCategory, isExp, approvedNewPaths, rejectedNewPaths)
+                } else {
+                    bill.suggestedCategory
+                } ?: continue
+
+                if (effectiveCat in approvedNewPaths) {
+                    if (CategoryCatalog.ensureCategoryPathExists(effectiveCat, isExp)) {
+                        createdCatCount++
+                    }
+                }
+                updatesMap[bill.transactionId] = effectiveCat
+            }
+
+            // 3. 在 Room 事务中原子批量更新账单分类
+            val updatedBillCount = repository.batchUpdateTransactionCategories(updatesMap)
+
+            // 4. 写入自动条件规则与商户记忆（同样尊重用户对新分类的勾选状态）
+            var addedRuleCount = 0
+            for (r in newRules) {
+                val isExp = r.rule.onlyExpense
+                val effectiveCat = resolveFallbackCategoryIfRejected(
+                    targetCategory = r.rule.targetCategory,
+                    isExpense = isExp,
+                    approvedNewPaths = approvedNewPaths,
+                    rejectedNewPaths = rejectedNewPaths
+                ) ?: continue
+                app.smartRuleEngine.upsertRule(r.rule.copy(targetCategory = effectiveCat))
+                addedRuleCount++
+            }
+            var addedMemCount = 0
+            for (m in newMemories) {
+                val effectiveCat = resolveFallbackCategoryIfRejected(
+                    targetCategory = m.targetCategory,
+                    isExpense = true,
+                    approvedNewPaths = approvedNewPaths,
+                    rejectedNewPaths = rejectedNewPaths
+                ) ?: continue
+                app.merchantMemoryManager.upsertMemory(
+                    keyword = m.merchantKeyword,
+                    category = effectiveCat,
+                    preferredWalletId = m.preferredWalletId
+                )
+                addedMemCount++
+            }
+
+            val summaryParts = mutableListOf<String>()
+            if (updatedBillCount > 0) summaryParts.add("归档 $updatedBillCount 笔账单")
+            if (createdCatCount > 0) summaryParts.add("新增 $createdCatCount 个分类")
+            if (addedRuleCount + addedMemCount > 0) summaryParts.add("生效 ${addedRuleCount + addedMemCount} 条规则与记忆")
+            if (summaryParts.isNotEmpty()) {
+                postMessage("✨ Agent 梳理已生效：${summaryParts.joinToString(" · ")}")
+            }
+            runAgentBillTriage()
+        }
     }
 }

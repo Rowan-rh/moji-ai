@@ -84,6 +84,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TagDef
@@ -151,7 +152,8 @@ fun ICostLedgerHomeScreen(
     onDuplicateTransaction: (TransactionEntity) -> Unit = {},
     onToggleReimburse: (TransactionEntity) -> Unit = {},
     onQuickRefund: (TransactionEntity) -> Unit = {},
-    onDeleteTransaction: (Long) -> Unit = {}
+    onDeleteTransaction: (Long) -> Unit = {},
+    onOpenAgentTriage: () -> Unit = {}
 ) {
     val walletMap = remember(wallets) { wallets.associateBy { it.id } }
     val catalogTags by TagCatalog.tagsFlow.collectAsState()
@@ -206,6 +208,11 @@ fun ICostLedgerHomeScreen(
     }
 
     val monthBalanceCents = monthIncomeCents - monthExpenseCents
+
+    // 待梳理账单统计（跨月份统计当前账本所有待梳理账单，提示一键交由 Agent 归档）
+    val pendingTriageList = remember(transactions, currentLedger) {
+        transactions.filter { it.ledgerName == currentLedger && CategoryCatalog.isPendingTriage(it.category) }
+    }
 
     // 报销统计
     val pendingReimburseList = remember(allMonthTransactions) {
@@ -286,6 +293,13 @@ fun ICostLedgerHomeScreen(
                                 }
                             )
                             DropdownMenuItem(
+                                text = { Text("✨ Agent 梳理账单", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = Color(0xFF4F46E5)) },
+                                onClick = {
+                                    showMoreMenu = false
+                                    onOpenAgentTriage()
+                                }
+                            )
+                            DropdownMenuItem(
                                 text = { Text("设置月度预算", fontSize = 14.sp) },
                                 onClick = {
                                     showMoreMenu = false
@@ -362,6 +376,68 @@ fun ICostLedgerHomeScreen(
                             color = if (showQuickTemplatesBar) Color(0xFFD97706) else Color(0xFF666666),
                             fontWeight = FontWeight.Medium
                         )
+                    }
+                }
+            }
+        }
+
+        // 2.2 当账本存在「待梳理」账单时，展示顶部醒目提示胶囊，一键唤起 Agent 梳理
+        if (pendingTriageList.isNotEmpty()) {
+            item {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = Color(0xFFEEF2FF),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .iCostPressScale(pressedScale = 0.96f) {
+                            onOpenAgentTriage()
+                        }
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFF6366F1)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            ICostAssetImage(
+                                assetFile = "setting_auto.webp",
+                                tint = Color.White,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "有 ${pendingTriageList.size} 笔「待梳理」账单待归档",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFF3730A3)
+                            )
+                            Text(
+                                text = "点击交由 Agent 自动识别分类并提炼规则",
+                                fontSize = 11.sp,
+                                color = Color(0xFF4F46E5)
+                            )
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = Color(0xFF4F46E5)
+                        ) {
+                            Text(
+                                text = "✨ 立即梳理",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color.White,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                            )
+                        }
                     }
                 }
             }

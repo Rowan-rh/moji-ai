@@ -1031,11 +1031,15 @@ $recentDesc
             "com.taobao.taobao", "com.tmall.wireless" -> "购物-淘宝"
             "com.ss.android.ugc.aweme", "com.ss.android.ugc.aweme.lite",
             "com.achievo.vipshop", "com.xingin.xhs" -> "日用"
-            else -> weightedCat
+            else -> CategoryCatalog.PENDING_TRIAGE_CATEGORY
         }
         val resolvedWeightedCat = if (weightedConf <= 0.80f && weightedCat == "餐饮") platformFallbackCat else weightedCat
         val finalCategory = memoryHit?.category ?: resolvedWeightedCat
-        val finalConfidence = if (memoryHit != null) 0.98f else weightedConf
+        val finalConfidence = when {
+            memoryHit != null -> 0.98f
+            CategoryCatalog.isPendingTriage(finalCategory) -> 0.65f
+            else -> weightedConf
+        }
 
         return AiParsedTransactionResult(
             isValidTransaction = true,
