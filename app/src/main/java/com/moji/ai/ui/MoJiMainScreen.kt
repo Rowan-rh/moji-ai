@@ -134,6 +134,7 @@ import com.moji.ai.data.backup.WebDavConfig
 import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.service.CaptureEventOutcome
 import com.moji.ai.service.CaptureObservabilityLogEntry
@@ -146,6 +147,7 @@ import com.moji.ai.ui.components.ICostCalculatorSheet
 import com.moji.ai.ui.components.MonthlyCalendarSheet
 import com.moji.ai.ui.components.TransactionDetailSheet
 import com.moji.ai.ui.screens.CategoryManagementScreen
+import com.moji.ai.ui.screens.CurrencyManagementScreen
 import com.moji.ai.ui.screens.ICostAssetsScreen
 import com.moji.ai.ui.screens.ICostLedgerHomeScreen
 import com.moji.ai.ui.screens.ICostStatisticsScreen
@@ -208,6 +210,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val expenseCategories by viewModel.expenseCategories.collectAsState()
     val incomeCategories by viewModel.incomeCategories.collectAsState()
     val tags by viewModel.tags.collectAsState()
+    val customCurrencyRates by viewModel.customCurrencyRates.collectAsState()
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) } // 0: 账本, 1: 资产, 2: 统计
     // 每个 Tab 独立保存 rememberSaveable 状态（搜索词、折叠状态、统计周期等），切换 Tab 回来不丢失
@@ -252,6 +255,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var showTagManagementPage by remember { mutableStateOf(false) }
     var showTemplateManagementPage by remember { mutableStateOf(false) }
     var templateManagementAutoCreate by remember { mutableStateOf(false) }
+    var showCurrencyManagementPage by remember { mutableStateOf(false) }
     var isAssetSubpageOpen by remember { mutableStateOf(false) }
 
     val hasFullScreenOverlay = inspectingTx != null ||
@@ -261,6 +265,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         showCategoryManagementPage ||
         showTagManagementPage ||
         showTemplateManagementPage ||
+        showCurrencyManagementPage ||
         isAssetSubpageOpen
 
     LaunchedEffect(pendingTemplateDraftForCalc) {
@@ -307,6 +312,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             showSmartBookkeepingPage = false
             showCategoryManagementPage = false
             showTagManagementPage = false
+            showTemplateManagementPage = false
+            showCurrencyManagementPage = false
             calendarMonthTxs = null
             showCalculatorSheet = false
             editingTx = null
@@ -457,7 +464,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onDeleteInstallmentPlan = { viewModel.deleteInstallmentPlan(it) },
                     onAddRecurringRule = { title, amountYuan, currency, category, walletId, frequency ->
                         viewModel.addRecurringRule(title, amountYuan, currency, category, walletId, frequency)
-                    }
+                    },
+                    customCurrencyRates = customCurrencyRates
             )
         }
 
@@ -470,7 +478,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     currentLedger = currentLedger,
                     hideAmounts = hideAssetAmounts,
                     onOpenSettingsPage = { showSettingsPage = true },
-                    onSelectTransaction = { tx -> inspectingTx = tx }
+                    onSelectTransaction = { tx -> inspectingTx = tx },
+                    customCurrencyRates = customCurrencyRates
             )
         }
 
@@ -584,6 +593,10 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onOpenTemplateManagement = {
                     templateManagementAutoCreate = false
                     showTemplateManagementPage = true
+                },
+                customCurrencyRateCount = customCurrencyRates.size,
+                onOpenCurrencyManagement = {
+                    showCurrencyManagementPage = true
                 }
             )
         }
@@ -716,6 +729,34 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             )
         }
 
+        // 全屏「货币和汇率」管理页面（对齐 setting_currency.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showCurrencyManagementPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            CurrencyManagementScreen(
+                customRates = customCurrencyRates,
+                wallets = wallets,
+                onBack = { showCurrencyManagementPage = false },
+                onSaveCustomRate = { code, rawRate, onDone ->
+                    viewModel.updateCustomCurrencyRate(code, rawRate, onDone)
+                },
+                onResetCurrencyRate = { code ->
+                    viewModel.resetCurrencyRate(code)
+                },
+                onResetAllCustomRates = {
+                    viewModel.resetAllCustomCurrencyRates()
+                }
+            )
+        }
+
         // 全屏「智能记账」页面（09_smart_bookkeeping.png）—— 二级侧滑推入转场
         AnimatedVisibility(
             visible = showSmartBookkeepingPage,
@@ -799,7 +840,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 ledgers = ledgers,
                 onSelectLedger = { viewModel.selectLedger(it) },
                 visible = showCalculatorSheet,
-                suspendedBySubpage = showCategoryManagementPage || showTagManagementPage || showTemplateManagementPage,
+                suspendedBySubpage = showCategoryManagementPage || showTagManagementPage || showTemplateManagementPage || showCurrencyManagementPage,
                 editingTransaction = editingTx,
                 initialType = calcInitialType,
                 initialSourceWalletId = calcInitialSourceWalletId,
@@ -832,7 +873,10 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     templateManagementAutoCreate = false
                     showTemplateManagementPage = true
                 },
-                onLoadPresetTemplates = { viewModel.addPresetTemplates() }
+                onLoadPresetTemplates = { viewModel.addPresetTemplates() },
+                onOpenCurrencyManagement = {
+                    showCurrencyManagementPage = true
+                }
             )
         }
         // AI 静默识账沙盒测试面板
@@ -1258,7 +1302,9 @@ private fun ICostSettingsFullScreen(
     tagCount: Int = 8,
     onOpenTagManagement: () -> Unit = {},
     templateCount: Int = 0,
-    onOpenTemplateManagement: () -> Unit = {}
+    onOpenTemplateManagement: () -> Unit = {},
+    customCurrencyRateCount: Int = 0,
+    onOpenCurrencyManagement: () -> Unit = {}
 ) {
     BackHandler(onBack = onBack)
 
@@ -1407,7 +1453,16 @@ private fun ICostSettingsFullScreen(
                             "$templateCount 个模板",
                             onClick = onOpenTemplateManagement
                         ),
-                        SettingRowDef("setting_currency.webp", "货币和汇率"),
+                        SettingRowDef(
+                            "setting_currency.webp",
+                            "货币和汇率",
+                            if (customCurrencyRateCount > 0) {
+                                "已自定义 $customCurrencyRateCount 项汇率"
+                            } else {
+                                "本位币 CNY · ${CurrencyCode.entries.size} 种货币"
+                            },
+                            onClick = onOpenCurrencyManagement
+                        ),
                         SettingRowDef("setting_password.webp", "密码保护"),
                         SettingRowDef("setting_time.webp", "定时提醒"),
                         SettingRowDef("setting_appearance.webp", "外观显示")

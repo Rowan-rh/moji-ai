@@ -5,6 +5,7 @@ import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.TransactionType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -318,8 +319,9 @@ class AiAccountingEngine(
         val txType = runCatching { TransactionType.valueOf(finalResult.type.uppercase()) }
             .getOrDefault(TransactionType.EXPENSE)
         val currencyCode = CurrencyCode.fromCode(finalResult.currency)
+        val effectiveRate = CurrencyRateManager.getEffectiveRateToCny(currencyCode)
         val amountCents = (finalResult.amount * 100.0).roundToLong()
-        val amountCnyCents = (amountCents * currencyCode.defaultRateToCny).roundToLong()
+        val amountCnyCents = (amountCents * effectiveRate).roundToLong()
 
         val resolvedTxNo = finalResult.transactionNo.ifBlank { localFallback?.transactionNo.orEmpty() }
         val resolvedMerchantNo = finalResult.merchantOrderNo.ifBlank { localFallback?.merchantOrderNo.orEmpty() }
@@ -357,7 +359,7 @@ class AiAccountingEngine(
             type = txType,
             amountCents = amountCents,
             currency = currencyCode.name,
-            exchangeRateToCny = currencyCode.defaultRateToCny,
+            exchangeRateToCny = effectiveRate,
             amountCnyCents = amountCnyCents,
             discountCents = resolvedDiscountCents,
             itemQuantity = resolvedQuantity,

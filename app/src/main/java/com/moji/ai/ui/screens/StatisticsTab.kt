@@ -73,6 +73,7 @@ import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.ui.theme.ICDinFontFamily
@@ -316,9 +317,12 @@ fun ICostStatisticsScreen(
     onOpenSettingsPage: () -> Unit,
     currentLedger: String? = null,
     hideAmounts: Boolean = false,
-    onSelectTransaction: (TransactionEntity) -> Unit = {}
+    onSelectTransaction: (TransactionEntity) -> Unit = {},
+    customCurrencyRates: Map<String, Double> = emptyMap()
 ) {
     val catalogTags by TagCatalog.tagsFlow.collectAsState()
+    val observedCustomRates by CurrencyRateManager.customRatesFlow.collectAsState()
+    val effectiveCustomRates = if (customCurrencyRates.isNotEmpty()) customCurrencyRates else observedCustomRates
     var rangeMode by rememberSaveable { mutableStateOf(StatsRangeMode.MONTH) }
     var year by rememberSaveable { mutableIntStateOf(initialYear) }
     var month by rememberSaveable { mutableIntStateOf(initialMonth) }
@@ -487,11 +491,15 @@ fun ICostStatisticsScreen(
 
     // 净资产趋势：从当前余额出发，逐笔倒推每个分桶结束时的资产与负债（仅计入净资产的账户，折算人民币）
     val walletMap = remember(wallets) { wallets.associateBy { it.id } }
-    val currentAssetsCents = wallets.filter { !it.type.isLiability && it.includeInNetWorth }.sumOf {
-        (it.balanceCents * CurrencyCode.fromCode(it.currency).defaultRateToCny).roundToLong()
+    val currentAssetsCents = remember(wallets, effectiveCustomRates) {
+        wallets.filter { !it.type.isLiability && it.includeInNetWorth }.sumOf {
+            (it.balanceCents * CurrencyRateManager.getEffectiveRateToCny(it.currency)).roundToLong()
+        }
     }
-    val currentLiabCents = wallets.filter { it.type.isLiability && it.includeInNetWorth }.sumOf {
-        (it.balanceCents * CurrencyCode.fromCode(it.currency).defaultRateToCny).roundToLong()
+    val currentLiabCents = remember(wallets, effectiveCustomRates) {
+        wallets.filter { it.type.isLiability && it.includeInNetWorth }.sumOf {
+            (it.balanceCents * CurrencyRateManager.getEffectiveRateToCny(it.currency)).roundToLong()
+        }
     }
     val currentTrendValue = when (trendMetric) {
         0 -> currentAssetsCents - currentLiabCents

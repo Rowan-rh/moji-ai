@@ -9,6 +9,7 @@ import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import kotlin.math.roundToLong
@@ -100,7 +101,7 @@ class LedgerRepository(private val db: AppDatabase) {
             return@withTransaction null
         }
 
-        val rate = CurrencyCode.fromCode(wallet.currency).defaultRateToCny
+        val rate = CurrencyRateManager.getEffectiveRateToCny(wallet.currency)
         val absDiff = kotlin.math.abs(diff)
         val absCnyCents = (absDiff * rate).roundToLong()
 
@@ -678,7 +679,7 @@ class LedgerRepository(private val db: AppDatabase) {
         val dueRules = db.recurringRuleDao().getDueRules(nowMillis)
         val created = mutableListOf<TransactionEntity>()
         for (rule in dueRules) {
-            val rate = CurrencyCode.fromCode(rule.currency).defaultRateToCny
+            val rate = CurrencyRateManager.getEffectiveRateToCny(rule.currency)
             val cnyCents = (rule.amountCents * rate).roundToLong()
             val tx = TransactionEntity(
                 type = rule.type,
@@ -896,7 +897,7 @@ class LedgerRepository(private val db: AppDatabase) {
     ): Long {
         if (fromCurrency.equals(toCurrency, ignoreCase = true)) return amountCents
         val cnyCents = amountCents * fromRateToCny
-        val toRate = CurrencyCode.fromCode(toCurrency).defaultRateToCny
+        val toRate = CurrencyRateManager.getEffectiveRateToCny(toCurrency)
         return (cnyCents / toRate).roundToLong()
     }
 }

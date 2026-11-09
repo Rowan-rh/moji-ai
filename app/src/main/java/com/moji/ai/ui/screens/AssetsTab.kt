@@ -22,6 +22,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -87,6 +89,7 @@ import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.WalletType
@@ -154,17 +157,20 @@ fun ICostAssetsScreen(
     onDeleteSavingPlan: (planId: Long) -> Unit = {},
     onAddInstallmentPlan: (title: String, walletId: Long, totalYuan: Double, feePerPeriodYuan: Double, totalPeriods: Int) -> Unit = { _, _, _, _, _ -> },
     onDeleteInstallmentPlan: (planId: Long) -> Unit = {},
-    onAddRecurringRule: (title: String, amountYuan: Double, currency: String, category: String, walletId: Long, frequency: RecurrenceFrequency) -> Unit = { _, _, _, _, _, _ -> }
+    onAddRecurringRule: (title: String, amountYuan: Double, currency: String, category: String, walletId: Long, frequency: RecurrenceFrequency) -> Unit = { _, _, _, _, _, _ -> },
+    customCurrencyRates: Map<String, Double> = emptyMap()
 ) {
+    val observedCustomRates by CurrencyRateManager.customRatesFlow.collectAsState()
+    val effectiveCustomRates = if (customCurrencyRates.isNotEmpty()) customCurrencyRates else observedCustomRates
     val assetPagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
-    val totalAssetsCnyCents = remember(wallets) {
+    val totalAssetsCnyCents = remember(wallets, effectiveCustomRates) {
         wallets.filter { !it.type.isLiability && it.includeInNetWorth }.sumOf { w ->
-            (w.balanceCents * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
+            (w.balanceCents * CurrencyRateManager.getEffectiveRateToCny(w.currency)).roundToLong()
         }
     }
-    val totalLiabilityCnyCents = remember(wallets) {
+    val totalLiabilityCnyCents = remember(wallets, effectiveCustomRates) {
         wallets.filter { it.type.isLiability && it.includeInNetWorth }.sumOf { w ->
-            (w.balanceCents * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
+            (w.balanceCents * CurrencyRateManager.getEffectiveRateToCny(w.currency)).roundToLong()
         }
     }
     val netWorthCnyCents = totalAssetsCnyCents - totalLiabilityCnyCents
@@ -179,14 +185,14 @@ fun ICostAssetsScreen(
     val creditWallets = remember(wallets) { wallets.filter { it.type.isLiability } }
     val assetWallets = remember(wallets) { wallets.filter { !it.type.isLiability } }
     // 分组标题按组内全部账户汇总（含不计入净资产的账户），与列表内容一致
-    val creditGroupDebtCnyCents = remember(creditWallets) {
+    val creditGroupDebtCnyCents = remember(creditWallets, effectiveCustomRates) {
         creditWallets.sumOf { w ->
-            (w.balanceCents.coerceAtLeast(0L) * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
+            (w.balanceCents.coerceAtLeast(0L) * CurrencyRateManager.getEffectiveRateToCny(w.currency)).roundToLong()
         }
     }
-    val assetGroupBalanceCnyCents = remember(assetWallets) {
+    val assetGroupBalanceCnyCents = remember(assetWallets, effectiveCustomRates) {
         assetWallets.sumOf { w ->
-            (w.balanceCents * CurrencyCode.fromCode(w.currency).defaultRateToCny).roundToLong()
+            (w.balanceCents * CurrencyRateManager.getEffectiveRateToCny(w.currency)).roundToLong()
         }
     }
 
@@ -1324,7 +1330,7 @@ private fun installmentRemainCents(plan: InstallmentPlanItem): Long {
 
 /** 把本位币（CNY）分转换为指定币种的分，用于与账户币种保持一致展示。 */
 private fun cnyCentsToCurrency(cnyCents: Long, currency: String): Long {
-    val rate = CurrencyCode.fromCode(currency).defaultRateToCny
+    val rate = CurrencyRateManager.getEffectiveRateToCny(currency)
     return if (rate <= 0.0) cnyCents else (cnyCents / rate).roundToLong()
 }
 
@@ -1814,6 +1820,7 @@ private fun AddInstallmentSheet(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AddRecurringRuleSheet(
     wallets: List<WalletEntity>,
@@ -1888,16 +1895,16 @@ private fun AddRecurringRuleSheet(
                         }
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             FieldLabel("币种")
-                            Row(
+                            FlowRow(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 CurrencyCode.entries.forEach { c ->
                                     ICostChoicePill(
                                         label = c.name,
                                         selected = currency == c.name,
                                         onClick = { currency = c.name },
-                                        modifier = Modifier.weight(1f),
                                         compactHorizontalPadding = true
                                     )
                                 }
@@ -2078,7 +2085,11 @@ private fun ICostAccountItemRow(
                 "可用额度: ${formatMoneyCents(availableCents, wallet.currency, hideAmounts)}"
             }
             wallet.currency != "CNY" -> {
-                val cnyCents = (wallet.balanceCents * CurrencyCode.fromCode(wallet.currency).defaultRateToCny).roundToLong()
+                val customRates by CurrencyRateManager.customRatesFlow.collectAsState()
+                val rate = remember(wallet.currency, customRates) {
+                    CurrencyRateManager.getEffectiveRateToCny(wallet.currency)
+                }
+                val cnyCents = (wallet.balanceCents * rate).roundToLong()
                 "约 ${formatMoneyCents(cnyCents, "CNY", hideAmounts)}"
             }
             else -> null
@@ -2750,7 +2761,7 @@ private fun ICostSelectAccountTypeFullScreen(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun WalletEditorSheet(
     existing: WalletEntity?,
@@ -2758,6 +2769,7 @@ private fun WalletEditorSheet(
     onDismiss: () -> Unit,
     onConfirm: (WalletEntity) -> Unit
 ) {
+    val customRates by CurrencyRateManager.customRatesFlow.collectAsState()
     var name by remember { mutableStateOf(existing?.name ?: preset?.label?.substringBefore(" / ") ?: "") }
     var isCreditAccount by remember {
         mutableStateOf((existing?.type ?: preset?.defaultType ?: WalletType.DEBIT_BANK).isLiability)
@@ -2861,17 +2873,38 @@ private fun WalletEditorSheet(
 
                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             FieldLabel("币种")
-                            Row(
+                            FlowRow(
                                 modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 CurrencyCode.entries.forEach { c ->
                                     ICostChoicePill(
                                         label = c.name,
                                         selected = currency == c.name,
                                         onClick = { currency = c.name },
-                                        modifier = Modifier.weight(1f),
                                         compactHorizontalPadding = true
+                                    )
+                                }
+                            }
+                            if (currency != "CNY") {
+                                val effectiveRate = customRates[currency] ?: CurrencyRateManager.getEffectiveRateToCny(currency)
+                                val isCustom = customRates.containsKey(currency)
+                                val parsedBal = balanceStr.trim().toDoubleOrNull() ?: 0.0
+                                val cnyPreviewStr = String.format(Locale.US, "%.2f", parsedBal * effectiveRate)
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = ICostBlueAccent.copy(alpha = 0.08f),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(
+                                        text = "当前生效汇率：1 $currency = ¥${CurrencyRateManager.formatRate(effectiveRate)} CNY（" +
+                                            (if (isCustom) "已自定义" else "默认") +
+                                            "）· 折合人民币 ≈ ¥$cnyPreviewStr",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Medium,
+                                        color = ICostBlueAccent,
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                                     )
                                 }
                             }
