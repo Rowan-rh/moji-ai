@@ -52,6 +52,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.moji.ai.ai.AgentBillTriageEngine
 import com.moji.ai.ai.AgentTriageReport
 import com.moji.ai.ai.ProposedCategoryItem
 import com.moji.ai.ai.ProposedMemoryItem
@@ -346,8 +347,19 @@ fun AgentTriageBottomSheet(
                         },
                         allSelected = selectedBillIds.size == bills.size
                     ) {
+                        val selectedNewCatPaths = newCats
+                            .filter { it.id in selectedCategoryIds }
+                            .map { it.fullCategoryPath }
+                            .toSet()
                         bills.forEachIndexed { idx, item ->
                             val checked = item.transactionId in selectedBillIds
+                            val isNewCatApproved = !item.isNewCategoryProposal || item.suggestedCategory in selectedNewCatPaths
+                            val effectiveSuggestedCat = if (isNewCatApproved) {
+                                item.suggestedCategory
+                            } else {
+                                item.suggestedCategory.substringBefore('-').ifBlank { item.suggestedCategory }
+                            }
+                            val displayAmountCents = if (item.amountCents != 0L) item.amountCents else item.amountCnyCents
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
@@ -375,7 +387,7 @@ fun AgentTriageBottomSheet(
                                             modifier = Modifier.weight(1f)
                                         )
                                         Text(
-                                            text = formatMoneyCents(item.amountCnyCents, item.currency),
+                                            text = formatMoneyCents(displayAmountCents, item.currency),
                                             fontFamily = ICDinFontFamily,
                                             fontSize = 14.sp,
                                             fontWeight = FontWeight.Bold,
@@ -407,7 +419,11 @@ fun AgentTriageBottomSheet(
                                             color = Color(0xFFEAF2FF)
                                         ) {
                                             Text(
-                                                text = item.suggestedCategory + if (item.isNewCategoryProposal) " [新]" else "",
+                                                text = effectiveSuggestedCat + when {
+                                                    item.isNewCategoryProposal && isNewCatApproved -> " [新]"
+                                                    item.isNewCategoryProposal && !isNewCatApproved -> " [归入一级]"
+                                                    else -> ""
+                                                },
                                                 fontSize = 10.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = ICostBlueAccent,
@@ -644,10 +660,10 @@ private fun TriageScreenshotOrBadge(item: TriageBillItem) {
         if (!path.isNullOrBlank()) {
             value = withContext(Dispatchers.IO) {
                 runCatching {
-                    val f = File(path)
-                    if (f.exists()) {
+                    val safeFile = AgentBillTriageEngine.resolveSafeScreenshotFile(path)
+                    if (safeFile != null) {
                         val opts = BitmapFactory.Options().apply { inSampleSize = 4 }
-                        BitmapFactory.decodeFile(f.absolutePath, opts)?.asImageBitmap()
+                        BitmapFactory.decodeFile(safeFile.absolutePath, opts)?.asImageBitmap()
                     } else null
                 }.getOrNull()
             }

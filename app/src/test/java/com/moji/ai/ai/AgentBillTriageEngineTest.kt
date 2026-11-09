@@ -149,10 +149,96 @@ class AgentBillTriageEngineTest {
         assertTrue("运动-球类" in proposedPaths)
         assertFalse("餐饮-咖啡" in proposedPaths)
 
-        // 验证自动生成了条件规则与商户记忆草案
+        // 验证自动生成了条件规则与商户记忆草案，且多条规则的 rule.id 互不相同（避免 upsertRule 互相覆盖）
         assertTrue(report.proposedRules.any { it.rule.targetCategory == "餐饮-夜宵" })
         assertTrue(report.proposedRules.any { it.rule.targetCategory == "运动-球类" })
+        val uniqueRuleIds = report.proposedRules.map { it.rule.id }.toSet()
+        assertEquals(report.proposedRules.size, uniqueRuleIds.size)
         assertTrue(report.proposedMemories.any { it.merchantKeyword == "木屋烧烤" && it.targetCategory == "餐饮-夜宵" })
+    }
+
+    @Test
+    fun analyzeBills_withDefaultPresetRules_inducesNightSnackAndRespectsRuleTimeWindow() = runBlocking {
+        val engine = AgentBillTriageEngine()
+        val presetRules = SmartRuleEngine.defaultPresetRules()
+
+        // 1. 深夜烧烤账单（23:18）：即使传入默认预设规则（含 103 号「深夜外卖夜宵自动打标 -> 餐饮-三餐」），也应优先归纳出细分新分类「餐饮-夜宵」
+        val txLateNightBbq = TransactionEntity(
+            id = 301L,
+            type = TransactionType.EXPENSE,
+            amountCents = 9200L,
+            amountCnyCents = 9200L,
+            category = CategoryCatalog.PENDING_TRIAGE_CATEGORY,
+            merchant = "木屋烧烤",
+            note = "外卖烤串",
+            sourceWalletId = 1L,
+            timestamp = buildTimestamp(23, 18)
+        )
+
+        // 2. 早间 08:10 包子铺小额账单：满足预设规则 101 时间窗 (06:00-09:59) -> 命中「晨间小额早餐自动归类」（餐饮-三餐）
+        val txMorningBaozi = TransactionEntity(
+            id = 302L,
+            type = TransactionType.EXPENSE,
+            amountCents = 850L,
+            amountCnyCents = 850L,
+            category = CategoryCatalog.PENDING_TRIAGE_CATEGORY,
+            merchant = "庆丰包子铺",
+            note = "包子豆浆",
+            sourceWalletId = 1L,
+            timestamp = buildTimestamp(8, 10)
+        )
+
+        // 3. 晚间 20:30 包子铺账单：不在早餐时间窗 (06:00-09:59) 内 -> 不应误命中「晨间小额早餐自动归类」
+        val txEveningBaozi = TransactionEntity(
+            id = 303L,
+            type = TransactionType.EXPENSE,
+            amountCents = 1800L,
+            amountCnyCents = 1800L,
+            category = CategoryCatalog.PENDING_TRIAGE_CATEGORY,
+            merchant = "庆丰包子铺",
+            note = "包子",
+            sourceWalletId = 1L,
+            timestamp = buildTimestamp(20, 30)
+        )
+
+        // 4. 待梳理工资收入账单：应对齐默认收入分类「工资」，不提议重复新建「薪资-工资」
+        val txSalaryIncome = TransactionEntity(
+            id = 304L,
+            type = TransactionType.INCOME,
+            amountCents = 1_500_000L,
+            amountCnyCents = 1_500_000L,
+            category = CategoryCatalog.PENDING_TRIAGE_CATEGORY,
+            merchant = "公司代发工资",
+            note = "11月工资",
+            sourceWalletId = null,
+            targetWalletId = 10L,
+            timestamp = buildTimestamp(10, 0)
+        )
+
+        val report = engine.analyzeBills(
+            transactions = listOf(txLateNightBbq, txMorningBaozi, txEveningBaozi, txSalaryIncome),
+            existingRules = presetRules,
+            existingMemories = emptyList(),
+            expenseCategories = CategoryCatalog.defaultExpenseCategories,
+            incomeCategories = CategoryCatalog.defaultIncomeCategories
+        )
+
+        val bbq = report.reclassifyItems.first { it.transactionId == 301L }
+        assertEquals("餐饮-夜宵", bbq.suggestedCategory)
+        assertTrue(bbq.isNewCategoryProposal)
+        assertTrue(report.proposedNewCategories.any { it.fullCategoryPath == "餐饮-夜宵" })
+
+        val morning = report.reclassifyItems.first { it.transactionId == 302L }
+        assertEquals("餐饮-三餐", morning.suggestedCategory)
+        assertTrue(morning.reason.contains("晨间小额早餐自动归类"))
+
+        val evening = report.reclassifyItems.first { it.transactionId == 303L }
+        assertFalse(evening.reason.contains("晨间小额早餐自动归类"))
+
+        val salary = report.reclassifyItems.first { it.transactionId == 304L }
+        assertEquals("工资", salary.suggestedCategory)
+        assertFalse(salary.isNewCategoryProposal)
+        assertFalse(report.proposedNewCategories.any { !it.isExpense })
     }
 
     @Test

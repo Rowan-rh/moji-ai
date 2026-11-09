@@ -74,6 +74,9 @@ class LedgerRepository(private val db: AppDatabase) {
     suspend fun insertCaptureEvidence(evidence: com.moji.ai.data.local.CaptureEvidenceEntity): Long =
         db.captureEvidenceDao().insertEvidence(evidence)
 
+    suspend fun getAllCaptureEvidences(): List<com.moji.ai.data.local.CaptureEvidenceEntity> =
+        db.captureEvidenceDao().getAllEvidences()
+
     suspend fun getEvidencesForTransaction(txId: Long): List<com.moji.ai.data.local.CaptureEvidenceEntity> =
         db.captureEvidenceDao().getEvidencesForTransaction(txId)
 

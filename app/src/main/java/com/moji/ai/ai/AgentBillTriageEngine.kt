@@ -30,6 +30,7 @@ data class TriageBillItem(
     val transactionId: Long,
     val merchant: String,
     val note: String,
+    val amountCents: Long = 0L,
     val amountCnyCents: Long,
     val currency: String = "CNY",
     val timestamp: Long,
@@ -221,6 +222,26 @@ class AgentBillTriageEngine(
             CategoryCatalog.PENDING_TRIAGE_CATEGORY,
             "其他", "日常-其他", "餐饮", "餐饮-三餐", "运动", "宠物", "应用软件", "娱乐", "汽车", "日用"
         )
+
+        /**
+         * 校验账单截图路径是否位于应用沙盒 `files/bill_screenshots/` 目录且为 `.webp` 格式，
+         * 防止外部导入的备份 JSON 中携带恶意本地路径读取非截图私有文件。
+         */
+        fun resolveSafeScreenshotFile(path: String?): File? {
+            if (path.isNullOrBlank()) return null
+            return runCatching {
+                val f = File(path)
+                if (!f.exists() || !f.isFile) return null
+                val canonical = f.canonicalPath.replace('\\', '/')
+                if (canonical.contains("/files/bill_screenshots/") &&
+                    f.extension.equals("webp", ignoreCase = true)
+                ) {
+                    f
+                } else {
+                    null
+                }
+            }.getOrNull()
+        }
     }
 
     suspend fun analyzeBills(
@@ -294,6 +315,7 @@ class AgentBillTriageEngine(
                         transactionId = tx.id,
                         merchant = tx.merchant.ifBlank { if (tx.type == TransactionType.INCOME) "收入入账" else "日常消费" },
                         note = tx.note,
+                        amountCents = tx.amountCents,
                         amountCnyCents = tx.amountCnyCents,
                         currency = tx.currency,
                         timestamp = tx.timestamp,
@@ -349,12 +371,16 @@ class AgentBillTriageEngine(
                 cfg = aiCfg,
                 reclassifyItems = reclassifyItems,
                 categoryBuckets = categoryBuckets,
-                expenseCategories = expenseCategories
+                expenseCategories = expenseCategories,
+                incomeCategories = incomeCategories
             )
         }
 
         val finalCategories = categoryBuckets.values.toList()
-        val finalRules = ruleBuckets.values.toList().take(8)
+        val finalRules = ruleBuckets.values.toList().take(8).mapIndexed { index, item ->
+            val uniqueRuleId = stableRuleId(item.id, index)
+            item.copy(rule = item.rule.copy(id = uniqueRuleId))
+        }
         val finalMemories = memoryBuckets.values.toList().take(10)
         val summary = buildSummaryText(
             pendingCount = pendingList.size,
@@ -405,17 +431,23 @@ class AgentBillTriageEngine(
         val isLateNight = hour >= 22 || hour in 0..3
         val evidenceTag = if (hasScreenshot) "截图与账单证据" else "账单文本特征"
 
-        // 1. 收入账单梳理
+        // 1. 收入账单梳理（优先对齐 CategoryCatalog.defaultIncomeCategories 中的已有分类名）
         if (!isExpense) {
             if (!isPending) return null
             val targetCat = when {
-                combinedText.contains("工资") || combinedText.contains("薪") -> "薪资-工资"
-                combinedText.contains("奖") || combinedText.contains("年终") -> "薪资-奖金"
-                combinedText.contains("兼职") || combinedText.contains("稿费") || combinedText.contains("劳务") -> "薪资-兼职"
+                combinedText.contains("工资") || combinedText.contains("薪") ->
+                    if (hasCatInList("薪资-工资", incomeCategories)) "薪资-工资" else "工资"
+                combinedText.contains("奖") || combinedText.contains("年终") ->
+                    if (hasCatInList("薪资-奖金", incomeCategories)) "薪资-奖金" else "奖金"
+                combinedText.contains("兼职") || combinedText.contains("稿费") || combinedText.contains("劳务") ->
+                    if (hasCatInList("薪资-兼职", incomeCategories)) "薪资-兼职" else "兼职"
                 combinedText.contains("理财") || combinedText.contains("利息") || combinedText.contains("分红") -> "理财"
                 combinedText.contains("报销") -> "报销"
-                tx.amountCnyCents >= 300_000L -> "薪资-工资"
-                else -> "人情-红包收款"
+                combinedText.contains("退款") || combinedText.contains("退费") -> "退款"
+                tx.amountCnyCents >= 300_000L ->
+                    if (hasCatInList("薪资-工资", incomeCategories)) "薪资-工资" else "工资"
+                else ->
+                    if (hasCatInList("人情-红包收款", incomeCategories)) "人情-红包收款" else "红包"
             }
             val exists = hasCatInList(targetCat, incomeCategories)
             val propCat = if (!exists) buildProposedCategory(targetCat, isExpense = false, reason = "根据收入账单特征补充分类") else null
@@ -428,38 +460,46 @@ class AgentBillTriageEngine(
             )
         }
 
-        // 2. 优先检查已有 When -> Then 规则与商户记忆（用于将「待梳理」直接归档）
+        // 2. 优先检查已有「非宽泛」When -> Then 规则与商户记忆（防止默认泛化规则如「餐饮-三餐」截胡细分新分类归纳）
         if (isPending) {
-            val matchedRule = existingRules.firstOrNull { rule ->
-                rule.enabled && !rule.interceptIgnore && rule.targetCategory.isNotBlank() &&
-                    (rule.keywordContains.isBlank() || rule.keywordContains.split(",", "，").any { kw ->
-                        kw.trim().isNotEmpty() && combinedText.contains(kw.trim(), ignoreCase = true)
-                    }) &&
-                    (rule.minAmountYuan == null || amountYuan >= rule.minAmountYuan) &&
-                    (rule.maxAmountYuan == null || amountYuan <= rule.maxAmountYuan)
+            val matchedSpecificRule = existingRules.firstOrNull { rule ->
+                matchesSmartRule(rule, isExpense = isExpense, combinedText = combinedText, amountYuan = amountYuan, hour = hour) &&
+                    rule.targetCategory !in BROAD_REFINABLE_CATEGORIES
             }
-            if (matchedRule != null) {
+            if (matchedSpecificRule != null) {
+                val catExists = hasCatInList(matchedSpecificRule.targetCategory, expenseCategories)
+                val propCat = if (!catExists) {
+                    buildProposedCategory(matchedSpecificRule.targetCategory, isExpense = true, reason = "补全已有分类规则引用的细分分类")
+                } else null
                 return SingleInferenceResult(
-                    suggestedCategory = matchedRule.targetCategory,
-                    isNewCategoryProposal = false,
-                    reason = "命中已有分类规则「${matchedRule.name}」",
-                    confidence = 0.98f
+                    suggestedCategory = matchedSpecificRule.targetCategory,
+                    isNewCategoryProposal = !catExists,
+                    reason = "命中已有分类规则「${matchedSpecificRule.name}」",
+                    confidence = 0.98f,
+                    proposedCategory = propCat
                 )
             }
-            val matchedMem = existingMemories.firstOrNull { mem ->
-                combinedText.contains(mem.merchantKeyword, ignoreCase = true)
+            val matchedSpecificMem = existingMemories.firstOrNull { mem ->
+                combinedText.contains(mem.merchantKeyword, ignoreCase = true) &&
+                    !CategoryCatalog.isPendingTriage(mem.category) &&
+                    mem.category !in BROAD_REFINABLE_CATEGORIES
             }
-            if (matchedMem != null && !CategoryCatalog.isPendingTriage(matchedMem.category)) {
+            if (matchedSpecificMem != null) {
+                val catExists = hasCatInList(matchedSpecificMem.category, expenseCategories)
+                val propCat = if (!catExists) {
+                    buildProposedCategory(matchedSpecificMem.category, isExpense = true, reason = "补全已记住商户引用的细分分类")
+                } else null
                 return SingleInferenceResult(
-                    suggestedCategory = matchedMem.category,
-                    isNewCategoryProposal = false,
-                    reason = "命中已记住商户「${matchedMem.merchantKeyword} → ${matchedMem.category}」",
-                    confidence = 0.97f
+                    suggestedCategory = matchedSpecificMem.category,
+                    isNewCategoryProposal = !catExists,
+                    reason = "命中已记住商户「${matchedSpecificMem.merchantKeyword} → ${matchedSpecificMem.category}」",
+                    confidence = 0.97f,
+                    proposedCategory = propCat
                 )
             }
         }
 
-        // 3. 深夜餐饮/外卖场景（22:00-04:00 且包含餐饮/美团/饿了么/烧烤/夜宵）-> 归纳「餐饮-夜宵」
+        // 3. 细分新分类场景归纳（如深夜餐饮/外卖 22:00-04:00 -> 餐饮-夜宵，羽毛球馆 -> 运动-球类，高于默认宽泛规则「餐饮-三餐」）
         val isNightDiningSignal = isLateNight && (
             combinedText.contains("美团") || combinedText.contains("饿了么") ||
                 combinedText.contains("外卖") || combinedText.contains("餐饮") ||
@@ -493,9 +533,11 @@ class AgentBillTriageEngine(
             } else null
 
             val cleanMerchant = cleanMerchantKeyword(tx.merchant, hitKw)
+            val ruleKey = "RULE:$targetPath:$hitKw"
             val propRule = ProposedRuleItem(
-                id = "RULE:$targetPath:$hitKw",
+                id = ruleKey,
                 rule = SmartConditionRule(
+                    id = stableRuleId(ruleKey, tx.id.toInt()),
                     name = "${matchedFineRule.ruleTitlePrefix}（$hitKw）",
                     enabled = true,
                     keywordContains = hitKw,
@@ -529,7 +571,42 @@ class AgentBillTriageEngine(
         // 4. 若非「待梳理」且未命中细分新分类场景，则无需改动已有分类
         if (!isPending) return null
 
-        // 5. 对「待梳理」账单执行加权语义分类 + 时段/金额启发式兜底
+        // 5. 检查其余已有 When -> Then 规则与商户记忆（包含「晨间小额早餐自动归类 -> 餐饮-三餐」等带时段校验的预设规则）
+        val matchedBroadRule = existingRules.firstOrNull { rule ->
+            matchesSmartRule(rule, isExpense = isExpense, combinedText = combinedText, amountYuan = amountYuan, hour = hour)
+        }
+        if (matchedBroadRule != null) {
+            val catExists = hasCatInList(matchedBroadRule.targetCategory, expenseCategories)
+            val propCat = if (!catExists) {
+                buildProposedCategory(matchedBroadRule.targetCategory, isExpense = true, reason = "补全已有分类规则引用的分类")
+            } else null
+            return SingleInferenceResult(
+                suggestedCategory = matchedBroadRule.targetCategory,
+                isNewCategoryProposal = !catExists,
+                reason = "命中已有分类规则「${matchedBroadRule.name}」",
+                confidence = 0.96f,
+                proposedCategory = propCat
+            )
+        }
+        val matchedBroadMem = existingMemories.firstOrNull { mem ->
+            combinedText.contains(mem.merchantKeyword, ignoreCase = true) &&
+                !CategoryCatalog.isPendingTriage(mem.category)
+        }
+        if (matchedBroadMem != null) {
+            val catExists = hasCatInList(matchedBroadMem.category, expenseCategories)
+            val propCat = if (!catExists) {
+                buildProposedCategory(matchedBroadMem.category, isExpense = true, reason = "补全已记住商户引用的分类")
+            } else null
+            return SingleInferenceResult(
+                suggestedCategory = matchedBroadMem.category,
+                isNewCategoryProposal = !catExists,
+                reason = "命中已记住商户「${matchedBroadMem.merchantKeyword} → ${matchedBroadMem.category}」",
+                confidence = 0.95f,
+                proposedCategory = propCat
+            )
+        }
+
+        // 6. 对「待梳理」账单执行加权语义分类 + 时段/金额启发式兜底
         val (weightedCat, weightedConf) = WeightedCategoryClassifier.classifyExpense(combinedText, tx.merchant)
         val resolvedCat = if (weightedConf > 0.80f) {
             weightedCat
@@ -556,10 +633,12 @@ class AgentBillTriageEngine(
                 reason = "从待梳理账单学习商户「$cleanMerchant → $resolvedCat」"
             )
         } else null
+        val ruleKey = "RULE:$resolvedCat:$cleanMerchant"
         val propRule = if (cleanMerchant.length >= 2 && weightedConf > 0.80f) {
             ProposedRuleItem(
-                id = "RULE:$resolvedCat:$cleanMerchant",
+                id = ruleKey,
                 rule = SmartConditionRule(
+                    id = stableRuleId(ruleKey, tx.id.toInt()),
                     name = "${cleanMerchant}自动归入$resolvedCat",
                     enabled = true,
                     keywordContains = cleanMerchant,
@@ -583,6 +662,50 @@ class AgentBillTriageEngine(
             proposedRule = propRule,
             proposedMemory = propMem
         )
+    }
+
+    /**
+     * 完整对齐 `SmartRuleEngine.evaluateAndApply` 的关键词、金额区间、时间窗（支持跨午夜）与收支类型校验。
+     */
+    private fun matchesSmartRule(
+        rule: SmartConditionRule,
+        isExpense: Boolean,
+        combinedText: String,
+        amountYuan: Double,
+        hour: Int
+    ): Boolean {
+        if (!rule.enabled || rule.interceptIgnore || rule.targetCategory.isBlank()) return false
+        if (rule.onlyExpense && !isExpense) return false
+        if (rule.keywordContains.isNotBlank()) {
+            val keywords = rule.keywordContains
+                .split(",", "，", "|", " ")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            if (keywords.isNotEmpty() && keywords.none { kw -> combinedText.contains(kw, ignoreCase = true) }) {
+                return false
+            }
+        }
+        if (rule.minAmountYuan != null && amountYuan < rule.minAmountYuan) return false
+        if (rule.maxAmountYuan != null && amountYuan > rule.maxAmountYuan) return false
+        if (rule.startHour24 != null && rule.endHour24 != null) {
+            val s = rule.startHour24.coerceIn(0, 23)
+            val e = rule.endHour24.coerceIn(0, 23)
+            val inWindow = if (s <= e) {
+                hour in s..e
+            } else {
+                hour >= s || hour <= e
+            }
+            if (!inWindow) return false
+        }
+        return true
+    }
+
+    /**
+     * 为每条自动归纳出的条件规则生成互不冲突且不与预设规则（101..104）碰撞的确定性正整数 ID。
+     */
+    private fun stableRuleId(ruleKey: String, ordinalOrTxSalt: Int): Long {
+        val hash = (ruleKey.hashCode().toLong() and 0x7FFFFFFFL)
+        return 10_000_000L + (hash * 100L) + ((ordinalOrTxSalt and 0x3F) + 1L)
     }
 
     private fun hasCatInList(fullCategory: String, list: List<CategoryDef>): Boolean =
@@ -664,20 +787,26 @@ class AgentBillTriageEngine(
         cfg: AiConfig,
         reclassifyItems: MutableList<TriageBillItem>,
         categoryBuckets: LinkedHashMap<String, ProposedCategoryItem>,
-        expenseCategories: List<CategoryDef>
+        expenseCategories: List<CategoryDef>,
+        incomeCategories: List<CategoryDef>
     ): Boolean {
         if (cfg.apiKey.isBlank()) return false
         return runCatching {
             val sampleItems = reclassifyItems.take(8)
-            val catSummary = expenseCategories.joinToString("；") { c ->
+            val expSummary = expenseCategories.joinToString("；") { c ->
+                if (c.subCategories.isEmpty()) c.name else "${c.name}(${c.subCategories.joinToString("/") { it.name }})"
+            }
+            val incSummary = incomeCategories.joinToString("；") { c ->
                 if (c.subCategories.isEmpty()) c.name else "${c.name}(${c.subCategories.joinToString("/") { it.name }})"
             }
             val billsPrompt = sampleItems.joinToString("\n") { item ->
-                "- id=${item.transactionId}, 商户=${item.merchant}, 备注=${item.note}, 金额=¥${String.format(Locale.US, "%.2f", item.amountCnyCents / 100.0)}, 证据=${item.evidenceSnippet}, 初筛建议=${item.suggestedCategory}"
+                val typeTag = if (item.type == TransactionType.INCOME) "收入" else "支出"
+                "- id=${item.transactionId}, 类型=$typeTag, 商户=${item.merchant}, 备注=${item.note}, 金额=¥${String.format(Locale.US, "%.2f", item.amountCnyCents / 100.0)}, 证据=${item.evidenceSnippet}, 初筛建议=${item.suggestedCategory}"
             }
             val prompt = """
                 你是默记(MoJi)的智能记账分类梳理 Agent。
-                当前支出分类树：$catSummary
+                当前支出分类树：$expSummary
+                当前收入分类树：$incSummary
                 待梳理账单列表：
                 $billsPrompt
                 请核对每笔账单最贴合的「一级-二级」分类（若现有分类不足，可提出「一级-新二级」分类）。
@@ -685,10 +814,9 @@ class AgentBillTriageEngine(
             """.trimIndent()
 
             val base64Screenshot = sampleItems
-                .firstNotNullOfOrNull { it.screenshotPath }
-                ?.let { path ->
-                    val file = File(path)
-                    if (file.exists() && file.length() in 1..512_000) {
+                .firstNotNullOfOrNull { resolveSafeScreenshotFile(it.screenshotPath) }
+                ?.let { file ->
+                    if (file.length() in 1..512_000) {
                         runCatching { Base64.encodeToString(file.readBytes(), Base64.NO_WRAP) }.getOrNull()
                     } else null
                 }
@@ -706,14 +834,22 @@ class AgentBillTriageEngine(
             for (elem in arr) {
                 val obj = elem.jsonObject
                 val txId = obj["id"]?.jsonPrimitive?.content?.toLongOrNull() ?: continue
-                val newCat = obj["category"]?.jsonPrimitive?.content?.trim().orEmpty()
+                val rawNewCat = obj["category"]?.jsonPrimitive?.content?.trim().orEmpty()
+                val newCat = rawNewCat
+                    .split("-", "·", "/", "—", ">", "›")
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() }
+                    .take(2)
+                    .joinToString("-")
                 val newReason = obj["reason"]?.jsonPrimitive?.content?.trim().orEmpty()
                 if (newCat.isBlank() || CategoryCatalog.isPendingTriage(newCat)) continue
                 val idx = reclassifyItems.indexOfFirst { it.transactionId == txId }
                 if (idx >= 0) {
-                    val exists = hasCatInList(newCat, expenseCategories)
+                    val isExp = reclassifyItems[idx].type != TransactionType.INCOME
+                    val targetCatList = if (isExp) expenseCategories else incomeCategories
+                    val exists = hasCatInList(newCat, targetCatList)
                     if (!exists) {
-                        val prop = buildProposedCategory(newCat, isExpense = true, reason = newReason.ifBlank { "AI 结合账单特征建议新增分类" })
+                        val prop = buildProposedCategory(newCat, isExpense = isExp, reason = newReason.ifBlank { "AI 结合账单特征建议新增分类" })
                         categoryBuckets.putIfAbsent(prop.id, prop)
                     }
                     reclassifyItems[idx] = reclassifyItems[idx].copy(

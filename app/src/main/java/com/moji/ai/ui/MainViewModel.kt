@@ -1868,9 +1868,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             _isTriaging.value = true
             try {
-                val allTxs = repository.getAllTransactions()
+                val currentLedgerName = _currentLedger.value
+                val ledgerTxs = repository.getAllTransactions().filter { it.ledgerName == currentLedgerName }
+                val allEvidences = repository.getAllCaptureEvidences()
                 val report = agentTriageEngine.analyzeBills(
-                    transactions = allTxs,
+                    transactions = ledgerTxs,
+                    captureEvidences = allEvidences,
                     existingRules = smartRules.value,
                     existingMemories = merchantMemories.value,
                     expenseCategories = CategoryCatalog.expenseCategories,
@@ -1883,6 +1886,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun resolveFallbackCategoryIfRejected(
+        targetCategory: String,
+        isExpense: Boolean,
+        approvedNewPaths: Set<String>,
+        rejectedNewPaths: Set<String>
+    ): String? {
+        if (targetCategory in approvedNewPaths) return targetCategory
+        if (targetCategory !in rejectedNewPaths && CategoryCatalog.hasCategoryPath(targetCategory, isExpense)) {
+            return targetCategory
+        }
+        val parentName = targetCategory.substringBefore('-').trim()
+        return if (parentName.isNotEmpty() && CategoryCatalog.hasCategoryPath(parentName, isExpense)) {
+            parentName
+        } else {
+            null
+        }
+    }
+
     fun applyAgentTriageProposal(
         bills: List<TriageBillItem>,
         newCategories: List<ProposedCategoryItem>,
@@ -1890,37 +1911,65 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         newMemories: List<ProposedMemoryItem>
     ) {
         viewModelScope.launch {
+            val approvedNewPaths = newCategories.map { it.fullCategoryPath }.toSet()
+            val rejectedNewPaths = _triageReport.value?.proposedNewCategories.orEmpty()
+                .map { it.fullCategoryPath }
+                .filter { it !in approvedNewPaths }
+                .toSet()
+
             var createdCatCount = 0
-            // 1. 先创建建议新增的一级/二级分类
+            // 1. 仅创建用户已勾选的建议新增一级/二级分类（尊重用户取消勾选的选择）
             for (cat in newCategories) {
                 if (CategoryCatalog.ensureCategoryPathExists(cat.fullCategoryPath, cat.isExpense, cat.iconAsset)) {
                     createdCatCount++
                 }
             }
 
-            // 2. 若勾选归档的账单引用了某新分类但用户未单独取消该账单，确保目标分类树节点存在
+            // 2. 校验每笔勾选账单的目标分类：若用户取消勾选了对应的新子分类，则回退归入已有的一级父分类，绝不强行创建被拒绝的新子分类
+            val updatesMap = linkedMapOf<Long, String>()
             for (bill in bills) {
                 val isExp = bill.type != TransactionType.INCOME
-                if (CategoryCatalog.ensureCategoryPathExists(bill.suggestedCategory, isExp)) {
-                    createdCatCount++
+                val effectiveCat = if (bill.isNewCategoryProposal || bill.suggestedCategory in rejectedNewPaths) {
+                    resolveFallbackCategoryIfRejected(bill.suggestedCategory, isExp, approvedNewPaths, rejectedNewPaths)
+                } else {
+                    bill.suggestedCategory
+                } ?: continue
+
+                if (effectiveCat in approvedNewPaths) {
+                    if (CategoryCatalog.ensureCategoryPathExists(effectiveCat, isExp)) {
+                        createdCatCount++
+                    }
                 }
+                updatesMap[bill.transactionId] = effectiveCat
             }
 
             // 3. 在 Room 事务中原子批量更新账单分类
-            val updatesMap = bills.associate { it.transactionId to it.suggestedCategory }
             val updatedBillCount = repository.batchUpdateTransactionCategories(updatesMap)
 
-            // 4. 写入自动条件规则与商户记忆
+            // 4. 写入自动条件规则与商户记忆（同样尊重用户对新分类的勾选状态）
             var addedRuleCount = 0
             for (r in newRules) {
-                app.smartRuleEngine.upsertRule(r.rule)
+                val isExp = r.rule.onlyExpense
+                val effectiveCat = resolveFallbackCategoryIfRejected(
+                    targetCategory = r.rule.targetCategory,
+                    isExpense = isExp,
+                    approvedNewPaths = approvedNewPaths,
+                    rejectedNewPaths = rejectedNewPaths
+                ) ?: continue
+                app.smartRuleEngine.upsertRule(r.rule.copy(targetCategory = effectiveCat))
                 addedRuleCount++
             }
             var addedMemCount = 0
             for (m in newMemories) {
+                val effectiveCat = resolveFallbackCategoryIfRejected(
+                    targetCategory = m.targetCategory,
+                    isExpense = true,
+                    approvedNewPaths = approvedNewPaths,
+                    rejectedNewPaths = rejectedNewPaths
+                ) ?: continue
                 app.merchantMemoryManager.upsertMemory(
                     keyword = m.merchantKeyword,
-                    category = m.targetCategory,
+                    category = effectiveCat,
                     preferredWalletId = m.preferredWalletId
                 )
                 addedMemCount++
