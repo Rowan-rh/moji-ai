@@ -58,6 +58,13 @@ class SilentBookkeepingNotifier(private val context: Context) {
         )
 
         /**
+         * 为每笔账单生成无碰撞的系统通知 ID（范围 1001..9999），
+         * 避免旧实现 `coerceAtLeast(1001)` 将 ID 1..1000 全部挤压为 1001 导致相互覆盖。
+         */
+        fun notificationIdForTransaction(txId: Long): Int =
+            1000 + ((txId.coerceAtLeast(1L) % 8_999L).toInt())
+
+        /**
          * 检测当前设备是否为一加（OnePlus）或搭载 ColorOS / OxygenOS（支持流体云 Fluid Cloud）的机型
          */
         fun isOnePlusFluidCloudSupported(): Boolean {
@@ -226,7 +233,7 @@ class SilentBookkeepingNotifier(private val context: Context) {
             }
         }
 
-        val notifId = (tx.id % Int.MAX_VALUE).toInt().coerceAtLeast(1001)
+        val notifId = notificationIdForTransaction(tx.id)
 
         val openIntent = Intent(context, MainActivity::class.java).apply {
             setPackage(context.packageName)

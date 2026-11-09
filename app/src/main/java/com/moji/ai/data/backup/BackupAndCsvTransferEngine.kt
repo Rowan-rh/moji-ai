@@ -3,6 +3,7 @@ package com.moji.ai.data.backup
 import android.util.Xml
 import com.moji.ai.ai.MerchantMemoryEntry
 import com.moji.ai.ai.MerchantMemoryManager
+import com.moji.ai.ai.SmartConditionRule
 import com.moji.ai.ai.WeightedCategoryClassifier
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
@@ -18,8 +19,10 @@ import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.WalletType
+import com.moji.ai.ui.InstallmentPlanItem
 import com.moji.ai.ui.QuickBookkeepingTemplate
 import com.moji.ai.ui.QuickTemplateHelper
+import com.moji.ai.ui.SavingPlanItem
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -130,6 +133,9 @@ data class MoJiFullBackupSnapshot(
     val customIncomeCategories: List<CategoryDef> = emptyList(),
     val customTags: List<TagDef> = emptyList(),
     val quickTemplates: List<QuickBookkeepingTemplate> = emptyList(),
+    val smartRules: List<SmartConditionRule> = emptyList(),
+    val savingPlans: List<SavingPlanItem> = emptyList(),
+    val installmentPlans: List<InstallmentPlanItem> = emptyList(),
     val customCurrencyRates: Map<String, Double> = emptyMap(),
     val reminderSettingsJson: String = "",
     val appearanceSettingsJson: String = ""
@@ -177,6 +183,9 @@ object BackupAndCsvTransferEngine {
         customIncomeCategories: List<CategoryDef> = CategoryCatalog.incomeCategories,
         customTags: List<TagDef> = TagCatalog.tags,
         quickTemplates: List<QuickBookkeepingTemplate> = emptyList(),
+        smartRules: List<SmartConditionRule> = emptyList(),
+        savingPlans: List<SavingPlanItem> = emptyList(),
+        installmentPlans: List<InstallmentPlanItem> = emptyList(),
         customCurrencyRates: Map<String, Double> = CurrencyRateManager.customRates,
         reminderSettingsJson: String = ReminderConfigManager.exportConfigJson(),
         appearanceSettingsJson: String = AppearanceConfigManager.exportConfigJson()
@@ -268,6 +277,9 @@ object BackupAndCsvTransferEngine {
             customIncomeCategories = customIncomeCategories,
             customTags = customTags,
             quickTemplates = QuickTemplateHelper.sanitizeTemplates(quickTemplates),
+            smartRules = smartRules,
+            savingPlans = savingPlans,
+            installmentPlans = installmentPlans,
             customCurrencyRates = CurrencyRateManager.sanitizeRatesMap(customCurrencyRates),
             reminderSettingsJson = reminderSettingsJson,
             appearanceSettingsJson = appearanceSettingsJson

@@ -12,6 +12,7 @@ import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
+import java.util.UUID
 import kotlin.math.roundToLong
 
 data class BatchImportCommitSummary(
@@ -396,6 +397,34 @@ class LedgerRepository(private val db: AppDatabase) {
     }
 
     /**
+     * 计算待报销账单在扣除已退款金额（CNY 分）后，入账到目标钱包时的目标币种净额（分）
+     */
+    private fun computeNetReimbursementDeltaForWallet(
+        expense: TransactionEntity,
+        targetWalletCurrency: String
+    ): Long {
+        if (expense.refundedAmountCents <= 0L) {
+            return convertCentsBetweenCurrencies(
+                expense.amountCents,
+                expense.currency,
+                targetWalletCurrency,
+                expense.exchangeRateToCny
+            )
+        }
+        val netCnyCents = (expense.amountCnyCents - expense.refundedAmountCents).coerceAtLeast(0L)
+        if (netCnyCents <= 0L) return 0L
+        if (expense.currency.equals(targetWalletCurrency, ignoreCase = true) && expense.exchangeRateToCny > 0.0) {
+            return (netCnyCents / expense.exchangeRateToCny).roundToLong()
+        }
+        return convertCentsBetweenCurrencies(
+            netCnyCents,
+            "CNY",
+            targetWalletCurrency,
+            1.0
+        )
+    }
+
+    /**
      * 对待报销账单完成报销入账
      */
     suspend fun settleReimbursement(
@@ -410,7 +439,7 @@ class LedgerRepository(private val db: AppDatabase) {
         val targetId = receiveWalletId ?: expense.sourceWalletId
         targetId?.let { wid ->
             walletDao.getWalletById(wid)?.let { w ->
-                val delta = convertCentsBetweenCurrencies(expense.amountCents, expense.currency, w.currency, expense.exchangeRateToCny)
+                val delta = computeNetReimbursementDeltaForWallet(expense, w.currency)
                 val newBal = if (w.type.isLiability) (w.balanceCents - delta).coerceAtLeast(0L) else w.balanceCents + delta
                 walletDao.updateWallet(w.copy(balanceCents = newBal))
             }
@@ -439,8 +468,7 @@ class LedgerRepository(private val db: AppDatabase) {
             val targetId = receiveWalletId ?: expense.sourceWalletId
             targetId?.let { wid ->
                 walletDao.getWalletById(wid)?.let { w ->
-                    val netCents = (expense.amountCents - expense.refundedAmountCents).coerceAtLeast(0L)
-                    val delta = convertCentsBetweenCurrencies(netCents, expense.currency, w.currency, expense.exchangeRateToCny)
+                    val delta = computeNetReimbursementDeltaForWallet(expense, w.currency)
                     val newBal = if (w.type.isLiability) (w.balanceCents - delta).coerceAtLeast(0L) else w.balanceCents + delta
                     walletDao.updateWallet(w.copy(balanceCents = newBal))
                 }
@@ -484,6 +512,7 @@ class LedgerRepository(private val db: AppDatabase) {
 
         val childB = orig.copy(
             id = 0L,
+            syncUuid = UUID.randomUUID().toString(),
             category = categoryB.ifBlank { "日用" },
             amountCents = partBCents,
             amountCnyCents = partBCnyCents,
@@ -552,6 +581,10 @@ class LedgerRepository(private val db: AppDatabase) {
         val ruleDao = db.recurringRuleDao()
 
         val oldWallets = walletDao.getAllWallets()
+        // 若当前数据库已包含完整的 11 个及以上的现代账户且不存在旧版演示卡(8848)，直接跳过，避免重置用户真实实时余额或自定义账户
+        if (oldWallets.size >= 11 && oldWallets.none { it.cardLast4 == "8848" }) {
+            return@withTransaction
+        }
         val oldAlipayId = oldWallets.firstOrNull { it.brandCode == "ALIPAY" || it.name.contains("账户余额") }?.id ?: 4L
         val oldWechatId = oldWallets.firstOrNull { it.brandCode == "WECHAT" || it.name.contains("微信零钱") }?.id ?: 5L
 
@@ -742,7 +775,7 @@ class LedgerRepository(private val db: AppDatabase) {
             val id = recordTransaction(tx)
             created.add(tx.copy(id = id))
 
-            val nextMillis = rule.nextTriggerTimeMillis + rule.frequency.daysInterval * 86400_000L
+            val nextMillis = rule.frequency.computeNextTriggerMillis(rule.nextTriggerTimeMillis, nowMillis)
             db.recurringRuleDao().updateRule(rule.copy(nextTriggerTimeMillis = nextMillis))
         }
         return created

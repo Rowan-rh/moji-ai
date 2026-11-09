@@ -27,10 +27,10 @@ import android.view.View
 import android.view.WindowManager
 import android.view.animation.PathInterpolator
 import android.widget.Toast
+import androidx.core.app.NotificationManagerCompat
 import com.moji.ai.MainActivity
 import com.moji.ai.MoJiApp
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import com.moji.ai.notification.SilentBookkeepingNotifier
 import kotlinx.coroutines.launch
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlin.math.abs
@@ -83,10 +83,19 @@ object RecognitionBanner {
                     { service ->
                         val app = service.applicationContext as? MoJiApp
                         if (app != null) {
-                            CoroutineScope(Dispatchers.IO).launch {
-                                app.repository.undoAndDeleteTransaction(transactionId)
+                            app.appScope.launch {
+                                val deleted = app.repository.undoAndDeleteTransaction(transactionId)
+                                if (deleted) {
+                                    NotificationManagerCompat.from(service).cancel(
+                                        SilentBookkeepingNotifier.notificationIdForTransaction(transactionId)
+                                    )
+                                }
                                 mainHandler.post {
-                                    Toast.makeText(service, "已撤销该笔入账", Toast.LENGTH_SHORT).show()
+                                    Toast.makeText(
+                                        service,
+                                        if (deleted) "已撤销该笔入账" else "该笔入账已撤销",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
                                 }
                             }
                         }

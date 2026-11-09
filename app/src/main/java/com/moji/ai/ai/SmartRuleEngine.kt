@@ -120,6 +120,11 @@ class SmartRuleEngine(context: Context) {
         saveInternal(updated)
     }
 
+    fun replaceAllRules(newRules: List<SmartConditionRule>) {
+        _rules.value = newRules
+        saveInternal(newRules)
+    }
+
     /**
      * 当分类被重命名或删除迁移时，同步级联更新条件规则中的 targetCategory
      */

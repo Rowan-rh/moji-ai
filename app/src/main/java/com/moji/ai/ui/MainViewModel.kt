@@ -526,19 +526,19 @@ object QuickTemplateHelper {
 
 @Serializable
 data class SavingPlanItem(
-    val id: Long,
-    val title: String,
-    val targetCents: Long,
-    val savedCents: Long,
+    val id: Long = 0L,
+    val title: String = "",
+    val targetCents: Long = 0L,
+    val savedCents: Long = 0L,
     val deadlineLabel: String = "2026-12-31"
 )
 
 @Serializable
 data class InstallmentPlanItem(
-    val id: Long,
-    val title: String,
+    val id: Long = 0L,
+    val title: String = "",
     val walletId: Long = 1L,
-    val totalCents: Long,
+    val totalCents: Long = 0L,
     val feePerPeriodCents: Long = 0L,
     val totalPeriods: Int = 12,
     val paidPeriods: Int = 3,
@@ -918,6 +918,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val copyTx = tx.copy(
                 id = 0L,
+                syncUuid = java.util.UUID.randomUUID().toString(),
                 refundedAmountCents = 0L,
                 reimbursed = false,
                 timestamp = System.currentTimeMillis(),
@@ -1172,6 +1173,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             customIncomeCategories = CategoryCatalog.incomeCategories,
             customTags = TagCatalog.tags,
             quickTemplates = _templates.value,
+            smartRules = smartRules.value,
+            savingPlans = _savingPlans.value,
+            installmentPlans = _installmentPlans.value,
             customCurrencyRates = CurrencyRateManager.customRates,
             reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
             appearanceSettingsJson = AppearanceConfigManager.exportConfigJson()
@@ -1260,11 +1264,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (snapshot.quickTemplates.isNotEmpty()) {
                 persistTemplates(snapshot.quickTemplates)
             }
+            if (snapshot.smartRules.isNotEmpty()) {
+                app.smartRuleEngine.replaceAllRules(snapshot.smartRules)
+            }
+            if (snapshot.savingPlans.isNotEmpty()) {
+                _savingPlans.value = snapshot.savingPlans
+                uiPrefs.edit().putString("saved_saving_plans_json", jsonCodec.encodeToString(snapshot.savingPlans)).apply()
+            }
+            if (snapshot.installmentPlans.isNotEmpty()) {
+                _installmentPlans.value = snapshot.installmentPlans
+                uiPrefs.edit().putString("saved_installments_json", jsonCodec.encodeToString(snapshot.installmentPlans)).apply()
+            }
             if (snapshot.customCurrencyRates.isNotEmpty()) {
                 CurrencyRateManager.replaceAllCustomRates(snapshot.customCurrencyRates)
             }
             TagCatalog.syncDiscoveredTagsFromHistory(
-                backupTxs.map { it.tags } + snapshot.quickTemplates.map { it.tags }
+                backupTxs.map { it.tags } +
+                    snapshot.quickTemplates.map { it.tags } +
+                    snapshot.smartRules.map { it.appendTag }
             )
             snapshot.merchantMemories.forEach { m ->
                 app.merchantMemoryManager.upsertMemory(m.merchantKeyword, m.category, m.preferredWalletId)
@@ -1466,7 +1483,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     category = category,
                     walletId = walletId,
                     frequency = frequency,
-                    nextTriggerTimeMillis = System.currentTimeMillis() + frequency.daysInterval * 86400_000L
+                    nextTriggerTimeMillis = frequency.computeNextTriggerMillis(System.currentTimeMillis())
                 )
             )
         }
