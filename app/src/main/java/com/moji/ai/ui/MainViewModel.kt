@@ -43,16 +43,467 @@ import kotlin.math.roundToLong
 
 @Serializable
 data class QuickBookkeepingTemplate(
-    val id: Long,
-    val title: String,
+    val id: Long = 0L,
+    val title: String = "",
     val typeName: String = "EXPENSE",
-    val category: String,
-    val amountCents: Long,
+    val category: String = "餐饮",
+    val amountCents: Long = 0L,
     val currency: String = "CNY",
     val walletId: Long? = 4L,
+    val targetWalletId: Long? = null,
     val note: String = "",
-    val tags: String = ""
-)
+    val tags: String = "",
+    val reimbursable: Boolean = false
+) {
+    fun resolvedType(): TransactionType {
+        return when (runCatching { TransactionType.valueOf(typeName) }.getOrDefault(TransactionType.EXPENSE)) {
+            TransactionType.TRANSFER, TransactionType.REPAYMENT -> TransactionType.TRANSFER
+            TransactionType.INCOME, TransactionType.LOAN_IN, TransactionType.REFUND_OFFSET -> TransactionType.INCOME
+            else -> TransactionType.EXPENSE
+        }
+    }
+}
+
+sealed class TemplateExecutionOutcome {
+    data class ReadyToRecord(val transaction: TransactionEntity) : TemplateExecutionOutcome()
+    data class OpenInCalculator(
+        val template: QuickBookkeepingTemplate,
+        val message: String
+    ) : TemplateExecutionOutcome()
+}
+
+object QuickTemplateHelper {
+    const val MAX_TEMPLATE_TITLE_LENGTH = 20
+
+    fun validateTemplateInput(
+        title: String,
+        type: TransactionType,
+        amountInput: String,
+        walletId: Long?,
+        targetWalletId: Long?
+    ): Result<Long> {
+        val cleanTitle = title.trim()
+        if (cleanTitle.isEmpty()) {
+            return Result.failure(IllegalArgumentException("请输入模板名称"))
+        }
+        if (cleanTitle.length > MAX_TEMPLATE_TITLE_LENGTH) {
+            return Result.failure(IllegalArgumentException("模板名称不能超过 $MAX_TEMPLATE_TITLE_LENGTH 个字符"))
+        }
+        val trimmedAmount = amountInput.trim()
+        val cents = if (trimmedAmount.isEmpty()) {
+            0L
+        } else {
+            val parsed = trimmedAmount.toDoubleOrNull()
+                ?: return Result.failure(IllegalArgumentException("请输入合法的预设金额"))
+            if (parsed.isNaN() || parsed.isInfinite() || parsed < 0.0) {
+                return Result.failure(IllegalArgumentException("预设金额不能为负数"))
+            }
+            if (parsed >= 1_000_000_000.0) {
+                return Result.failure(IllegalArgumentException("预设金额过大，最多 9 位整数"))
+            }
+            (parsed * 100.0).roundToLong().coerceAtLeast(0L)
+        }
+        if (type == TransactionType.TRANSFER) {
+            if (walletId == null) {
+                return Result.failure(IllegalArgumentException("请选择转出账户"))
+            }
+            if (targetWalletId == null) {
+                return Result.failure(IllegalArgumentException("请选择转入账户"))
+            }
+            if (walletId == targetWalletId) {
+                return Result.failure(IllegalArgumentException("转出与转入账户不能相同"))
+            }
+        }
+        return Result.success(cents)
+    }
+
+    fun sanitizeTemplates(
+        rawList: List<QuickBookkeepingTemplate>,
+        fallbackBaseId: Long = 1000L
+    ): List<QuickBookkeepingTemplate> {
+        val usedIds = mutableSetOf<Long>()
+        var nextFallbackId = fallbackBaseId
+        return rawList.mapNotNull { item ->
+            val cleanTitle = item.title.trim().take(MAX_TEMPLATE_TITLE_LENGTH)
+            if (cleanTitle.isEmpty()) return@mapNotNull null
+            val resolvedType = item.resolvedType()
+            val cleanCategory = when (resolvedType) {
+                TransactionType.TRANSFER -> "内部转账"
+                TransactionType.INCOME -> item.category.trim().ifEmpty { "工资" }
+                else -> item.category.trim().ifEmpty { "餐饮" }
+            }
+            val cleanCents = item.amountCents.coerceAtLeast(0L)
+            val cleanCurrency = CurrencyCode.fromCode(item.currency).name
+            val cleanTargetWalletId = if (resolvedType == TransactionType.TRANSFER) {
+                item.targetWalletId?.takeIf { it != item.walletId }
+            } else {
+                null
+            }
+            val cleanNote = item.note.trim().take(60)
+            val cleanTags = TagCatalog.joinTags(TagCatalog.parseTags(item.tags))
+            val cleanReimbursable = resolvedType == TransactionType.EXPENSE && item.reimbursable
+            val candidateId = if (item.id > 0L && usedIds.add(item.id)) {
+                item.id
+            } else {
+                while (!usedIds.add(nextFallbackId)) {
+                    nextFallbackId++
+                }
+                nextFallbackId
+            }
+            QuickBookkeepingTemplate(
+                id = candidateId,
+                title = cleanTitle,
+                typeName = resolvedType.name,
+                category = cleanCategory,
+                amountCents = cleanCents,
+                currency = cleanCurrency,
+                walletId = item.walletId,
+                targetWalletId = cleanTargetWalletId,
+                note = cleanNote,
+                tags = cleanTags,
+                reimbursable = cleanReimbursable
+            )
+        }
+    }
+
+    private fun resolveExistingCategoryOrFallback(
+        isExpense: Boolean,
+        preferredFull: String,
+        fallbackMain: String
+    ): String {
+        val list = if (isExpense) CategoryCatalog.expenseCategories else CategoryCatalog.incomeCategories
+        val parts = preferredFull.split("-")
+        val mainName = parts.firstOrNull().orEmpty()
+        val subName = parts.getOrNull(1).orEmpty()
+        val mainCat = list.firstOrNull { it.name == mainName }
+            ?: list.firstOrNull { it.name == fallbackMain }
+            ?: list.firstOrNull()
+            ?: return fallbackMain
+        return if (subName.isNotBlank() && mainCat.subCategories.any { it.name == subName }) {
+            "${mainCat.name}-$subName"
+        } else {
+            mainCat.name
+        }
+    }
+
+    fun buildPresetTemplates(wallets: List<WalletEntity>): List<QuickBookkeepingTemplate> {
+        val assetWallets = wallets.filter { !it.type.isLiability }
+        val liabilityWallets = wallets.filter { it.type.isLiability }
+        val defaultExpenseWalletId = assetWallets.firstOrNull {
+            it.name.contains("微信") || it.name.contains("支付宝")
+        }?.id ?: assetWallets.firstOrNull()?.id ?: wallets.firstOrNull()?.id ?: 4L
+        val defaultIncomeWalletId = assetWallets.firstOrNull {
+            it.name.contains("银行") || it.name.contains("储蓄") || it.name.contains("工资")
+        }?.id ?: defaultExpenseWalletId
+        val defaultCreditWalletId = liabilityWallets.firstOrNull()?.id
+            ?: wallets.firstOrNull { it.id != defaultExpenseWalletId }?.id
+
+        return listOf(
+            QuickBookkeepingTemplate(
+                id = 1L,
+                title = "早餐",
+                typeName = TransactionType.EXPENSE.name,
+                category = resolveExistingCategoryOrFallback(true, "餐饮-三餐", "餐饮"),
+                amountCents = 1200L,
+                currency = "CNY",
+                walletId = defaultExpenseWalletId,
+                note = "早餐",
+                tags = "早餐"
+            ),
+            QuickBookkeepingTemplate(
+                id = 2L,
+                title = "通勤地铁",
+                typeName = TransactionType.EXPENSE.name,
+                category = resolveExistingCategoryOrFallback(true, "交通-地铁", "交通"),
+                amountCents = 400L,
+                currency = "CNY",
+                walletId = defaultExpenseWalletId,
+                note = "通勤地铁",
+                tags = "固定开支"
+            ),
+            QuickBookkeepingTemplate(
+                id = 3L,
+                title = "工作午餐",
+                typeName = TransactionType.EXPENSE.name,
+                category = resolveExistingCategoryOrFallback(true, "餐饮-三餐", "餐饮"),
+                amountCents = 2500L,
+                currency = "CNY",
+                walletId = defaultExpenseWalletId,
+                note = "工作午餐",
+                tags = ""
+            ),
+            QuickBookkeepingTemplate(
+                id = 4L,
+                title = "瑞幸咖啡",
+                typeName = TransactionType.EXPENSE.name,
+                category = resolveExistingCategoryOrFallback(true, "餐饮-咖啡", "餐饮"),
+                amountCents = 990L,
+                currency = "CNY",
+                walletId = defaultExpenseWalletId,
+                note = "瑞幸咖啡",
+                tags = ""
+            ),
+            QuickBookkeepingTemplate(
+                id = 5L,
+                title = "日常超市",
+                typeName = TransactionType.EXPENSE.name,
+                category = resolveExistingCategoryOrFallback(true, "购物-超市", "购物"),
+                amountCents = 0L,
+                currency = "CNY",
+                walletId = defaultExpenseWalletId,
+                note = "日常超市采购",
+                tags = ""
+            ),
+            QuickBookkeepingTemplate(
+                id = 6L,
+                title = "每月房租",
+                typeName = TransactionType.EXPENSE.name,
+                category = resolveExistingCategoryOrFallback(true, "住房-房租", "住房"),
+                amountCents = 250_000L,
+                currency = "CNY",
+                walletId = defaultExpenseWalletId,
+                note = "每月房租",
+                tags = "固定开支"
+            ),
+            QuickBookkeepingTemplate(
+                id = 7L,
+                title = "发工资",
+                typeName = TransactionType.INCOME.name,
+                category = resolveExistingCategoryOrFallback(false, "工资", "工资"),
+                amountCents = 0L,
+                currency = "CNY",
+                walletId = defaultIncomeWalletId,
+                note = "月度薪资入账",
+                tags = ""
+            ),
+            QuickBookkeepingTemplate(
+                id = 8L,
+                title = "信用卡还款",
+                typeName = TransactionType.TRANSFER.name,
+                category = "内部转账",
+                amountCents = 0L,
+                currency = "CNY",
+                walletId = defaultExpenseWalletId,
+                targetWalletId = defaultCreditWalletId,
+                note = "信用卡账单还款",
+                tags = ""
+            )
+        )
+    }
+
+    fun mergePresetTemplates(
+        existing: List<QuickBookkeepingTemplate>,
+        presets: List<QuickBookkeepingTemplate>,
+        baseId: Long = System.currentTimeMillis()
+    ): Pair<List<QuickBookkeepingTemplate>, Int> {
+        val usedIds = existing.map { it.id }.toMutableSet()
+        var nextId = baseId.coerceAtLeast((usedIds.maxOrNull() ?: 0L) + 1L)
+        val toAdd = mutableListOf<QuickBookkeepingTemplate>()
+        for (preset in presets) {
+            val alreadyExists = existing.any {
+                it.title.equals(preset.title, ignoreCase = true) &&
+                    it.resolvedType() == preset.resolvedType()
+            } || toAdd.any {
+                it.title.equals(preset.title, ignoreCase = true) &&
+                    it.resolvedType() == preset.resolvedType()
+            }
+            if (!alreadyExists) {
+                while (!usedIds.add(nextId)) {
+                    nextId++
+                }
+                toAdd.add(preset.copy(id = nextId))
+            }
+        }
+        return (existing + toAdd) to toAdd.size
+    }
+
+    fun upsertTemplate(
+        existing: List<QuickBookkeepingTemplate>,
+        candidate: QuickBookkeepingTemplate,
+        nowId: Long = System.currentTimeMillis()
+    ): Pair<List<QuickBookkeepingTemplate>, QuickBookkeepingTemplate> {
+        val sanitizedSingle = sanitizeTemplates(
+            listOf(candidate.copy(id = if (candidate.id > 0L) candidate.id else nowId)),
+            fallbackBaseId = nowId
+        ).first()
+        val existingIdx = existing.indexOfFirst { it.id == sanitizedSingle.id }
+        val updatedList = if (existingIdx >= 0) {
+            existing.toMutableList().apply { set(existingIdx, sanitizedSingle) }
+        } else {
+            val usedIds = existing.map { it.id }.toMutableSet()
+            var finalId = sanitizedSingle.id
+            while (!usedIds.add(finalId)) {
+                finalId++
+            }
+            val inserted = sanitizedSingle.copy(id = finalId)
+            return (listOf(inserted) + existing) to inserted
+        }
+        return updatedList to sanitizedSingle
+    }
+
+    fun duplicateTemplate(
+        existing: List<QuickBookkeepingTemplate>,
+        sourceId: Long,
+        newId: Long = System.currentTimeMillis()
+    ): Pair<List<QuickBookkeepingTemplate>, QuickBookkeepingTemplate?> {
+        val idx = existing.indexOfFirst { it.id == sourceId }
+        if (idx < 0) return existing to null
+        val src = existing[idx]
+        val usedIds = existing.map { it.id }.toMutableSet()
+        var candidateId = newId.coerceAtLeast((usedIds.maxOrNull() ?: 0L) + 1L)
+        while (!usedIds.add(candidateId)) {
+            candidateId++
+        }
+        val baseTitle = src.title.trim()
+        val copyTitle = if (baseTitle.length <= MAX_TEMPLATE_TITLE_LENGTH - 3) {
+            "$baseTitle 副本"
+        } else {
+            "${baseTitle.take(MAX_TEMPLATE_TITLE_LENGTH - 2)}副本"
+        }
+        val duplicated = src.copy(
+            id = candidateId,
+            title = copyTitle
+        )
+        val mutable = existing.toMutableList()
+        mutable.add(idx + 1, duplicated)
+        return mutable.toList() to duplicated
+    }
+
+    fun moveTemplate(
+        existing: List<QuickBookkeepingTemplate>,
+        index: Int,
+        delta: Int
+    ): List<QuickBookkeepingTemplate> {
+        if (index !in existing.indices) return existing
+        val targetIndex = index + delta
+        if (targetIndex !in existing.indices) return existing
+        val mutable = existing.toMutableList()
+        val item = mutable.removeAt(index)
+        mutable.add(targetIndex, item)
+        return mutable.toList()
+    }
+
+    fun cascadeCategoryInTemplates(
+        templates: List<QuickBookkeepingTemplate>,
+        oldCategory: String,
+        newCategory: String,
+        includeSubPrefix: Boolean,
+        preserveSubSuffix: Boolean,
+        isExpense: Boolean?
+    ): Pair<List<QuickBookkeepingTemplate>, Boolean> {
+        var changed = false
+        val updated = templates.map { tpl ->
+            val resolvedType = tpl.resolvedType()
+            // 转账模板固定为内部转账，不参与支出/收入分类级联
+            if (resolvedType == TransactionType.TRANSFER) return@map tpl
+            val tplIsExpense = resolvedType == TransactionType.EXPENSE
+            if (isExpense != null && tplIsExpense != isExpense) return@map tpl
+            val mapped = CategoryCatalog.remapCascadedCategory(
+                current = tpl.category,
+                oldCategory = oldCategory,
+                newCategory = newCategory,
+                includeSubPrefix = includeSubPrefix,
+                preserveSubSuffix = preserveSubSuffix
+            )
+            if (mapped != null && mapped != tpl.category) {
+                changed = true
+                tpl.copy(category = mapped)
+            } else {
+                tpl
+            }
+        }
+        return updated to changed
+    }
+
+    fun cascadeTagInTemplates(
+        templates: List<QuickBookkeepingTemplate>,
+        oldTag: String,
+        newTag: String?
+    ): Pair<List<QuickBookkeepingTemplate>, Boolean> {
+        var changed = false
+        val updated = templates.map { tpl ->
+            val mapped = TagCatalog.remapTagsString(tpl.tags, oldTag, newTag)
+            if (mapped != null && mapped != tpl.tags) {
+                changed = true
+                tpl.copy(tags = mapped)
+            } else {
+                tpl
+            }
+        }
+        return updated to changed
+    }
+
+    fun evaluateQuickRecordOutcome(
+        tpl: QuickBookkeepingTemplate,
+        wallets: List<WalletEntity>,
+        ledgerName: String
+    ): TemplateExecutionOutcome {
+        val resolvedType = tpl.resolvedType()
+        if (tpl.amountCents <= 0L) {
+            return TemplateExecutionOutcome.OpenInCalculator(
+                template = tpl,
+                message = "已填入模板「${tpl.title}」，请输入本次记账金额"
+            )
+        }
+        val rate = CurrencyCode.fromCode(tpl.currency).defaultRateToCny
+        val cnyCents = (tpl.amountCents * rate).roundToLong()
+        val normalizedTags = TagCatalog.joinTags(TagCatalog.parseTags(tpl.tags))
+
+        if (resolvedType == TransactionType.TRANSFER) {
+            val fromWallet = wallets.firstOrNull { it.id == tpl.walletId }
+            val toWallet = wallets.firstOrNull { it.id == tpl.targetWalletId }
+            if (fromWallet == null || toWallet == null || fromWallet.id == toWallet.id) {
+                return TemplateExecutionOutcome.OpenInCalculator(
+                    template = tpl,
+                    message = "请确认「${tpl.title}」的转出与转入账户后记账"
+                )
+            }
+            val actualType = if (!fromWallet.type.isLiability && toWallet.type.isLiability) {
+                TransactionType.REPAYMENT
+            } else {
+                TransactionType.TRANSFER
+            }
+            val finalCategory = if (actualType == TransactionType.REPAYMENT) "信用还款" else "内部转账"
+            val tx = TransactionEntity(
+                ledgerName = ledgerName,
+                type = actualType,
+                amountCents = tpl.amountCents,
+                currency = tpl.currency,
+                exchangeRateToCny = rate,
+                amountCnyCents = cnyCents,
+                category = finalCategory,
+                merchant = tpl.title,
+                note = tpl.note.ifBlank { tpl.title },
+                tags = normalizedTags,
+                sourceWalletId = fromWallet.id,
+                targetWalletId = toWallet.id,
+                reimbursable = false,
+                captureSource = "TEMPLATE"
+            )
+            return TemplateExecutionOutcome.ReadyToRecord(tx)
+        }
+
+        val fallbackWallet = wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull()
+        val resolvedWallet = wallets.firstOrNull { it.id == tpl.walletId } ?: fallbackWallet
+        val tx = TransactionEntity(
+            ledgerName = ledgerName,
+            type = resolvedType,
+            amountCents = tpl.amountCents,
+            currency = tpl.currency,
+            exchangeRateToCny = rate,
+            amountCnyCents = cnyCents,
+            category = tpl.category,
+            merchant = tpl.title,
+            note = tpl.note.ifBlank { tpl.title },
+            tags = normalizedTags,
+            sourceWalletId = if (resolvedType == TransactionType.INCOME) null else resolvedWallet?.id,
+            targetWalletId = if (resolvedType == TransactionType.INCOME) resolvedWallet?.id else null,
+            reimbursable = resolvedType == TransactionType.EXPENSE && tpl.reimbursable,
+            captureSource = "TEMPLATE"
+        )
+        return TemplateExecutionOutcome.ReadyToRecord(tx)
+    }
+}
 
 @Serializable
 data class SavingPlanItem(
@@ -193,6 +644,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _templates = MutableStateFlow(loadSavedTemplates())
     val templates: StateFlow<List<QuickBookkeepingTemplate>> = _templates.asStateFlow()
 
+    private val _pendingTemplateDraftForCalc = MutableStateFlow<QuickBookkeepingTemplate?>(null)
+    val pendingTemplateDraftForCalc: StateFlow<QuickBookkeepingTemplate?> = _pendingTemplateDraftForCalc.asStateFlow()
+
     private val _savingPlans = MutableStateFlow(loadSavedSavingPlans())
     val savingPlans: StateFlow<List<SavingPlanItem>> = _savingPlans.asStateFlow()
 
@@ -202,9 +656,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun loadSavedTemplates(): List<QuickBookkeepingTemplate> {
         val raw = uiPrefs.getString("saved_templates_json", null)
         if (!raw.isNullOrBlank()) {
-            runCatching { return jsonCodec.decodeFromString<List<QuickBookkeepingTemplate>>(raw) }
+            runCatching {
+                val decoded = jsonCodec.decodeFromString<List<QuickBookkeepingTemplate>>(raw)
+                return QuickTemplateHelper.sanitizeTemplates(decoded)
+            }
         }
         return emptyList()
+    }
+
+    private fun persistTemplates(updated: List<QuickBookkeepingTemplate>) {
+        val clean = QuickTemplateHelper.sanitizeTemplates(updated)
+        _templates.value = clean
+        uiPrefs.edit().putString("saved_templates_json", jsonCodec.encodeToString(clean)).apply()
+    }
+
+    fun requestFillCalculatorWithTemplate(tpl: QuickBookkeepingTemplate, message: String? = null) {
+        _pendingTemplateDraftForCalc.value = tpl
+        if (!message.isNullOrBlank()) {
+            postMessage(message)
+        }
+    }
+
+    fun consumePendingTemplateDraftForCalc() {
+        _pendingTemplateDraftForCalc.value = null
     }
 
     private fun loadSavedSavingPlans(): List<SavingPlanItem> {
@@ -224,37 +698,57 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun saveTemplateFromTransaction(tx: TransactionEntity) {
-        val title = tx.merchant.ifBlank { tx.note.ifBlank { tx.category } }
+        val normalizedType = when (tx.type) {
+            TransactionType.INCOME, TransactionType.LOAN_IN, TransactionType.REFUND_OFFSET -> TransactionType.INCOME
+            TransactionType.TRANSFER, TransactionType.REPAYMENT -> TransactionType.TRANSFER
+            else -> TransactionType.EXPENSE
+        }
+        val primaryWalletId = when (normalizedType) {
+            TransactionType.INCOME -> tx.targetWalletId ?: tx.sourceWalletId
+            TransactionType.TRANSFER -> tx.sourceWalletId
+            else -> tx.sourceWalletId ?: tx.targetWalletId
+        }
+        val secondaryWalletId = if (normalizedType == TransactionType.TRANSFER) tx.targetWalletId else null
+        val title = tx.merchant.ifBlank { tx.note.ifBlank { tx.category } }.trim().take(QuickTemplateHelper.MAX_TEMPLATE_TITLE_LENGTH)
         val newItem = QuickBookkeepingTemplate(
             id = System.currentTimeMillis(),
-            title = title,
-            typeName = tx.type.name,
-            category = tx.category,
-            amountCents = tx.amountCents,
-            currency = tx.currency,
-            walletId = tx.sourceWalletId ?: tx.targetWalletId,
-            note = tx.merchant.ifBlank { tx.note },
-            tags = tx.tags
+            title = title.ifEmpty { tx.category },
+            typeName = normalizedType.name,
+            category = if (normalizedType == TransactionType.TRANSFER) {
+                "内部转账"
+            } else {
+                tx.category
+            },
+            amountCents = tx.amountCents.coerceAtLeast(0L),
+            currency = tx.currency.ifBlank { "CNY" },
+            walletId = primaryWalletId,
+            targetWalletId = secondaryWalletId,
+            note = tx.note.ifBlank { tx.merchant },
+            tags = TagCatalog.joinTags(TagCatalog.parseTags(tx.tags)),
+            reimbursable = normalizedType == TransactionType.EXPENSE && tx.reimbursable
         )
         val duplicated = _templates.value.any {
-            it.title == newItem.title && it.category == newItem.category &&
-                it.amountCents == newItem.amountCents && it.typeName == newItem.typeName
+            it.title == newItem.title &&
+                it.category == newItem.category &&
+                it.amountCents == newItem.amountCents &&
+                it.resolvedType() == newItem.resolvedType() &&
+                it.walletId == newItem.walletId &&
+                it.targetWalletId == newItem.targetWalletId
         }
         if (duplicated) {
             postMessage("已存在相同的模板")
             return
         }
-        val updated = listOf(newItem) + _templates.value
-        _templates.value = updated
-        uiPrefs.edit().putString("saved_templates_json", jsonCodec.encodeToString(updated)).apply()
-        postMessage("已存为模板「${newItem.title}」，可在首页一键记账")
+        val (updated, _) = QuickTemplateHelper.upsertTemplate(_templates.value, newItem)
+        persistTemplates(updated)
+        postMessage("已存为模板「${newItem.title}」，可在首页或模板管理中一键记账")
     }
 
     fun addCustomTemplate(title: String, category: String, amountYuan: Double, walletId: Long?) {
-        val cents = (amountYuan * 100.0).roundToLong().coerceAtLeast(1L)
+        val cents = (amountYuan * 100.0).roundToLong().coerceAtLeast(0L)
         val item = QuickBookkeepingTemplate(
             id = System.currentTimeMillis(),
-            title = title.trim().ifEmpty { category },
+            title = title.trim().ifEmpty { category }.take(QuickTemplateHelper.MAX_TEMPLATE_TITLE_LENGTH),
             typeName = "EXPENSE",
             category = category,
             amountCents = cents,
@@ -262,39 +756,76 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             walletId = walletId,
             note = title.trim()
         )
-        val updated = listOf(item) + _templates.value
-        _templates.value = updated
-        uiPrefs.edit().putString("saved_templates_json", jsonCodec.encodeToString(updated)).apply()
+        val (updated, _) = QuickTemplateHelper.upsertTemplate(_templates.value, item)
+        persistTemplates(updated)
+    }
+
+    fun upsertTemplate(
+        template: QuickBookkeepingTemplate,
+        onDone: (Result<QuickBookkeepingTemplate>) -> Unit = {}
+    ) {
+        val isEditing = _templates.value.any { it.id == template.id && template.id > 0L }
+        val (updatedList, savedItem) = QuickTemplateHelper.upsertTemplate(_templates.value, template)
+        persistTemplates(updatedList)
+        TagCatalog.syncDiscoveredTagsFromHistory(listOf(savedItem.tags))
+        postMessage(if (isEditing) "已更新模板「${savedItem.title}」" else "已新增模板「${savedItem.title}」")
+        onDone(Result.success(savedItem))
+    }
+
+    fun duplicateTemplate(id: Long) {
+        val (updated, copyItem) = QuickTemplateHelper.duplicateTemplate(_templates.value, id)
+        if (copyItem != null) {
+            persistTemplates(updated)
+            postMessage("已复制模板「${copyItem.title}」")
+        }
+    }
+
+    fun moveTemplate(index: Int, delta: Int) {
+        val updated = QuickTemplateHelper.moveTemplate(_templates.value, index, delta)
+        if (updated != _templates.value) {
+            persistTemplates(updated)
+        }
     }
 
     fun deleteTemplate(id: Long) {
+        val target = _templates.value.firstOrNull { it.id == id }
         val updated = _templates.value.filterNot { it.id == id }
-        _templates.value = updated
-        uiPrefs.edit().putString("saved_templates_json", jsonCodec.encodeToString(updated)).apply()
+        persistTemplates(updated)
+        if (target != null) {
+            postMessage("已删除模板「${target.title}」")
+        }
+    }
+
+    fun clearAllTemplates() {
+        if (_templates.value.isEmpty()) return
+        persistTemplates(emptyList())
+        postMessage("已清空全部记账模板")
+    }
+
+    fun addPresetTemplates() {
+        val presets = QuickTemplateHelper.buildPresetTemplates(wallets.value)
+        val (merged, addedCount) = QuickTemplateHelper.mergePresetTemplates(_templates.value, presets)
+        if (addedCount > 0) {
+            persistTemplates(merged)
+            TagCatalog.syncDiscoveredTagsFromHistory(presets.map { it.tags })
+            postMessage("已加载 $addedCount 个常用记账模板")
+        } else {
+            postMessage("常用预设模板已全部存在")
+        }
     }
 
     fun applyQuickTemplateNow(tpl: QuickBookkeepingTemplate) {
         viewModelScope.launch {
-            val type = runCatching { TransactionType.valueOf(tpl.typeName) }.getOrDefault(TransactionType.EXPENSE)
-            val rate = CurrencyCode.fromCode(tpl.currency).defaultRateToCny
-            val cnyCents = (tpl.amountCents * rate).roundToLong()
-            val tx = TransactionEntity(
-                ledgerName = _currentLedger.value,
-                type = type,
-                amountCents = tpl.amountCents,
-                currency = tpl.currency,
-                exchangeRateToCny = rate,
-                amountCnyCents = cnyCents,
-                category = tpl.category,
-                merchant = tpl.title,
-                note = tpl.note,
-                tags = tpl.tags,
-                sourceWalletId = if (type == TransactionType.INCOME) null else tpl.walletId,
-                targetWalletId = if (type == TransactionType.INCOME) tpl.walletId else null,
-                captureSource = "TEMPLATE"
-            )
-            val newId = repository.recordTransaction(tx)
-            postMessage("已记一笔「${tpl.title}」", undoTransactionId = newId)
+            val allWallets = wallets.value.ifEmpty { repository.getAllWallets() }
+            when (val outcome = QuickTemplateHelper.evaluateQuickRecordOutcome(tpl, allWallets, _currentLedger.value)) {
+                is TemplateExecutionOutcome.OpenInCalculator -> {
+                    requestFillCalculatorWithTemplate(outcome.template, outcome.message)
+                }
+                is TemplateExecutionOutcome.ReadyToRecord -> {
+                    val newId = repository.recordTransaction(outcome.transaction)
+                    postMessage("已记一笔「${tpl.title}」", undoTransactionId = newId)
+                }
+            }
         }
     }
 
@@ -554,7 +1085,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             merchantMemories = merchantMemories.value,
             customExpenseCategories = CategoryCatalog.expenseCategories,
             customIncomeCategories = CategoryCatalog.incomeCategories,
-            customTags = TagCatalog.tags
+            customTags = TagCatalog.tags,
+            quickTemplates = _templates.value
         )
     }
 
@@ -637,7 +1169,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (snapshot.customTags.isNotEmpty()) {
                 TagCatalog.replaceAllTags(snapshot.customTags)
             }
-            TagCatalog.syncDiscoveredTagsFromHistory(backupTxs.map { it.tags })
+            if (snapshot.quickTemplates.isNotEmpty()) {
+                persistTemplates(snapshot.quickTemplates)
+            }
+            TagCatalog.syncDiscoveredTagsFromHistory(
+                backupTxs.map { it.tags } + snapshot.quickTemplates.map { it.tags }
+            )
             snapshot.merchantMemories.forEach { m ->
                 app.merchantMemoryManager.upsertMemory(m.merchantKeyword, m.category, m.preferredWalletId)
             }
@@ -908,25 +1445,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             preserveSubSuffix = preserveSubSuffix,
             isExpense = isExpense
         )
-        var templatesChanged = false
-        val updatedTemplates = _templates.value.map { tpl ->
-            val tplIsExpense = tpl.typeName != TransactionType.INCOME.name
-            if (isExpense != null && tplIsExpense != isExpense) return@map tpl
-            val mapped = CategoryCatalog.remapCascadedCategory(
-                current = tpl.category,
-                oldCategory = oldCategory,
-                newCategory = newCategory,
-                includeSubPrefix = includeSubPrefix,
-                preserveSubSuffix = preserveSubSuffix
-            )
-            if (mapped != null) {
-                templatesChanged = true
-                tpl.copy(category = mapped)
-            } else tpl
-        }
+        val (updatedTemplates, templatesChanged) = QuickTemplateHelper.cascadeCategoryInTemplates(
+            templates = _templates.value,
+            oldCategory = oldCategory,
+            newCategory = newCategory,
+            includeSubPrefix = includeSubPrefix,
+            preserveSubSuffix = preserveSubSuffix,
+            isExpense = isExpense
+        )
         if (templatesChanged) {
-            _templates.value = updatedTemplates
-            uiPrefs.edit().putString("saved_templates_json", jsonCodec.encodeToString(updatedTemplates)).apply()
+            persistTemplates(updatedTemplates)
         }
 
         if (isExpense != false) {
@@ -1146,19 +1674,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ): Int {
         val updatedTxCount = repository.migrateTagCascade(oldTag = oldTag, newTag = newTag)
 
-        var templatesChanged = false
-        val updatedTemplates = _templates.value.map { tpl ->
-            val mapped = TagCatalog.remapTagsString(tpl.tags, oldTag, newTag)
-            if (mapped != null && mapped != tpl.tags) {
-                templatesChanged = true
-                tpl.copy(tags = mapped)
-            } else {
-                tpl
-            }
-        }
+        val (updatedTemplates, templatesChanged) = QuickTemplateHelper.cascadeTagInTemplates(
+            templates = _templates.value,
+            oldTag = oldTag,
+            newTag = newTag
+        )
         if (templatesChanged) {
-            _templates.value = updatedTemplates
-            uiPrefs.edit().putString("saved_templates_json", jsonCodec.encodeToString(updatedTemplates)).apply()
+            persistTemplates(updatedTemplates)
         }
 
         app.smartRuleEngine.migrateTagCascade(oldTag = oldTag, newTag = newTag)

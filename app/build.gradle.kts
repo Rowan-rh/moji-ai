@@ -123,4 +123,5 @@ dependencies {
     implementation(libs.mlkit.text.recognition.chinese)
 
     debugImplementation(libs.androidx.ui.tooling)
+    testImplementation(libs.junit)
 }
