@@ -23,6 +23,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -49,9 +51,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -92,8 +97,10 @@ import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.SubCategoryDef
+import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.ui.screens.CategoryEditorBottomSheet
+import com.moji.ai.ui.screens.TagEditorBottomSheet
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
 import com.moji.ai.ui.theme.ICostAssetImage
@@ -105,6 +112,7 @@ import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostSheetHeader
 import com.moji.ai.ui.theme.ICostSlateIcon
 import com.moji.ai.ui.theme.ICostSmoothBottomSheet
 import com.moji.ai.ui.theme.ICostTextPrimary
@@ -186,12 +194,16 @@ fun ICostCalculatorSheet(
     onDismiss: () -> Unit,
     onSaveTransaction: (TransactionEntity, keepOpen: Boolean) -> Unit,
     onOpenAiSandbox: () -> Unit = {},
-    onOpenCategoryManagement: (isExpense: Boolean) -> Unit = {}
+    onOpenCategoryManagement: (isExpense: Boolean) -> Unit = {},
+    onOpenTagManagement: () -> Unit = {}
 ) {
     val isEditing = editingTransaction != null
     val expenseCategories by CategoryCatalog.expenseCategoriesFlow.collectAsState()
     val incomeCategories by CategoryCatalog.incomeCategoriesFlow.collectAsState()
+    val catalogTags by TagCatalog.tagsFlow.collectAsState()
+    val tagRemapHistory by TagCatalog.remapHistoryFlow.collectAsState()
     var quickAddSubParent by remember { mutableStateOf<Pair<Boolean, CategoryDef>?>(null) }
+    var showQuickAddTagSheet by remember { mutableStateOf(false) }
     // 1:1 iCost 顶部三态：支出 | 收入 | 转账（若外部传入 REPAYMENT 则归在转账 tab 并在保存时自动判断目标账户）
     var txType by remember {
         val raw = editingTransaction?.type ?: initialType
@@ -313,6 +325,22 @@ fun ICostCalculatorSheet(
                 selectedSubCategory = ""
             } else if (selectedSubCategory.isNotBlank() && matchedMain.subCategories.none { it.name == selectedSubCategory }) {
                 selectedSubCategory = ""
+            }
+        }
+    }
+
+    // 当用户在「标签管理」二级页中重命名、合并或删除了草稿中的标签时，自动同步修正当前草稿的 tagText
+    var lastHandledTagRemapSeq by remember {
+        mutableLongStateOf(TagCatalog.remapHistoryFlow.value.lastOrNull()?.seq ?: 0L)
+    }
+    LaunchedEffect(tagRemapHistory) {
+        for (record in tagRemapHistory) {
+            if (record.seq > lastHandledTagRemapSeq) {
+                val mapped = TagCatalog.remapTagsString(tagText, record.oldTag, record.newTag)
+                if (mapped != null) {
+                    tagText = mapped
+                }
+                lastHandledTagRemapSeq = record.seq
             }
         }
     }
@@ -534,6 +562,8 @@ fun ICostCalculatorSheet(
             entryTimestamp
         }
 
+        val normalizedTags = TagCatalog.joinTags(TagCatalog.parseTags(tagText))
+
         // 编辑时基于原账单 copy，保留退款金额、关联账单、原始采集文本、AI 置信度等字段
         val entity = editingTransaction?.copy(
             ledgerName = targetLedger,
@@ -550,7 +580,7 @@ fun ICostCalculatorSheet(
             sourceWalletId = finalSourceId,
             targetWalletId = finalTargetId,
             reimbursable = finalReimbursable,
-            tags = tagText.trim(),
+            tags = normalizedTags,
             timestamp = finalTimestamp
         ) ?: TransactionEntity(
             ledgerName = targetLedger,
@@ -567,7 +597,7 @@ fun ICostCalculatorSheet(
             sourceWalletId = finalSourceId,
             targetWalletId = finalTargetId,
             reimbursable = finalReimbursable,
-            tags = tagText.trim(),
+            tags = normalizedTags,
             timestamp = finalTimestamp,
             captureSource = "MANUAL"
         )
@@ -1186,10 +1216,23 @@ fun ICostCalculatorSheet(
                         }
                     }
                     item {
+                        val parsedTags = remember(tagText) { TagCatalog.parseTags(tagText) }
+                        val hasSelectedTags = parsedTags.isNotEmpty()
+                        val primaryTagColor = if (hasSelectedTags) {
+                            Color(TagCatalog.resolveTagColorHex(parsedTags.first()))
+                        } else {
+                            ICostBlueAccent
+                        }
                         ICostOptionPill(
                             assetFile = "opt_tag.webp",
-                            label = if (tagText.isNotBlank()) "#$tagText" else "标签",
-                            active = tagText.isNotBlank(),
+                            label = if (hasSelectedTags) {
+                                parsedTags.joinToString(" · ") { "#$it" }
+                            } else {
+                                "标签"
+                            },
+                            active = hasSelectedTags,
+                            activeBg = primaryTagColor.copy(alpha = 0.16f),
+                            activeTextColor = primaryTagColor,
                             onClick = { showTagDialog = true }
                         )
                     }
@@ -1654,22 +1697,234 @@ fun ICostCalculatorSheet(
     }
 
     if (showTagDialog) {
-        AlertDialog(
+        val selectedTags = remember(tagText) { TagCatalog.parseTags(tagText) }
+        ICostSmoothBottomSheet(
             onDismissRequest = { showTagDialog = false },
-            containerColor = ICostCardWhite,
-            title = { Text("添加标签", fontWeight = FontWeight.Bold) },
-            text = {
-                ICostFormField(
-                    value = tagText,
-                    onValueChange = { tagText = it },
-                    label = "标签名称",
-                    placeholder = "如：聚餐、出差、固定开支",
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
+            containerColor = ICostBgGray,
+            showDragHandle = false
+        ) { requestDismiss ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+            ) {
+                ICostSheetHeader(
+                    title = "选择标签",
+                    subtitle = if (selectedTags.isEmpty()) {
+                        "可多选标签，用于跨分类归集出差、聚餐、分期等场景账单"
+                    } else {
+                        "已选 ${selectedTags.size} 个：${selectedTags.joinToString(" · ") { "#$it" }}"
+                    },
+                    onClose = requestDismiss
                 )
-            },
-            confirmButton = {
-                TextButton(onClick = { showTagDialog = false }) { Text("确定") }
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 460.dp)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    // 顶部快捷操作栏：+ 快速新建标签 | 管理标签 | 清空已选
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = ICostBlueAccent,
+                            modifier = Modifier.iCostPressScale(pressedScale = 0.94f) {
+                                showQuickAddTagSheet = true
+                            }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Add,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(15.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "快速新建标签",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Color.White
+                                )
+                            }
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = ICostCardWhite,
+                            modifier = Modifier.iCostPressScale(pressedScale = 0.94f) {
+                                showTagDialog = false
+                                onOpenTagManagement()
+                            }
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                ICostAssetImage(
+                                    assetFile = "setting_tag.webp",
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = "管理标签",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = ICostTextPrimary
+                                )
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.weight(1f))
+
+                        if (selectedTags.isNotEmpty()) {
+                            TextButton(
+                                onClick = { tagText = "" },
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text(
+                                    text = "清空已选",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostCoralRed
+                                )
+                            }
+                        }
+                    }
+
+                    // 按分组展示全部标签彩色胶囊（支持多选点选切换）
+                    val groupedTags = remember(catalogTags) {
+                        val order = TagCatalog.presetGroups
+                        catalogTags
+                            .groupBy { it.groupName.ifBlank { "日常" } }
+                            .entries
+                            .sortedBy { (grp, _) ->
+                                val idx = order.indexOf(grp)
+                                if (idx >= 0) idx else order.size
+                            }
+                    }
+
+                    groupedTags.forEach { (groupName, groupItems) ->
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = ICostCardWhite,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(
+                                    text = groupName,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostTextSecondary
+                                )
+
+                                @OptIn(ExperimentalLayoutApi::class)
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    groupItems.forEach { tagDef ->
+                                        val isSelected = tagDef.name in selectedTags
+                                        val baseColor = Color(tagDef.colorHex)
+                                        Surface(
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = if (isSelected) baseColor else baseColor.copy(alpha = 0.12f),
+                                            modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
+                                                val updated = if (isSelected) {
+                                                    selectedTags.filterNot { it == tagDef.name }
+                                                } else {
+                                                    selectedTags + tagDef.name
+                                                }
+                                                tagText = TagCatalog.joinTags(updated)
+                                            }
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                if (isSelected) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Check,
+                                                        contentDescription = null,
+                                                        tint = Color.White,
+                                                        modifier = Modifier.size(13.dp)
+                                                    )
+                                                } else {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(7.dp)
+                                                            .clip(CircleShape)
+                                                            .background(baseColor)
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.width(5.dp))
+                                                Text(
+                                                    text = "#${tagDef.name}",
+                                                    fontSize = 13.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (isSelected) Color.White else baseColor
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Button(
+                        onClick = requestDismiss,
+                        colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 14.dp)
+                            .height(46.dp)
+                    ) {
+                        Text(
+                            text = if (selectedTags.isEmpty()) "完成" else "完成（已选 ${selectedTags.size} 个）",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (showQuickAddTagSheet) {
+        TagEditorBottomSheet(
+            existingTag = null,
+            existingTagNames = catalogTags.map { it.name },
+            initialGroup = "日常",
+            onDismiss = { showQuickAddTagSheet = false },
+            onSave = { newTagName, newColorHex, newGroupName, requestDismiss ->
+                val res = TagCatalog.addTag(
+                    name = newTagName,
+                    colorHex = newColorHex,
+                    groupName = newGroupName
+                )
+                if (res.isSuccess) {
+                    val created = res.getOrThrow()
+                    val currentList = TagCatalog.parseTags(tagText)
+                    tagText = TagCatalog.joinTags(currentList + created.name)
+                    requestDismiss()
+                }
             }
         )
     }

@@ -11,6 +11,8 @@ import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.RecurrenceFrequency
+import com.moji.ai.data.model.TagCatalog
+import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.WalletType
 import kotlinx.serialization.Serializable
@@ -120,7 +122,8 @@ data class MoJiFullBackupSnapshot(
     val recurringRules: List<BackupRecurringRuleDto> = emptyList(),
     val merchantMemories: List<MerchantMemoryEntry> = emptyList(),
     val customExpenseCategories: List<CategoryDef> = emptyList(),
-    val customIncomeCategories: List<CategoryDef> = emptyList()
+    val customIncomeCategories: List<CategoryDef> = emptyList(),
+    val customTags: List<TagDef> = emptyList()
 )
 
 data class CsvParsePreviewResult(
@@ -162,7 +165,8 @@ object BackupAndCsvTransferEngine {
         recurringRules: List<RecurringRuleEntity>,
         merchantMemories: List<MerchantMemoryEntry>,
         customExpenseCategories: List<CategoryDef> = CategoryCatalog.expenseCategories,
-        customIncomeCategories: List<CategoryDef> = CategoryCatalog.incomeCategories
+        customIncomeCategories: List<CategoryDef> = CategoryCatalog.incomeCategories,
+        customTags: List<TagDef> = TagCatalog.tags
     ): String {
         val snapshot = MoJiFullBackupSnapshot(
             schemaVersion = 1,
@@ -248,7 +252,8 @@ object BackupAndCsvTransferEngine {
             },
             merchantMemories = merchantMemories,
             customExpenseCategories = customExpenseCategories,
-            customIncomeCategories = customIncomeCategories
+            customIncomeCategories = customIncomeCategories,
+            customTags = customTags
         )
         return backupJson.encodeToString(snapshot)
     }

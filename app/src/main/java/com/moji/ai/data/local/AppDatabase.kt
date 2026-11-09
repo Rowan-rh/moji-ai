@@ -146,6 +146,22 @@ interface TransactionDao {
         nowMillis: Long
     )
 
+    @Query(
+        """
+        UPDATE transactions
+        SET tags = :newTags,
+            updatedAtMillis = :nowMillis,
+            syncRevision = syncRevision + 1,
+            syncDirty = 1
+        WHERE id = :id
+        """
+    )
+    suspend fun updateTransactionTagsById(
+        id: Long,
+        newTags: String,
+        nowMillis: Long
+    )
+
     @Delete
     suspend fun deleteTransaction(tx: TransactionEntity)
 
