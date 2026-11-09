@@ -99,7 +99,9 @@ import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.SubCategoryDef
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.ui.QuickBookkeepingTemplate
 import com.moji.ai.ui.screens.CategoryEditorBottomSheet
+import com.moji.ai.ui.screens.ICostColorTagChip
 import com.moji.ai.ui.screens.TagEditorBottomSheet
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
@@ -107,6 +109,7 @@ import com.moji.ai.ui.theme.ICostAssetImage
 import com.moji.ai.ui.theme.ICostBgGray
 import com.moji.ai.ui.theme.ICostBlueAccent
 import com.moji.ai.ui.theme.ICostCardWhite
+import com.moji.ai.ui.theme.ICostCategoryBadge
 import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
@@ -195,7 +198,12 @@ fun ICostCalculatorSheet(
     onSaveTransaction: (TransactionEntity, keepOpen: Boolean) -> Unit,
     onOpenAiSandbox: () -> Unit = {},
     onOpenCategoryManagement: (isExpense: Boolean) -> Unit = {},
-    onOpenTagManagement: () -> Unit = {}
+    onOpenTagManagement: () -> Unit = {},
+    templates: List<QuickBookkeepingTemplate> = emptyList(),
+    templateDraft: QuickBookkeepingTemplate? = null,
+    onConsumeTemplateDraft: () -> Unit = {},
+    onOpenTemplateManagement: () -> Unit = {},
+    onLoadPresetTemplates: () -> Unit = {}
 ) {
     val isEditing = editingTransaction != null
     val expenseCategories by CategoryCatalog.expenseCategoriesFlow.collectAsState()
@@ -273,6 +281,44 @@ fun ICostCalculatorSheet(
     var inlineError by remember { mutableStateOf<String?>(null) }
     var showDiscardConfirm by remember { mutableStateOf(false) }
 
+    fun applyTemplateToDraft(tpl: QuickBookkeepingTemplate, resetZeroAmount: Boolean) {
+        val resolvedType = tpl.resolvedType()
+        txType = resolvedType
+        if (resolvedType == TransactionType.EXPENSE || resolvedType == TransactionType.INCOME) {
+            val activeList = if (resolvedType == TransactionType.EXPENSE) {
+                CategoryCatalog.expenseCategories
+            } else {
+                CategoryCatalog.incomeCategories
+            }
+            val parts = tpl.category.split("-")
+            val mainName = parts.firstOrNull().orEmpty()
+            val subName = parts.getOrNull(1).orEmpty()
+            val matchedMain = activeList.firstOrNull { it.name == mainName } ?: activeList.firstOrNull()
+            selectedMainCategory = matchedMain?.name ?: if (resolvedType == TransactionType.EXPENSE) "餐饮" else "工资"
+            selectedSubCategory = if (matchedMain != null && matchedMain.subCategories.any { it.name == subName }) {
+                subName
+            } else {
+                ""
+            }
+            val fallbackW = wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull()
+            sourceWalletId = (wallets.firstOrNull { it.id == tpl.walletId } ?: fallbackW)?.id
+            targetWalletId = null
+        } else {
+            sourceWalletId = wallets.firstOrNull { it.id == tpl.walletId }?.id
+            targetWalletId = wallets.firstOrNull { it.id == tpl.targetWalletId }?.id?.takeIf { it != sourceWalletId }
+        }
+        if (tpl.amountCents > 0L) {
+            expr = String.format(Locale.US, "%.2f", tpl.amountCents / 100.0).trimEnd('0').trimEnd('.')
+        } else if (resetZeroAmount) {
+            expr = ""
+        }
+        currency = CurrencyCode.fromCode(tpl.currency).name
+        tagText = TagCatalog.joinTags(TagCatalog.parseTags(tpl.tags))
+        noteText = tpl.note.ifBlank { tpl.title }
+        reimbursable = resolvedType == TransactionType.EXPENSE && tpl.reimbursable
+        inlineError = null
+    }
+
     // 每次唤起面板时同步重置表单状态，配合 keepWarm 预热实现 0ms 首帧唤醒
     LaunchedEffect(visible, editingTransaction, initialType, initialSourceWalletId, initialTargetWalletId) {
         if (visible) {
@@ -312,6 +358,17 @@ fun ICostCalculatorSheet(
             isSubmitting = false
             inlineError = null
             showDiscardConfirm = false
+            if (templateDraft != null && editingTransaction == null) {
+                applyTemplateToDraft(templateDraft, resetZeroAmount = true)
+                onConsumeTemplateDraft()
+            }
+        }
+    }
+
+    LaunchedEffect(visible, templateDraft) {
+        if (visible && templateDraft != null && editingTransaction == null) {
+            applyTemplateToDraft(templateDraft, resetZeroAmount = true)
+            onConsumeTemplateDraft()
         }
     }
 
@@ -349,6 +406,7 @@ fun ICostCalculatorSheet(
     var showDiscountDialog by remember { mutableStateOf(false) }
     var showFeeDialog by remember { mutableStateOf(false) }
     var showTagDialog by remember { mutableStateOf(false) }
+    var showTemplatePickerSheet by remember { mutableStateOf(false) }
     var showLedgerPicker by remember { mutableStateOf(false) }
     var showCurrencyPicker by remember { mutableStateOf(false) }
     var showDatePicker by remember { mutableStateOf(false) }
@@ -1236,6 +1294,16 @@ fun ICostCalculatorSheet(
                             onClick = { showTagDialog = true }
                         )
                     }
+                    if (!isEditing) {
+                        item {
+                            ICostOptionPill(
+                                assetFile = "setting_template.webp",
+                                label = if (templates.isEmpty()) "模板" else "模板 (${templates.size})",
+                                active = false,
+                                onClick = { showTemplatePickerSheet = true }
+                            )
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.width(8.dp))
@@ -1952,6 +2020,186 @@ fun ICostCalculatorSheet(
                 }
             }
         )
+    }
+
+    if (showTemplatePickerSheet) {
+        CalculatorTemplatePickerSheet(
+            templates = templates,
+            onDismiss = { showTemplatePickerSheet = false },
+            onSelectTemplate = { tpl, requestDismiss ->
+                applyTemplateToDraft(tpl, resetZeroAmount = false)
+                requestDismiss()
+            },
+            onOpenTemplateManagement = {
+                showTemplatePickerSheet = false
+                onOpenTemplateManagement()
+            },
+            onLoadPresetTemplates = onLoadPresetTemplates
+        )
+    }
+}
+
+@Composable
+private fun CalculatorTemplatePickerSheet(
+    templates: List<QuickBookkeepingTemplate>,
+    onDismiss: () -> Unit,
+    onSelectTemplate: (QuickBookkeepingTemplate, requestDismiss: () -> Unit) -> Unit,
+    onOpenTemplateManagement: () -> Unit,
+    onLoadPresetTemplates: () -> Unit
+) {
+    ICostSmoothBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = ICostBgGray,
+        showDragHandle = false
+    ) { requestDismiss ->
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+        ) {
+            ICostSheetHeader(
+                title = "选择记账模板",
+                subtitle = "点选模板一键预填分类、账户、标签、备注与预设金额",
+                onClose = requestDismiss
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 460.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = ICostCardWhite,
+                        modifier = Modifier.iCostPressScale(pressedScale = 0.94f) {
+                            onOpenTemplateManagement()
+                        }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            ICostAssetImage(
+                                assetFile = "setting_template.webp",
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Text(
+                                text = "管理模板",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = ICostTextPrimary
+                            )
+                        }
+                    }
+                    if (templates.isEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = Color(0xFFFFF3E0),
+                            modifier = Modifier.iCostPressScale(pressedScale = 0.94f) {
+                                onLoadPresetTemplates()
+                            }
+                        ) {
+                            Text(
+                                text = "一键加载常用预设",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFD97706),
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                            )
+                        }
+                    }
+                }
+
+                if (templates.isEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = ICostCardWhite,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "暂无记账模板，点击上方「一键加载常用预设」或「管理模板」新建",
+                            fontSize = 13.sp,
+                            color = ICostTextSecondary,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp)
+                        )
+                    }
+                } else {
+                    templates.forEach { tpl ->
+                        val resolvedType = tpl.resolvedType()
+                        val amtColor = when (resolvedType) {
+                            TransactionType.INCOME -> ICostGreenIncome
+                            TransactionType.TRANSFER -> ICostAmberGold
+                            else -> ICostCoralRed
+                        }
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = ICostCardWhite,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .iCostPressScale(pressedScale = 0.96f) {
+                                    onSelectTemplate(tpl, requestDismiss)
+                                }
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                ICostCategoryBadge(
+                                    category = if (resolvedType == TransactionType.TRANSFER) "内部转账" else tpl.category,
+                                    type = resolvedType,
+                                    size = 34.dp
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = tpl.title,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        text = buildString {
+                                            append(if (resolvedType == TransactionType.TRANSFER) "内部转账" else tpl.category.replace("-", " · "))
+                                            if (tpl.reimbursable && resolvedType == TransactionType.EXPENSE) append(" · 待报销")
+                                            if (tpl.tags.isNotBlank()) append(" · #${TagCatalog.parseTags(tpl.tags).joinToString(" #")}")
+                                        },
+                                        fontSize = 11.sp,
+                                        color = ICostTextSecondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = if (tpl.amountCents > 0L) {
+                                        formatMoneyCents(tpl.amountCents, tpl.currency)
+                                    } else {
+                                        "待填金额"
+                                    },
+                                    fontFamily = ICDinFontFamily,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (tpl.amountCents > 0L) amtColor else Color(0xFFD97706)
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+            }
+        }
     }
 }
 

@@ -15,6 +15,8 @@ import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.WalletType
+import com.moji.ai.ui.QuickBookkeepingTemplate
+import com.moji.ai.ui.QuickTemplateHelper
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -123,7 +125,8 @@ data class MoJiFullBackupSnapshot(
     val merchantMemories: List<MerchantMemoryEntry> = emptyList(),
     val customExpenseCategories: List<CategoryDef> = emptyList(),
     val customIncomeCategories: List<CategoryDef> = emptyList(),
-    val customTags: List<TagDef> = emptyList()
+    val customTags: List<TagDef> = emptyList(),
+    val quickTemplates: List<QuickBookkeepingTemplate> = emptyList()
 )
 
 data class CsvParsePreviewResult(
@@ -166,7 +169,8 @@ object BackupAndCsvTransferEngine {
         merchantMemories: List<MerchantMemoryEntry>,
         customExpenseCategories: List<CategoryDef> = CategoryCatalog.expenseCategories,
         customIncomeCategories: List<CategoryDef> = CategoryCatalog.incomeCategories,
-        customTags: List<TagDef> = TagCatalog.tags
+        customTags: List<TagDef> = TagCatalog.tags,
+        quickTemplates: List<QuickBookkeepingTemplate> = emptyList()
     ): String {
         val snapshot = MoJiFullBackupSnapshot(
             schemaVersion = 1,
@@ -253,14 +257,18 @@ object BackupAndCsvTransferEngine {
             merchantMemories = merchantMemories,
             customExpenseCategories = customExpenseCategories,
             customIncomeCategories = customIncomeCategories,
-            customTags = customTags
+            customTags = customTags,
+            quickTemplates = QuickTemplateHelper.sanitizeTemplates(quickTemplates)
         )
         return backupJson.encodeToString(snapshot)
     }
 
     fun parseFullBackupJson(rawJson: String): Triple<List<WalletEntity>, List<TransactionEntity>, MoJiFullBackupSnapshot>? {
-        val snapshot = runCatching { backupJson.decodeFromString<MoJiFullBackupSnapshot>(rawJson.trim()) }.getOrNull()
+        val rawSnapshot = runCatching { backupJson.decodeFromString<MoJiFullBackupSnapshot>(rawJson.trim()) }.getOrNull()
             ?: return null
+        val snapshot = rawSnapshot.copy(
+            quickTemplates = QuickTemplateHelper.sanitizeTemplates(rawSnapshot.quickTemplates)
+        )
         val wallets = snapshot.wallets.map { dto ->
             WalletEntity(
                 id = dto.id,

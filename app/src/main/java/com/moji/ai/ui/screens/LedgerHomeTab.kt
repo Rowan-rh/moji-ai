@@ -145,6 +145,8 @@ fun ICostLedgerHomeScreen(
     onClickTransaction: (TransactionEntity) -> Unit,
     templates: List<QuickBookkeepingTemplate> = emptyList(),
     onApplyTemplate: (QuickBookkeepingTemplate) -> Unit = {},
+    onOpenTemplateManagement: (autoCreate: Boolean) -> Unit = {},
+    onLoadPresetTemplates: () -> Unit = {},
     onEditTransaction: (TransactionEntity) -> Unit = {},
     onDuplicateTransaction: (TransactionEntity) -> Unit = {},
     onToggleReimburse: (TransactionEntity) -> Unit = {},
@@ -388,31 +390,107 @@ fun ICostLedgerHomeScreen(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "快捷模板（点一下直接记账）",
+                                text = "快捷模板（点一下直接记账或预填）",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = ICostTextSecondary
                             )
-                            Text(
-                                text = "左滑账单可编辑、删除",
-                                fontSize = 11.sp,
-                                color = ICostTextSecondary
-                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = ICostCellGray,
+                                    modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
+                                        onOpenTemplateManagement(false)
+                                    }
+                                ) {
+                                    Text(
+                                        text = "管理",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary,
+                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                    )
+                                }
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = ICostBlueAccent.copy(alpha = 0.12f),
+                                    modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
+                                        onOpenTemplateManagement(true)
+                                    }
+                                ) {
+                                    Text(
+                                        text = "+ 新建",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostBlueAccent,
+                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
                         }
                         Spacer(modifier = Modifier.height(8.dp))
                         if (templates.isEmpty()) {
-                            Text(
-                                text = "还没有模板。在账单详情点「存为模板」即可添加",
-                                fontSize = 13.sp,
-                                color = ICostTextSecondary,
-                                modifier = Modifier.padding(vertical = 6.dp)
-                            )
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 4.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Text(
+                                    text = "还没有快捷记账模板，可新建或一键加载常用预设",
+                                    fontSize = 12.sp,
+                                    color = ICostTextSecondary
+                                )
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = ICostBlueAccent,
+                                        modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
+                                            onOpenTemplateManagement(true)
+                                        }
+                                    ) {
+                                        Text(
+                                            text = "+ 新建模板",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color.White,
+                                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = Color(0xFFFFF3E0),
+                                        modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
+                                            onLoadPresetTemplates()
+                                        }
+                                    ) {
+                                        Text(
+                                            text = "一键加载常用预设",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFFD97706),
+                                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
+                                        )
+                                    }
+                                }
+                            }
                         }
                         LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             items(templates, key = { it.id }) { tpl ->
-                                val tplType = runCatching { TransactionType.valueOf(tpl.typeName) }
-                                    .getOrDefault(TransactionType.EXPENSE)
-                                val tplIsIncome = tplType == TransactionType.INCOME
+                                val tplType = tpl.resolvedType()
+                                val amtColor = when (tplType) {
+                                    TransactionType.INCOME -> ICostGreenIncome
+                                    TransactionType.TRANSFER -> ICostAmberGold
+                                    else -> ICostCoralRed
+                                }
+                                val amtPrefix = when (tplType) {
+                                    TransactionType.INCOME -> "+"
+                                    TransactionType.TRANSFER -> "⇄ "
+                                    else -> "-"
+                                }
                                 Surface(
                                     shape = RoundedCornerShape(14.dp),
                                     color = ICostCellGray,
@@ -425,7 +503,7 @@ fun ICostLedgerHomeScreen(
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         ICostCategoryBadge(
-                                            category = tpl.category,
+                                            category = if (tplType == TransactionType.TRANSFER) "内部转账" else tpl.category,
                                             type = tplType,
                                             size = 28.dp
                                         )
@@ -435,15 +513,26 @@ fun ICostLedgerHomeScreen(
                                                 text = tpl.title,
                                                 fontSize = 13.sp,
                                                 fontWeight = FontWeight.Bold,
-                                                color = ICostTextPrimary
+                                                color = ICostTextPrimary,
+                                                maxLines = 1
                                             )
-                                            Text(
-                                                text = (if (tplIsIncome) "+" else "-") +
-                                                    formatMoneyCents(tpl.amountCents, tpl.currency),
-                                                fontFamily = ICDinFontFamily,
-                                                fontSize = 12.sp,
-                                                color = if (tplIsIncome) ICostGreenIncome else ICostCoralRed
-                                            )
+                                            if (tpl.amountCents > 0L) {
+                                                Text(
+                                                    text = amtPrefix + formatMoneyCents(tpl.amountCents, tpl.currency),
+                                                    fontFamily = ICDinFontFamily,
+                                                    fontSize = 12.sp,
+                                                    color = amtColor,
+                                                    maxLines = 1
+                                                )
+                                            } else {
+                                                Text(
+                                                    text = "待填金额",
+                                                    fontSize = 11.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = Color(0xFFD97706),
+                                                    maxLines = 1
+                                                )
+                                            }
                                         }
                                     }
                                 }

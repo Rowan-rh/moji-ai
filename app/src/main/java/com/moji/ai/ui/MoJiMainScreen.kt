@@ -150,6 +150,7 @@ import com.moji.ai.ui.screens.ICostAssetsScreen
 import com.moji.ai.ui.screens.ICostLedgerHomeScreen
 import com.moji.ai.ui.screens.ICostStatisticsScreen
 import com.moji.ai.ui.screens.TagManagementScreen
+import com.moji.ai.ui.screens.TemplateManagementScreen
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
 import com.moji.ai.ui.theme.ICostAssetImage
@@ -203,6 +204,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val appUpdateConfig by viewModel.appUpdateConfig.collectAsState()
     val appUpdateState by viewModel.appUpdateState.collectAsState()
     val pendingOpenTxId by viewModel.pendingOpenTransactionId.collectAsState()
+    val pendingTemplateDraftForCalc by viewModel.pendingTemplateDraftForCalc.collectAsState()
     val expenseCategories by viewModel.expenseCategories.collectAsState()
     val incomeCategories by viewModel.incomeCategories.collectAsState()
     val tags by viewModel.tags.collectAsState()
@@ -238,8 +240,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var calcInitialType by remember { mutableStateOf(TransactionType.EXPENSE) }
     var calcInitialSourceWalletId by remember { mutableStateOf<Long?>(null) }
     var calcInitialTargetWalletId by remember { mutableStateOf<Long?>(null) }
+    var templateDraftForCalc by remember { mutableStateOf<QuickBookkeepingTemplate?>(null) }
 
-    // 全屏二级页面状态：账单详情、收支日历、设置页、智能记账页、分类管理页、标签管理页、资产子页面
+    // 全屏二级页面状态：账单详情、收支日历、设置页、智能记账页、分类管理页、标签管理页、模板管理页、资产子页面
     var inspectingTx by remember { mutableStateOf<TransactionEntity?>(null) }
     var calendarMonthTxs by remember { mutableStateOf<List<TransactionEntity>?>(null) }
     var showSettingsPage by remember { mutableStateOf(false) }
@@ -247,6 +250,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var showCategoryManagementPage by remember { mutableStateOf(false) }
     var categoryManagementInitialExpense by remember { mutableStateOf(true) }
     var showTagManagementPage by remember { mutableStateOf(false) }
+    var showTemplateManagementPage by remember { mutableStateOf(false) }
+    var templateManagementAutoCreate by remember { mutableStateOf(false) }
     var isAssetSubpageOpen by remember { mutableStateOf(false) }
 
     val hasFullScreenOverlay = inspectingTx != null ||
@@ -255,7 +260,17 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         showSmartBookkeepingPage ||
         showCategoryManagementPage ||
         showTagManagementPage ||
+        showTemplateManagementPage ||
         isAssetSubpageOpen
+
+    LaunchedEffect(pendingTemplateDraftForCalc) {
+        val draft = pendingTemplateDraftForCalc ?: return@LaunchedEffect
+        showTemplateManagementPage = false
+        editingTx = null
+        templateDraftForCalc = draft
+        showCalculatorSheet = true
+        viewModel.consumePendingTemplateDraftForCalc()
+    }
 
     // AI 沙盒与模型配置弹窗状态
     var showAiSandboxSheet by remember { mutableStateOf(false) }
@@ -383,6 +398,11 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onClickTransaction = { tx -> inspectingTx = tx },
                     templates = templates,
                     onApplyTemplate = { tpl -> viewModel.applyQuickTemplateNow(tpl) },
+                    onOpenTemplateManagement = { autoCreate ->
+                        templateManagementAutoCreate = autoCreate
+                        showTemplateManagementPage = true
+                    },
+                    onLoadPresetTemplates = { viewModel.addPresetTemplates() },
                     onEditTransaction = { toEdit ->
                         editingTx = toEdit
                         showCalculatorSheet = true
@@ -559,6 +579,11 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 tagCount = tags.size,
                 onOpenTagManagement = {
                     showTagManagementPage = true
+                },
+                templateCount = templates.size,
+                onOpenTemplateManagement = {
+                    templateManagementAutoCreate = false
+                    showTemplateManagementPage = true
                 }
             )
         }
@@ -657,6 +682,40 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             )
         }
 
+        // 全屏「记账模板」管理页面（对齐 setting_template.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showTemplateManagementPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            TemplateManagementScreen(
+                templates = templates,
+                wallets = wallets,
+                expenseCategories = expenseCategories,
+                incomeCategories = incomeCategories,
+                tags = tags,
+                autoOpenCreateOnEnter = templateManagementAutoCreate,
+                onConsumeAutoOpenCreate = { templateManagementAutoCreate = false },
+                onBack = { showTemplateManagementPage = false },
+                onApplyTemplateNow = { tpl -> viewModel.applyQuickTemplateNow(tpl) },
+                onFillCalculator = { tpl ->
+                    viewModel.requestFillCalculatorWithTemplate(tpl, "已将模板「${tpl.title}」填入记账计算器")
+                },
+                onSaveTemplate = { draft, onDone -> viewModel.upsertTemplate(draft, onDone) },
+                onDuplicateTemplate = { id -> viewModel.duplicateTemplate(id) },
+                onMoveTemplate = { idx, delta -> viewModel.moveTemplate(idx, delta) },
+                onDeleteTemplate = { id -> viewModel.deleteTemplate(id) },
+                onClearAllTemplates = { viewModel.clearAllTemplates() },
+                onLoadPresetTemplates = { viewModel.addPresetTemplates() }
+            )
+        }
+
         // 全屏「智能记账」页面（09_smart_bookkeeping.png）—— 二级侧滑推入转场
         AnimatedVisibility(
             visible = showSmartBookkeepingPage,
@@ -740,7 +799,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 ledgers = ledgers,
                 onSelectLedger = { viewModel.selectLedger(it) },
                 visible = showCalculatorSheet,
-                suspendedBySubpage = showCategoryManagementPage || showTagManagementPage,
+                suspendedBySubpage = showCategoryManagementPage || showTagManagementPage || showTemplateManagementPage,
                 editingTransaction = editingTx,
                 initialType = calcInitialType,
                 initialSourceWalletId = calcInitialSourceWalletId,
@@ -748,12 +807,14 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onDismiss = {
                     showCalculatorSheet = false
                     editingTx = null
+                    templateDraftForCalc = null
                 },
                 onSaveTransaction = { tx, keepOpen ->
                     viewModel.saveOrUpdateTransaction(tx)
                     if (!keepOpen) {
                         showCalculatorSheet = false
                         editingTx = null
+                        templateDraftForCalc = null
                     }
                 },
                 onOpenAiSandbox = { showAiSandboxSheet = true },
@@ -763,7 +824,15 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 },
                 onOpenTagManagement = {
                     showTagManagementPage = true
-                }
+                },
+                templates = templates,
+                templateDraft = templateDraftForCalc,
+                onConsumeTemplateDraft = { templateDraftForCalc = null },
+                onOpenTemplateManagement = {
+                    templateManagementAutoCreate = false
+                    showTemplateManagementPage = true
+                },
+                onLoadPresetTemplates = { viewModel.addPresetTemplates() }
             )
         }
         // AI 静默识账沙盒测试面板
@@ -1187,7 +1256,9 @@ private fun ICostSettingsFullScreen(
     incomeCategoryCount: Int = 10,
     onOpenCategoryManagement: () -> Unit = {},
     tagCount: Int = 8,
-    onOpenTagManagement: () -> Unit = {}
+    onOpenTagManagement: () -> Unit = {},
+    templateCount: Int = 0,
+    onOpenTemplateManagement: () -> Unit = {}
 ) {
     BackHandler(onBack = onBack)
 
@@ -1330,7 +1401,12 @@ private fun ICostSettingsFullScreen(
                             "$tagCount 个标签",
                             onClick = onOpenTagManagement
                         ),
-                        SettingRowDef("setting_template.webp", "记账模板"),
+                        SettingRowDef(
+                            "setting_template.webp",
+                            "记账模板",
+                            "$templateCount 个模板",
+                            onClick = onOpenTemplateManagement
+                        ),
                         SettingRowDef("setting_currency.webp", "货币和汇率"),
                         SettingRowDef("setting_password.webp", "密码保护"),
                         SettingRowDef("setting_time.webp", "定时提醒"),
