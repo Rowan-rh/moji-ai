@@ -84,6 +84,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TagCatalog
@@ -105,8 +106,10 @@ import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
+import com.moji.ai.ui.theme.ICostExpenseColor
 import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostIncomeColor
 import com.moji.ai.ui.theme.ICostSearchBg
 import com.moji.ai.ui.theme.ICostSwipeActionRow
 import com.moji.ai.ui.theme.ICostTextPrimary
@@ -351,7 +354,7 @@ fun ICostLedgerHomeScreen(
 
                 Surface(
                     shape = RoundedCornerShape(14.dp),
-                    color = if (showQuickTemplatesBar) Color(0xFFFFF3E0) else Color(0xFFEBEBEB),
+                    color = if (showQuickTemplatesBar) Color(0xFFFFF3E0) else ICostSearchBg,
                     modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
                         showQuickTemplatesBar = !showQuickTemplatesBar
                     }
@@ -362,7 +365,7 @@ fun ICostLedgerHomeScreen(
                     ) {
                         ICostAssetImage(
                             assetFile = "detail_template.webp",
-                            tint = if (showQuickTemplatesBar) Color(0xFFF59E0B) else Color(0xFF666666),
+                            tint = if (showQuickTemplatesBar) Color(0xFFF59E0B) else ICostTextSecondary,
                             modifier = Modifier.size(13.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
@@ -373,7 +376,7 @@ fun ICostLedgerHomeScreen(
                                 else -> "快捷模板 (${templates.size})"
                             },
                             fontSize = 12.sp,
-                            color = if (showQuickTemplatesBar) Color(0xFFD97706) else Color(0xFF666666),
+                            color = if (showQuickTemplatesBar) Color(0xFFD97706) else ICostTextSecondary,
                             fontWeight = FontWeight.Medium
                         )
                     }
@@ -558,9 +561,9 @@ fun ICostLedgerHomeScreen(
                             items(templates, key = { it.id }) { tpl ->
                                 val tplType = tpl.resolvedType()
                                 val amtColor = when (tplType) {
-                                    TransactionType.INCOME -> ICostGreenIncome
+                                    TransactionType.INCOME -> ICostIncomeColor
                                     TransactionType.TRANSFER -> ICostAmberGold
-                                    else -> ICostCoralRed
+                                    else -> ICostExpenseColor
                                 }
                                 val amtPrefix = when (tplType) {
                                     TransactionType.INCOME -> "+"
@@ -708,7 +711,7 @@ fun ICostLedgerHomeScreen(
 
                 Surface(
                     shape = RoundedCornerShape(14.dp),
-                    color = Color(0xFFEBEBEB),
+                    color = ICostSearchBg,
                     modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
                         onOpenCalendar(allMonthTransactions)
                     }
@@ -716,7 +719,7 @@ fun ICostLedgerHomeScreen(
                     Text(
                         text = "收支日历",
                         fontSize = 12.sp,
-                        color = Color(0xFF666666),
+                        color = ICostTextSecondary,
                         fontWeight = FontWeight.Medium,
                         modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
                     )
@@ -753,7 +756,7 @@ fun ICostLedgerHomeScreen(
                                             modifier = Modifier
                                                 .size(20.dp)
                                                 .clip(CircleShape)
-                                                .background(ICostCoralRed),
+                                                .background(ICostExpenseColor),
                                             contentAlignment = Alignment.Center
                                         ) {
                                             ICostAssetImage(
@@ -765,7 +768,7 @@ fun ICostLedgerHomeScreen(
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Text(
                                             text = "总支出",
-                                            color = ICostCoralRed,
+                                            color = ICostExpenseColor,
                                             fontSize = 15.sp,
                                             fontWeight = FontWeight.Bold
                                         )
@@ -1510,7 +1513,7 @@ private fun ICostLedgerRow(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (isRefundedExpense) {
                         Text(
-                            text = String.format(Locale.US, "%s%,.2f", sym, tx.amountCents / 100.0),
+                            text = "$sym${AppearanceConfigManager.formatDisplayAmount(tx.amountCents / 100.0)}",
                             fontSize = 12.sp,
                             color = ICostTextSecondary,
                             textDecoration = TextDecoration.LineThrough,
@@ -1519,28 +1522,29 @@ private fun ICostLedgerRow(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = String.format(Locale.US, "-¥%,.2f", netExpenseCents / 100.0),
+                            text = "-¥${AppearanceConfigManager.formatDisplayAmount(netExpenseCents / 100.0)}",
                             fontSize = 16.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = ICostCoralRed,
+                            color = ICostExpenseColor,
                             maxLines = 1,
                             softWrap = false
                         )
                     } else {
+                        val formattedAmt = AppearanceConfigManager.formatDisplayAmount(tx.amountCents / 100.0)
                         val amountText = when (tx.type) {
                             TransactionType.EXPENSE, TransactionType.LOAN_OUT ->
-                                String.format(Locale.US, "-%s%,.2f", sym, tx.amountCents / 100.0)
+                                "-$sym$formattedAmt"
                             TransactionType.REFUND_OFFSET ->
-                                String.format(Locale.US, "%s%,.2f", sym, tx.amountCents / 100.0)
+                                "$sym$formattedAmt"
                             TransactionType.INCOME, TransactionType.LOAN_IN ->
-                                String.format(Locale.US, "+%s%,.2f", sym, tx.amountCents / 100.0)
+                                "+$sym$formattedAmt"
                             TransactionType.TRANSFER, TransactionType.REPAYMENT ->
-                                String.format(Locale.US, "%s%,.2f", sym, tx.amountCents / 100.0)
+                                "$sym$formattedAmt"
                         }
                         val amountColor = when (tx.type) {
-                            TransactionType.EXPENSE, TransactionType.LOAN_OUT -> ICostCoralRed
+                            TransactionType.EXPENSE, TransactionType.LOAN_OUT -> ICostExpenseColor
                             TransactionType.REFUND_OFFSET -> ICostAmberGold
-                            TransactionType.INCOME, TransactionType.LOAN_IN -> ICostGreenIncome
+                            TransactionType.INCOME, TransactionType.LOAN_IN -> ICostIncomeColor
                             TransactionType.TRANSFER, TransactionType.REPAYMENT -> ICostTextPrimary
                         }
                         Text(

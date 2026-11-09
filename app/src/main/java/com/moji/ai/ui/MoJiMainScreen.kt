@@ -134,6 +134,7 @@ import com.moji.ai.data.backup.WebDavConfig
 import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AppearanceSettingsConfig
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.PasswordProtectionConfig
 import com.moji.ai.data.model.ReminderSettingsConfig
@@ -150,6 +151,7 @@ import com.moji.ai.ui.components.ICostCalculatorSheet
 import com.moji.ai.ui.components.MonthlyCalendarSheet
 import com.moji.ai.ui.components.TransactionDetailSheet
 import com.moji.ai.ui.screens.AppLockUnlockOverlay
+import com.moji.ai.ui.screens.AppearanceManagementScreen
 import com.moji.ai.ui.screens.CategoryManagementScreen
 import com.moji.ai.ui.screens.CurrencyManagementScreen
 import com.moji.ai.ui.screens.ICostAssetsScreen
@@ -172,6 +174,7 @@ import com.moji.ai.ui.theme.ICostDivider
 import com.moji.ai.ui.theme.ICostFormCard
 import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostPillGray
 import com.moji.ai.ui.theme.ICostSheetHeader
 import com.moji.ai.ui.theme.ICostSmoothBottomSheet
 import com.moji.ai.ui.theme.ICostTextMuted
@@ -220,6 +223,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val passwordProtectionConfig by viewModel.passwordProtectionConfig.collectAsState()
     val isAppSessionLocked by viewModel.isAppSessionLocked.collectAsState()
     val reminderSettingsConfig by viewModel.reminderSettingsConfig.collectAsState()
+    val appearanceSettingsConfig by viewModel.appearanceSettingsConfig.collectAsState()
     val pendingOpenBookkeepingSheet by viewModel.pendingOpenBookkeepingSheet.collectAsState()
     val triageReport by viewModel.triageReport.collectAsState()
     val isTriaging by viewModel.isTriaging.collectAsState()
@@ -271,6 +275,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var showCurrencyManagementPage by remember { mutableStateOf(false) }
     var showPasswordProtectionPage by remember { mutableStateOf(false) }
     var showReminderManagementPage by remember { mutableStateOf(false) }
+    var showAppearanceManagementPage by remember { mutableStateOf(false) }
     var isAssetSubpageOpen by remember { mutableStateOf(false) }
 
     val hasFullScreenOverlay = inspectingTx != null ||
@@ -283,6 +288,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         showCurrencyManagementPage ||
         showPasswordProtectionPage ||
         showReminderManagementPage ||
+        showAppearanceManagementPage ||
         isAssetSubpageOpen
 
     LaunchedEffect(pendingTemplateDraftForCalc) {
@@ -333,6 +339,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             showCurrencyManagementPage = false
             showPasswordProtectionPage = false
             showReminderManagementPage = false
+            showAppearanceManagementPage = false
             calendarMonthTxs = null
             showCalculatorSheet = false
             editingTx = null
@@ -359,6 +366,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         showCurrencyManagementPage = false
         showPasswordProtectionPage = false
         showReminderManagementPage = false
+        showAppearanceManagementPage = false
         calendarMonthTxs = null
         inspectingTx = null
         editingTx = null
@@ -648,6 +656,10 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 reminderSettingsConfig = reminderSettingsConfig,
                 onOpenReminderManagement = {
                     showReminderManagementPage = true
+                },
+                appearanceSettingsConfig = appearanceSettingsConfig,
+                onOpenAppearanceManagement = {
+                    showAppearanceManagementPage = true
                 }
             )
         }
@@ -873,6 +885,30 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             )
         }
 
+        // 全屏「外观显示」管理页面（对齐 setting_appearance.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showAppearanceManagementPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            AppearanceManagementScreen(
+                config = appearanceSettingsConfig,
+                onSelectThemeMode = { mode -> viewModel.setThemeMode(mode) },
+                onSelectAmountColorScheme = { scheme -> viewModel.setAmountColorScheme(scheme) },
+                onSelectFontScalePreset = { preset -> viewModel.setFontScalePreset(preset) },
+                onToggleShowThousandSeparator = { show -> viewModel.setShowThousandSeparator(show) },
+                onToggleHideTrailingZeroDecimals = { hide -> viewModel.setHideTrailingZeroDecimals(hide) },
+                onResetDefaults = { viewModel.resetAppearanceDefaults() },
+                onBack = { showAppearanceManagementPage = false }
+            )
+        }
+
         // 全屏「智能记账」页面（09_smart_bookkeeping.png）—— 二级侧滑推入转场
         AnimatedVisibility(
             visible = showSmartBookkeepingPage,
@@ -957,7 +993,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 ledgers = ledgers,
                 onSelectLedger = { viewModel.selectLedger(it) },
                 visible = showCalculatorSheet,
-                suspendedBySubpage = showCategoryManagementPage || showTagManagementPage || showTemplateManagementPage || showCurrencyManagementPage || showPasswordProtectionPage || showReminderManagementPage,
+                suspendedBySubpage = showCategoryManagementPage || showTagManagementPage || showTemplateManagementPage || showCurrencyManagementPage || showPasswordProtectionPage || showReminderManagementPage || showAppearanceManagementPage,
                 editingTransaction = editingTx,
                 initialType = calcInitialType,
                 initialSourceWalletId = calcInitialSourceWalletId,
@@ -1250,6 +1286,7 @@ private fun ICostFloatingBottomBar(
             animationSpec = spring(dampingRatio = 0.86f, stiffness = 640f),
             label = "BottomBarPillPos"
         )
+        val pillColor = ICostPillGray
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -1266,8 +1303,8 @@ private fun ICostFloatingBottomBar(
                     spotColor = Color.Black.copy(alpha = 0.14f)
                 )
                 .clip(RoundedCornerShape(29.dp))
-                .background(Color.White.copy(alpha = 0.90f))
-                .border(0.8.dp, Color.White.copy(alpha = 0.96f), RoundedCornerShape(29.dp))
+                .background(ICostCardWhite.copy(alpha = 0.94f))
+                .border(0.8.dp, ICostDivider, RoundedCornerShape(29.dp))
         ) {
             Row(
                 modifier = Modifier
@@ -1278,7 +1315,7 @@ private fun ICostFloatingBottomBar(
                         val pillX = slotWidth * pillIndicatorPos.coerceIn(0f, 2f)
                         val r = 25.dp.toPx()
                         drawRoundRect(
-                            color = Color(0xFFE9E9EC),
+                            color = pillColor,
                             topLeft = androidx.compose.ui.geometry.Offset(pillX, 0f),
                             size = androidx.compose.ui.geometry.Size(slotWidth, size.height),
                             cornerRadius = androidx.compose.ui.geometry.CornerRadius(r, r)
@@ -1346,8 +1383,8 @@ private fun ICostFloatingBottomBar(
                     spotColor = Color.Black.copy(alpha = 0.14f)
                 )
                 .clip(CircleShape)
-                .background(Color.White.copy(alpha = 0.90f))
-                .border(0.8.dp, Color.White.copy(alpha = 0.96f), CircleShape),
+                .background(ICostCardWhite.copy(alpha = 0.94f))
+                .border(0.8.dp, ICostDivider, CircleShape),
             contentAlignment = Alignment.Center
         ) {
             ICostAssetImage(
@@ -1452,7 +1489,9 @@ private fun ICostSettingsFullScreen(
     passwordProtectionConfig: PasswordProtectionConfig = PasswordProtectionConfig(),
     onOpenPasswordProtection: () -> Unit = {},
     reminderSettingsConfig: ReminderSettingsConfig = ReminderSettingsConfig(),
-    onOpenReminderManagement: () -> Unit = {}
+    onOpenReminderManagement: () -> Unit = {},
+    appearanceSettingsConfig: AppearanceSettingsConfig = AppearanceSettingsConfig(),
+    onOpenAppearanceManagement: () -> Unit = {}
 ) {
     BackHandler(onBack = onBack)
 
@@ -1623,7 +1662,12 @@ private fun ICostSettingsFullScreen(
                             reminderSettingsConfig.settingsTrailingText,
                             onClick = onOpenReminderManagement
                         ),
-                        SettingRowDef("setting_appearance.webp", "外观显示")
+                        SettingRowDef(
+                            "setting_appearance.webp",
+                            "外观显示",
+                            appearanceSettingsConfig.settingsTrailingText,
+                            onClick = onOpenAppearanceManagement
+                        )
                     )
                 )
             }
