@@ -114,8 +114,12 @@ import com.moji.ai.ui.theme.ICostCategoryBadge
 import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
+import com.moji.ai.ui.theme.ICostDivider
+import com.moji.ai.ui.theme.ICostExpenseColor
 import com.moji.ai.ui.theme.ICostFormField
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostIncomeColor
+import com.moji.ai.ui.theme.ICostPillGray
 import com.moji.ai.ui.theme.ICostSheetHeader
 import com.moji.ai.ui.theme.ICostSlateIcon
 import com.moji.ai.ui.theme.ICostSmoothBottomSheet
@@ -771,7 +775,7 @@ fun ICostCalculatorSheet(
                         modes.forEach { (mode, label) ->
                             val selected = txType == mode
                             val modeBgColor by animateColorAsState(
-                                targetValue = if (selected) Color(0xFFECECEE) else Color.Transparent,
+                                targetValue = if (selected) ICostPillGray else Color.Transparent,
                                 animationSpec = tween(200),
                                 label = "CalcModePillBg"
                             )
@@ -872,7 +876,7 @@ fun ICostCalculatorSheet(
                     } else {
                         incomeCategories
                     }
-                    val activeColor = if (currentMode == TransactionType.EXPENSE) ICostCoralRed else ICostGreenIncome
+                    val activeColor = if (currentMode == TransactionType.EXPENSE) ICostExpenseColor else ICostIncomeColor
                     val gridCells: List<CategoryDef?> = remember(categories) { categories + listOf(null) }
                     val rows = remember(gridCells) { gridCells.chunked(5) }
                     val categoryScrollState = rememberScrollState()
@@ -893,7 +897,7 @@ fun ICostCalculatorSheet(
                         ) {
                             Surface(
                                 shape = RoundedCornerShape(14.dp),
-                                color = if (isPendingSelected) Color(0xFF6366F1) else Color(0xFFECECEE),
+                                color = if (isPendingSelected) Color(0xFF6366F1) else ICostPillGray,
                                 modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
                                     if (isPendingSelected) {
                                         selectedMainCategory = categories.firstOrNull()?.name ?: "餐饮"
@@ -953,7 +957,7 @@ fun ICostCalculatorSheet(
                                     rowItems.forEach { cat ->
                                         if (cat != null) {
                                             val isSelected = selectedMainCategory == cat.name
-                                            val circleBg = if (isSelected) activeColor else Color(0xFFECECEE)
+                                            val circleBg = if (isSelected) activeColor else ICostPillGray
                                             Column(
                                                 modifier = Modifier
                                                     .weight(1f)
@@ -1032,7 +1036,7 @@ fun ICostCalculatorSheet(
                                                         modifier = Modifier
                                                             .size(44.dp)
                                                             .clip(CircleShape)
-                                                            .background(Color(0xFFECECEE)),
+                                                            .background(ICostPillGray),
                                                         contentAlignment = Alignment.Center
                                                     ) {
                                                         ICostAssetImage(
@@ -1076,7 +1080,7 @@ fun ICostCalculatorSheet(
                                             Spacer(modifier = Modifier.height(5.dp))
                                             Surface(
                                                 shape = RoundedCornerShape(16.dp),
-                                                color = Color(0xFFECECEE),
+                                                color = ICostPillGray,
                                                 modifier = Modifier.fillMaxWidth()
                                             ) {
                                                 val subCells: List<SubCategoryDef?> = remember(expandedCat.subCategories) {
@@ -1414,8 +1418,8 @@ fun ICostCalculatorSheet(
             ) {
                 Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
                     val amountColor = when (txType) {
-                        TransactionType.EXPENSE -> ICostCoralRed
-                        TransactionType.INCOME -> ICostGreenIncome
+                        TransactionType.EXPENSE -> ICostExpenseColor
+                        TransactionType.INCOME -> ICostIncomeColor
                         else -> Color(0xFFF5A623)
                     }
                     val displayExpr = if (expr.isEmpty()) "${sym}0.00" else "$sym$expr"
@@ -1480,7 +1484,7 @@ fun ICostCalculatorSheet(
                     }
 
                     Spacer(modifier = Modifier.height(6.dp))
-                    HorizontalDivider(thickness = 0.5.dp, color = Color(0xFFF0F0F0))
+                    HorizontalDivider(thickness = 0.5.dp, color = ICostDivider)
                     Spacer(modifier = Modifier.height(6.dp))
 
                     Row(
@@ -1489,7 +1493,7 @@ fun ICostCalculatorSheet(
                     ) {
                         Surface(
                             shape = RoundedCornerShape(14.dp),
-                            color = if (timeManuallySet) Color(0xFFEAF2FF) else Color(0xFFF3F3F5),
+                            color = if (timeManuallySet) Color(0xFFEAF2FF) else ICostPillGray,
                             modifier = Modifier.iCostPressScale(pressedScale = 0.92f) { showDatePicker = true }
                         ) {
                             Row(
@@ -1554,8 +1558,8 @@ fun ICostCalculatorSheet(
                             val isDoneKey = key == "DONE"
                             val bgColor = if (isDoneKey) {
                                 when (txType) {
-                                    TransactionType.EXPENSE -> ICostCoralRed
-                                    TransactionType.INCOME -> ICostGreenIncome
+                                    TransactionType.EXPENSE -> ICostExpenseColor
+                                    TransactionType.INCOME -> ICostIncomeColor
                                     else -> Color(0xFFF5A623)
                                 }
                             } else {
@@ -2327,9 +2331,9 @@ private fun CalculatorTemplatePickerSheet(
                     templates.forEach { tpl ->
                         val resolvedType = tpl.resolvedType()
                         val amtColor = when (resolvedType) {
-                            TransactionType.INCOME -> ICostGreenIncome
+                            TransactionType.INCOME -> ICostIncomeColor
                             TransactionType.TRANSFER -> ICostAmberGold
-                            else -> ICostCoralRed
+                            else -> ICostExpenseColor
                         }
                         Surface(
                             shape = RoundedCornerShape(16.dp),

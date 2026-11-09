@@ -86,7 +86,10 @@ import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostChartPalette
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
+import com.moji.ai.ui.theme.ICostExpenseColor
 import com.moji.ai.ui.theme.ICostGreenIncome
+import com.moji.ai.ui.theme.ICostIncomeColor
+import com.moji.ai.ui.theme.ICostPillGray
 import com.moji.ai.ui.theme.ICostTextMuted
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
@@ -678,7 +681,7 @@ fun ICostStatisticsScreen(
                     StatsRangeMode.entries.forEach { mode ->
                         val selected = rangeMode == mode
                         val segBg by animateColorAsState(
-                            targetValue = if (selected) Color(0xFFECECEE) else Color.Transparent,
+                            targetValue = if (selected) ICostPillGray else Color.Transparent,
                             animationSpec = tween(180),
                             label = "StatsRangeSegBg"
                         )
@@ -857,8 +860,8 @@ fun ICostStatisticsScreen(
                         Column(modifier = Modifier.padding(top = 14.dp)) {
                             val hasData = bars.any { it != 0L }
                             val barColor = when (barChartMetric) {
-                                0 -> ICostCoralRed
-                                1 -> ICostGreenIncome
+                                0 -> ICostExpenseColor
+                                1 -> ICostIncomeColor
                                 else -> Color(0xFF3B82F6)
                             }
 

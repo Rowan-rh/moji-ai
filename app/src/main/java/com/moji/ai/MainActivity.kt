@@ -12,21 +12,28 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.core.content.ContextCompat
 import com.moji.ai.data.model.AppLockManager
+import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.ui.MainViewModel
 import com.moji.ai.ui.MoJiMainScreen
 import com.moji.ai.ui.theme.ICostBgGray
 import com.moji.ai.ui.theme.ICostBlueAccent
+import com.moji.ai.ui.theme.ICostCardWhite
 
-private val MoJiColorScheme = lightColorScheme(
+private val MoJiLightColorScheme = lightColorScheme(
     primary = ICostBlueAccent,
     onPrimary = Color.White,
     primaryContainer = Color(0xFFE6F0FF),
@@ -34,8 +41,20 @@ private val MoJiColorScheme = lightColorScheme(
     secondary = Color(0xFFE65540),
     secondaryContainer = Color(0xFFFFECE8),
     onSecondaryContainer = Color(0xFF7A1C10),
-    background = ICostBgGray,
+    background = Color(0xFFF6F6F6),
     surface = Color.White
+)
+
+private val MoJiDarkColorScheme = darkColorScheme(
+    primary = ICostBlueAccent,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF1A2B4C),
+    onPrimaryContainer = Color(0xFFD6E6FF),
+    secondary = Color(0xFFE65540),
+    secondaryContainer = Color(0xFF3B1F1B),
+    onSecondaryContainer = Color(0xFFFFDAD4),
+    background = Color(0xFF111318),
+    surface = Color(0xFF1C1F26)
 )
 
 class MainActivity : ComponentActivity() {
@@ -69,6 +88,11 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val appLockConfig by viewModel.passwordProtectionConfig.collectAsState()
+            val appearanceConfig by viewModel.appearanceSettingsConfig.collectAsState()
+            val systemDark = isSystemInDarkTheme()
+            AppearanceConfigManager.updateSystemDarkState(systemDark)
+            val isDark = AppearanceConfigManager.resolveIsDarkTheme(appearanceConfig, systemDark)
+
             LaunchedEffect(appLockConfig.enabled, appLockConfig.hideRecentTaskPreview) {
                 if (appLockConfig.enabled && appLockConfig.hideRecentTaskPreview) {
                     window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -76,9 +100,32 @@ class MainActivity : ComponentActivity() {
                     window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
                 }
             }
-            MaterialTheme(colorScheme = MoJiColorScheme) {
-                Surface(color = ICostBgGray) {
-                    MoJiMainScreen(viewModel = viewModel)
+
+            LaunchedEffect(isDark) {
+                val barStyle = if (isDark) {
+                    SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+                } else {
+                    SystemBarStyle.light(
+                        android.graphics.Color.TRANSPARENT,
+                        android.graphics.Color.TRANSPARENT
+                    )
+                }
+                enableEdgeToEdge(
+                    statusBarStyle = barStyle,
+                    navigationBarStyle = barStyle
+                )
+            }
+
+            val baseDensity = LocalDensity.current
+            val scaledDensity = Density(
+                density = baseDensity.density,
+                fontScale = baseDensity.fontScale * appearanceConfig.fontScalePreset.scale
+            )
+            CompositionLocalProvider(LocalDensity provides scaledDensity) {
+                MaterialTheme(colorScheme = if (isDark) MoJiDarkColorScheme else MoJiLightColorScheme) {
+                    Surface(color = ICostBgGray) {
+                        MoJiMainScreen(viewModel = viewModel)
+                    }
                 }
             }
         }

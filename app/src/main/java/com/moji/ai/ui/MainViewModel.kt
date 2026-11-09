@@ -21,7 +21,12 @@ import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AmountColorScheme
+import com.moji.ai.data.model.AppFontScalePreset
 import com.moji.ai.data.model.AppLockManager
+import com.moji.ai.data.model.AppThemeMode
+import com.moji.ai.data.model.AppearanceConfigManager
+import com.moji.ai.data.model.AppearanceSettingsConfig
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
@@ -580,6 +585,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val isAppSessionLocked: StateFlow<Boolean> = AppLockManager.isSessionLockedFlow
 
     val reminderSettingsConfig: StateFlow<ReminderSettingsConfig> = ReminderConfigManager.configFlow
+
+    val appearanceSettingsConfig: StateFlow<AppearanceSettingsConfig> = AppearanceConfigManager.configFlow
 
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = app.captureCoordinator.observabilityLogs
 
@@ -1166,7 +1173,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             customTags = TagCatalog.tags,
             quickTemplates = _templates.value,
             customCurrencyRates = CurrencyRateManager.customRates,
-            reminderSettingsJson = ReminderConfigManager.exportConfigJson()
+            reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
+            appearanceSettingsJson = AppearanceConfigManager.exportConfigJson()
         )
     }
 
@@ -1270,6 +1278,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 if (ReminderConfigManager.restoreFromBackupJson(snapshot.reminderSettingsJson)) {
                     DailyReminderScheduler.rescheduleAll(app)
                 }
+            }
+            if (snapshot.appearanceSettingsJson.isNotBlank()) {
+                AppearanceConfigManager.restoreFromBackupJson(snapshot.appearanceSettingsJson)
             }
             onResult("恢复完成：${backupWallets.size} 个账户、$txCount 笔账单")
         }
@@ -2000,6 +2011,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             postMessage("系统通知权限未开启，请先开启通知权限后再试")
         }
         return sent
+    }
+
+    fun setThemeMode(mode: AppThemeMode) {
+        AppearanceConfigManager.setThemeMode(mode)
+        postMessage("已切换为「${mode.label}」")
+    }
+
+    fun setAmountColorScheme(scheme: AmountColorScheme) {
+        AppearanceConfigManager.setAmountColorScheme(scheme)
+        postMessage("收支配色已切换为「${scheme.label}」")
+    }
+
+    fun setFontScalePreset(preset: AppFontScalePreset) {
+        AppearanceConfigManager.setFontScalePreset(preset)
+        postMessage("全局字号已设为「${preset.label} (${preset.percentLabel})」")
+    }
+
+    fun setShowThousandSeparator(show: Boolean) {
+        AppearanceConfigManager.setShowThousandSeparator(show)
+        postMessage(if (show) "已开启金额千分位分隔符" else "已关闭金额千分位分隔符")
+    }
+
+    fun setHideTrailingZeroDecimals(hide: Boolean) {
+        AppearanceConfigManager.setHideTrailingZeroDecimals(hide)
+        postMessage(if (hide) "已开启整数金额隐藏 .00 小数尾缀" else "已恢复固定显示两位小数")
+    }
+
+    fun resetAppearanceDefaults() {
+        AppearanceConfigManager.resetToDefaults()
+        postMessage("已恢复默认外观显示设置")
     }
 
     fun openAgentTriageSheet() {
