@@ -167,6 +167,17 @@ interface TransactionDao {
 
     @Query("DELETE FROM transactions")
     suspend fun deleteAllTransactions()
+
+    @Query(
+        """
+        SELECT COUNT(*) FROM transactions
+        WHERE deletedAtMillis IS NULL
+          AND timestamp BETWEEN :startMillis AND :endMillis
+          AND captureSource != 'BALANCE_ANCHOR'
+          AND category != '平账'
+        """
+    )
+    suspend fun countNonAnchorTransactionsInRange(startMillis: Long, endMillis: Long): Int
 }
 
 @Dao

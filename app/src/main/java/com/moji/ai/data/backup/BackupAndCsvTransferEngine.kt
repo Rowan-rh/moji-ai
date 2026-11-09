@@ -12,6 +12,7 @@ import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.RecurrenceFrequency
+import com.moji.ai.data.model.ReminderConfigManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
@@ -128,7 +129,8 @@ data class MoJiFullBackupSnapshot(
     val customIncomeCategories: List<CategoryDef> = emptyList(),
     val customTags: List<TagDef> = emptyList(),
     val quickTemplates: List<QuickBookkeepingTemplate> = emptyList(),
-    val customCurrencyRates: Map<String, Double> = emptyMap()
+    val customCurrencyRates: Map<String, Double> = emptyMap(),
+    val reminderSettingsJson: String = ""
 )
 
 data class CsvParsePreviewResult(
@@ -173,7 +175,8 @@ object BackupAndCsvTransferEngine {
         customIncomeCategories: List<CategoryDef> = CategoryCatalog.incomeCategories,
         customTags: List<TagDef> = TagCatalog.tags,
         quickTemplates: List<QuickBookkeepingTemplate> = emptyList(),
-        customCurrencyRates: Map<String, Double> = CurrencyRateManager.customRates
+        customCurrencyRates: Map<String, Double> = CurrencyRateManager.customRates,
+        reminderSettingsJson: String = ReminderConfigManager.exportConfigJson()
     ): String {
         val snapshot = MoJiFullBackupSnapshot(
             schemaVersion = 1,
@@ -262,7 +265,8 @@ object BackupAndCsvTransferEngine {
             customIncomeCategories = customIncomeCategories,
             customTags = customTags,
             quickTemplates = QuickTemplateHelper.sanitizeTemplates(quickTemplates),
-            customCurrencyRates = CurrencyRateManager.sanitizeRatesMap(customCurrencyRates)
+            customCurrencyRates = CurrencyRateManager.sanitizeRatesMap(customCurrencyRates),
+            reminderSettingsJson = reminderSettingsJson
         )
         return backupJson.encodeToString(snapshot)
     }

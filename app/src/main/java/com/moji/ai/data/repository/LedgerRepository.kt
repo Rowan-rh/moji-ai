@@ -81,6 +81,29 @@ class LedgerRepository(private val db: AppDatabase) {
         db.captureEvidenceDao().getEvidencesForTransaction(txId)
 
     /**
+     * 检查本地自然日（00:00:00.000 ~ 23:59:59.999）内是否存在未删除的非系统平账流水，
+     * 用于定时记账提醒的「今日已记账则免打扰」静默跳过判断。
+     */
+    suspend fun hasRecordedTransactionToday(
+        nowMillis: Long = System.currentTimeMillis(),
+        timeZone: java.util.TimeZone = java.util.TimeZone.getDefault()
+    ): Boolean {
+        val startCal = java.util.Calendar.getInstance(timeZone).apply {
+            timeInMillis = nowMillis
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val startOfDay = startCal.timeInMillis
+        val endCal = (startCal.clone() as java.util.Calendar).apply {
+            add(java.util.Calendar.DAY_OF_YEAR, 1)
+        }
+        val endOfDay = endCal.timeInMillis - 1L
+        return db.transactionDao().countNonAnchorTransactionsInRange(startOfDay, endOfDay) > 0
+    }
+
+    /**
      * 账户真实余额锚点登记 + 差额自动生成平账流水（对标 blue-whale-keeper 与 moneywallet）：
      * - 当 recordAdjustmentTx = true 时，自动计算「真实余额 - 账面余额」的差额，生成一笔「平账」支出/收入/冲销流水并原子化校准余额；
      * - 当 recordAdjustmentTx = false 时，仅直接调整期初/账面余额。
