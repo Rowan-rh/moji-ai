@@ -135,6 +135,7 @@ import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.PasswordProtectionConfig
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.service.CaptureEventOutcome
 import com.moji.ai.service.CaptureObservabilityLogEntry
@@ -147,11 +148,13 @@ import com.moji.ai.ui.components.AgentTriageBottomSheet
 import com.moji.ai.ui.components.ICostCalculatorSheet
 import com.moji.ai.ui.components.MonthlyCalendarSheet
 import com.moji.ai.ui.components.TransactionDetailSheet
+import com.moji.ai.ui.screens.AppLockUnlockOverlay
 import com.moji.ai.ui.screens.CategoryManagementScreen
 import com.moji.ai.ui.screens.CurrencyManagementScreen
 import com.moji.ai.ui.screens.ICostAssetsScreen
 import com.moji.ai.ui.screens.ICostLedgerHomeScreen
 import com.moji.ai.ui.screens.ICostStatisticsScreen
+import com.moji.ai.ui.screens.PasswordProtectionScreen
 import com.moji.ai.ui.screens.TagManagementScreen
 import com.moji.ai.ui.screens.TemplateManagementScreen
 import com.moji.ai.ui.theme.ICDinFontFamily
@@ -212,6 +215,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val incomeCategories by viewModel.incomeCategories.collectAsState()
     val tags by viewModel.tags.collectAsState()
     val customCurrencyRates by viewModel.customCurrencyRates.collectAsState()
+    val passwordProtectionConfig by viewModel.passwordProtectionConfig.collectAsState()
+    val isAppSessionLocked by viewModel.isAppSessionLocked.collectAsState()
     val triageReport by viewModel.triageReport.collectAsState()
     val isTriaging by viewModel.isTriaging.collectAsState()
     val showAgentTriageSheet by viewModel.showAgentTriageSheet.collectAsState()
@@ -260,6 +265,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var showTemplateManagementPage by remember { mutableStateOf(false) }
     var templateManagementAutoCreate by remember { mutableStateOf(false) }
     var showCurrencyManagementPage by remember { mutableStateOf(false) }
+    var showPasswordProtectionPage by remember { mutableStateOf(false) }
     var isAssetSubpageOpen by remember { mutableStateOf(false) }
 
     val hasFullScreenOverlay = inspectingTx != null ||
@@ -270,6 +276,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         showTagManagementPage ||
         showTemplateManagementPage ||
         showCurrencyManagementPage ||
+        showPasswordProtectionPage ||
         isAssetSubpageOpen
 
     LaunchedEffect(pendingTemplateDraftForCalc) {
@@ -318,6 +325,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             showTagManagementPage = false
             showTemplateManagementPage = false
             showCurrencyManagementPage = false
+            showPasswordProtectionPage = false
             calendarMonthTxs = null
             showCalculatorSheet = false
             editingTx = null
@@ -602,6 +610,10 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 customCurrencyRateCount = customCurrencyRates.size,
                 onOpenCurrencyManagement = {
                     showCurrencyManagementPage = true
+                },
+                passwordProtectionConfig = passwordProtectionConfig,
+                onOpenPasswordProtection = {
+                    showPasswordProtectionPage = true
                 }
             )
         }
@@ -763,6 +775,46 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             )
         }
 
+        // 全屏「密码保护」管理页面（对齐 setting_password.webp）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showPasswordProtectionPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            PasswordProtectionScreen(
+                config = passwordProtectionConfig,
+                onBack = { showPasswordProtectionPage = false },
+                onVerifyPin = { pin -> viewModel.verifyAppLockPin(pin, unlockSessionOnSuccess = false) },
+                onEnableProtection = { newPin, confirmPin ->
+                    viewModel.enablePasswordProtection(newPin = newPin, confirmPin = confirmPin)
+                },
+                onChangePin = { oldPin, newPin, confirmPin ->
+                    viewModel.changeAppLockPin(oldPin = oldPin, newPin = newPin, confirmPin = confirmPin)
+                },
+                onDisableProtection = { currentPin ->
+                    viewModel.disablePasswordProtection(currentPin = currentPin)
+                },
+                onUpdateLockTimeout = { seconds ->
+                    viewModel.updateAppLockTimeout(seconds)
+                },
+                onUpdateHideRecentTaskPreview = { hide ->
+                    viewModel.updateHideRecentTaskPreview(hide)
+                },
+                onUpdatePinHint = { rawHint ->
+                    viewModel.updateAppLockPinHint(rawHint)
+                },
+                onLockNow = {
+                    viewModel.lockAppSessionNow()
+                }
+            )
+        }
+
         // 全屏「智能记账」页面（09_smart_bookkeeping.png）—— 二级侧滑推入转场
         AnimatedVisibility(
             visible = showSmartBookkeepingPage,
@@ -847,7 +899,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 ledgers = ledgers,
                 onSelectLedger = { viewModel.selectLedger(it) },
                 visible = showCalculatorSheet,
-                suspendedBySubpage = showCategoryManagementPage || showTagManagementPage || showTemplateManagementPage || showCurrencyManagementPage,
+                suspendedBySubpage = showCategoryManagementPage || showTagManagementPage || showTemplateManagementPage || showCurrencyManagementPage || showPasswordProtectionPage,
                 editingTransaction = editingTx,
                 initialType = calcInitialType,
                 initialSourceWalletId = calcInitialSourceWalletId,
@@ -1031,6 +1083,20 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 containerColor = Color(0xFF262628),
                 contentColor = Color.White,
                 actionColor = Color(0xFF6AA8FF)
+            )
+        }
+
+        // 顶层全屏安全锁解锁遮罩层：当会话处于锁定态时覆盖全部界面并拦截系统返回键
+        AnimatedVisibility(
+            visible = isAppSessionLocked && passwordProtectionConfig.enabled,
+            enter = fadeIn(tween(180)),
+            exit = fadeOut(tween(180))
+        ) {
+            AppLockUnlockOverlay(
+                pinHint = passwordProtectionConfig.pinHint,
+                onVerifyPin = { pin ->
+                    viewModel.verifyAppLockPin(pin, unlockSessionOnSuccess = true)
+                }
             )
         }
     }
@@ -1324,7 +1390,9 @@ private fun ICostSettingsFullScreen(
     templateCount: Int = 0,
     onOpenTemplateManagement: () -> Unit = {},
     customCurrencyRateCount: Int = 0,
-    onOpenCurrencyManagement: () -> Unit = {}
+    onOpenCurrencyManagement: () -> Unit = {},
+    passwordProtectionConfig: PasswordProtectionConfig = PasswordProtectionConfig(),
+    onOpenPasswordProtection: () -> Unit = {}
 ) {
     BackHandler(onBack = onBack)
 
@@ -1483,7 +1551,12 @@ private fun ICostSettingsFullScreen(
                             },
                             onClick = onOpenCurrencyManagement
                         ),
-                        SettingRowDef("setting_password.webp", "密码保护"),
+                        SettingRowDef(
+                            "setting_password.webp",
+                            "密码保护",
+                            passwordProtectionConfig.settingsTrailingText,
+                            onClick = onOpenPasswordProtection
+                        ),
                         SettingRowDef("setting_time.webp", "定时提醒"),
                         SettingRowDef("setting_appearance.webp", "外观显示")
                     )

@@ -5,6 +5,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -14,8 +15,12 @@ import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
+import com.moji.ai.data.model.AppLockManager
 import com.moji.ai.ui.MainViewModel
 import com.moji.ai.ui.MoJiMainScreen
 import com.moji.ai.ui.theme.ICostBgGray
@@ -62,6 +67,14 @@ class MainActivity : ComponentActivity() {
         handleLaunchIntent(intent)
 
         setContent {
+            val appLockConfig by viewModel.passwordProtectionConfig.collectAsState()
+            LaunchedEffect(appLockConfig.enabled, appLockConfig.hideRecentTaskPreview) {
+                if (appLockConfig.enabled && appLockConfig.hideRecentTaskPreview) {
+                    window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                } else {
+                    window?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                }
+            }
             MaterialTheme(colorScheme = MoJiColorScheme) {
                 Surface(color = ICostBgGray) {
                     MoJiMainScreen(viewModel = viewModel)
@@ -84,9 +97,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        AppLockManager.onAppForegrounded()
+    }
+
     override fun onResume() {
         super.onResume()
+        AppLockManager.onAppForegrounded()
         enableHighRefreshRateMode()
+    }
+
+    override fun onStop() {
+        super.onStop()
+        if (!isChangingConfigurations) {
+            AppLockManager.onAppBackgrounded()
+        }
     }
 
     private fun enableHighRefreshRateMode() {

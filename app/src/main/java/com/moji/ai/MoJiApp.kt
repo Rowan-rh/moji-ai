@@ -6,6 +6,7 @@ import com.moji.ai.ai.AiConfigManager
 import com.moji.ai.ai.MerchantMemoryManager
 import com.moji.ai.ai.SmartRuleEngine
 import com.moji.ai.data.local.AppDatabase
+import com.moji.ai.data.model.AppLockManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.TagCatalog
@@ -54,6 +55,7 @@ class MoJiApp : Application() {
         CategoryCatalog.init(this)
         TagCatalog.init(this)
         CurrencyRateManager.init(this)
+        AppLockManager.init(this)
         database = AppDatabase.getInstance(this)
         repository = LedgerRepository(database)
         aiConfigManager = AiConfigManager(this)
