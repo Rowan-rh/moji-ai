@@ -270,13 +270,17 @@ private fun netExpenseOf(tx: TransactionEntity): Long = (tx.amountCnyCents - tx.
  * 单笔账单对「计入净资产」账户的资产 / 负债影响（本位币分），与账务引擎记账时的余额变动方向一致。
  * 返回 (资产变化, 负债变化)。账户已删除或不计入净资产时无影响。
  */
-private fun netWorthImpact(tx: TransactionEntity, walletMap: Map<Long, WalletEntity>): Pair<Long, Long> {
+private fun netWorthImpact(
+    tx: TransactionEntity,
+    walletMap: Map<Long, WalletEntity>,
+    requireNetWorthFlag: Boolean = true
+): Pair<Long, Long> {
     val rate = if (tx.exchangeRateToCny > 0.0) tx.exchangeRateToCny else 1.0
     val amount = tx.amountCnyCents
     val fee = (tx.feeCents * rate).roundToLong()
     var dA = 0L
     var dL = 0L
-    fun included(id: Long?): WalletEntity? = id?.let { walletMap[it] }?.takeIf { it.includeInNetWorth }
+    fun included(id: Long?): WalletEntity? = id?.let { walletMap[it] }?.takeIf { !requireNetWorthFlag || it.includeInNetWorth }
     // 资金流出：资产减少；信用账户欠款增加
     fun outflow(w: WalletEntity?, cents: Long) {
         if (w == null) return
@@ -290,14 +294,9 @@ private fun netWorthImpact(tx: TransactionEntity, walletMap: Map<Long, WalletEnt
     when (tx.type) {
         TransactionType.EXPENSE, TransactionType.LOAN_OUT -> outflow(included(tx.sourceWalletId), amount + fee)
         TransactionType.INCOME, TransactionType.LOAN_IN -> inflow(included(tx.targetWalletId ?: tx.sourceWalletId), amount - fee)
-        TransactionType.TRANSFER -> {
+        TransactionType.TRANSFER, TransactionType.REPAYMENT -> {
             outflow(included(tx.sourceWalletId), amount + fee)
             inflow(included(tx.targetWalletId), amount)
-        }
-        TransactionType.REPAYMENT -> {
-            // 账务引擎对付款账户一律扣减余额，对被还款账户一律减少余额（欠款）
-            included(tx.sourceWalletId)?.let { w -> if (w.type.isLiability) dL -= amount + fee else dA -= amount + fee }
-            included(tx.targetWalletId)?.let { w -> if (w.type.isLiability) dL -= amount else dA -= amount }
         }
         TransactionType.REFUND_OFFSET -> inflow(included(tx.targetWalletId ?: tx.sourceWalletId), amount)
     }
@@ -360,7 +359,7 @@ fun ICostStatisticsScreen(
     }
 
     val trendProgress = remember { Animatable(0f) }
-    LaunchedEffect(rangeMode, year, month, weekOffset, trendMetric) {
+    LaunchedEffect(rangeMode, year, month, weekOffset, filterWalletId, trendMetric) {
         trendProgress.snapTo(0f)
         trendProgress.animateTo(1f, tween(durationMillis = 600, easing = FastOutSlowInEasing))
     }
@@ -411,11 +410,14 @@ fun ICostStatisticsScreen(
     }
 
     // 核心统计指标计算（remember 缓存，避免图表动画期间重复遍历账单列表；平账校准流水不计入日常收支统计）
-    val netExpenseCents = remember(filteredTxs) {
-        filteredTxs.filter { it.type == TransactionType.EXPENSE && it.category != "平账" }.sumOf { netExpenseOf(it) }
+    val nonAnchorTxs = remember(filteredTxs) {
+        filteredTxs.filterNot { it.isSystemBalanceAnchor() }
     }
-    val totalIncomeCents = remember(filteredTxs) {
-        filteredTxs.filter { it.type == TransactionType.INCOME && it.category != "平账" }.sumOf { it.amountCnyCents }
+    val netExpenseCents = remember(nonAnchorTxs) {
+        nonAnchorTxs.filter { it.type == TransactionType.EXPENSE }.sumOf { netExpenseOf(it) }
+    }
+    val totalIncomeCents = remember(nonAnchorTxs) {
+        nonAnchorTxs.filter { it.type == TransactionType.INCOME }.sumOf { it.amountCnyCents }
     }
     val balanceCents = totalIncomeCents - netExpenseCents
 
@@ -430,12 +432,14 @@ fun ICostStatisticsScreen(
     }
     val dailyAvgExpenseCents = netExpenseCents / daysDivisor
 
-    val totalRefundCents = remember(filteredTxs) {
-        filteredTxs.filter { it.type == TransactionType.REFUND_OFFSET }.sumOf { it.amountCnyCents }
+    val totalRefundCents = remember(nonAnchorTxs) {
+        nonAnchorTxs.filter { it.type == TransactionType.REFUND_OFFSET }.sumOf { it.amountCnyCents }
     }
-    val totalDiscountCents = remember(filteredTxs) { filteredTxs.sumOf { it.discountCents } }
-    val totalFeeCents = remember(filteredTxs) {
-        filteredTxs.sumOf { (it.feeCents * (if (it.exchangeRateToCny > 0.0) it.exchangeRateToCny else 1.0)).roundToLong() }
+    val totalDiscountCents = remember(nonAnchorTxs) {
+        nonAnchorTxs.sumOf { (it.discountCents * (if (it.exchangeRateToCny > 0.0) it.exchangeRateToCny else 1.0)).roundToLong() }
+    }
+    val totalFeeCents = remember(nonAnchorTxs) {
+        nonAnchorTxs.sumOf { (it.feeCents * (if (it.exchangeRateToCny > 0.0) it.exchangeRateToCny else 1.0)).roundToLong() }
     }
 
     val pendingReimburseCents = remember(filteredTxs) {
@@ -470,10 +474,10 @@ fun ICostStatisticsScreen(
     }
     val axisIndices = remember(rangeMode, buckets.size) { axisLabelIndices(rangeMode, buckets.size) }
 
-    val bars = remember(filteredTxs, barChartMetric, buckets) {
+    val bars = remember(nonAnchorTxs, barChartMetric, buckets) {
         val exp = LongArray(buckets.size)
         val inc = LongArray(buckets.size)
-        filteredTxs.forEach { tx ->
+        nonAnchorTxs.forEach { tx ->
             val i = bucketIndexOf(buckets, tx.timestamp)
             if (i >= 0) {
                 when (tx.type) {
@@ -492,15 +496,22 @@ fun ICostStatisticsScreen(
         }
     }
 
-    // 净资产趋势：从当前余额出发，逐笔倒推每个分桶结束时的资产与负债（仅计入净资产的账户，折算人民币）
-    val walletMap = remember(wallets) { wallets.associateBy { it.id } }
-    val currentAssetsCents = remember(wallets, effectiveCustomRates) {
-        wallets.filter { !it.type.isLiability && it.includeInNetWorth }.sumOf {
+    // 净资产趋势：从当前余额出发，逐笔倒推每个分桶结束时的资产与负债（筛选单账户时仅统计该账户，否则计入净资产账户，折算人民币）
+    val scopedTrendWallets = remember(wallets, filterWalletId) {
+        if (filterWalletId != null) {
+            wallets.filter { it.id == filterWalletId }
+        } else {
+            wallets.filter { it.includeInNetWorth }
+        }
+    }
+    val walletMap = remember(scopedTrendWallets) { scopedTrendWallets.associateBy { it.id } }
+    val currentAssetsCents = remember(scopedTrendWallets, effectiveCustomRates) {
+        scopedTrendWallets.filter { !it.type.isLiability }.sumOf {
             (it.balanceCents * CurrencyRateManager.getEffectiveRateToCny(it.currency)).roundToLong()
         }
     }
-    val currentLiabCents = remember(wallets, effectiveCustomRates) {
-        wallets.filter { it.type.isLiability && it.includeInNetWorth }.sumOf {
+    val currentLiabCents = remember(scopedTrendWallets, effectiveCustomRates) {
+        scopedTrendWallets.filter { it.type.isLiability }.sumOf {
             (it.balanceCents * CurrencyRateManager.getEffectiveRateToCny(it.currency)).roundToLong()
         }
     }
@@ -509,12 +520,13 @@ fun ICostStatisticsScreen(
         1 -> currentAssetsCents
         else -> currentLiabCents
     }
-    val trendPoints: List<Long> = remember(transactions, walletMap, buckets, trendMetric, currentAssetsCents, currentLiabCents) {
+    val trendPoints: List<Long> = remember(transactions, walletMap, filterWalletId, buckets, trendMetric, currentAssetsCents, currentLiabCents) {
         if (walletMap.isEmpty() || buckets.isEmpty()) return@remember emptyList()
         val now = System.currentTimeMillis()
         val visible = buckets.filter { it.startMillis <= now }
         if (visible.isEmpty()) return@remember emptyList()
-        val impacts = transactions.map { it.timestamp to netWorthImpact(it, walletMap) }
+        val requireNetWorth = filterWalletId == null
+        val impacts = transactions.map { it.timestamp to netWorthImpact(it, walletMap, requireNetWorth) }
         visible.map { b ->
             var a = currentAssetsCents
             var l = currentLiabCents
@@ -534,9 +546,9 @@ fun ICostStatisticsScreen(
         }
     }
 
-    val categoryBreakdown = remember(filteredTxs, donutMetric) {
+    val categoryBreakdown = remember(nonAnchorTxs, donutMetric) {
         val targetType = if (donutMetric == 0) TransactionType.EXPENSE else TransactionType.INCOME
-        filteredTxs
+        nonAnchorTxs
             .filter { it.type == targetType }
             .groupBy { it.category.substringBefore("-") }
             .mapValues { (_, list) ->
@@ -782,14 +794,14 @@ fun ICostStatisticsScreen(
                 expanded = overviewExpanded,
                 onToggle = { overviewExpanded = !overviewExpanded },
                 cells = listOf(
-                    "支出" to formatMoneyCents(netExpenseCents),
-                    "收入" to formatMoneyCents(totalIncomeCents),
-                    "结余" to formatMoneyCents(balanceCents),
-                    "日均支出" to formatMoneyCents(dailyAvgExpenseCents),
-                    "退款" to formatMoneyCents(totalRefundCents),
-                    "优惠" to formatMoneyCents(totalDiscountCents),
-                    "手续费" to formatMoneyCents(totalFeeCents),
-                    "账单数" to "${filteredTxs.size}"
+                    "支出" to formatMoneyCents(netExpenseCents, "CNY", hideAmounts),
+                    "收入" to formatMoneyCents(totalIncomeCents, "CNY", hideAmounts),
+                    "结余" to formatMoneyCents(balanceCents, "CNY", hideAmounts),
+                    "日均支出" to formatMoneyCents(dailyAvgExpenseCents, "CNY", hideAmounts),
+                    "退款" to formatMoneyCents(totalRefundCents, "CNY", hideAmounts),
+                    "优惠" to formatMoneyCents(totalDiscountCents, "CNY", hideAmounts),
+                    "手续费" to formatMoneyCents(totalFeeCents, "CNY", hideAmounts),
+                    "账单数" to "${nonAnchorTxs.size}"
                 )
             )
         }
@@ -802,8 +814,8 @@ fun ICostStatisticsScreen(
                 expanded = reimburseExpanded,
                 onToggle = { reimburseExpanded = !reimburseExpanded },
                 cells = listOf(
-                    "待报销" to formatMoneyCents(pendingReimburseCents),
-                    "已报销" to formatMoneyCents(settledReimburseCents)
+                    "待报销" to formatMoneyCents(pendingReimburseCents, "CNY", hideAmounts),
+                    "已报销" to formatMoneyCents(settledReimburseCents, "CNY", hideAmounts)
                 )
             )
         }
@@ -816,11 +828,11 @@ fun ICostStatisticsScreen(
                 expanded = transferExpanded,
                 onToggle = { transferExpanded = !transferExpanded },
                 cells = listOf(
-                    "还款" to formatMoneyCents(repaymentCents),
-                    "转账" to formatMoneyCents(transferCents),
-                    "借入" to formatMoneyCents(loanInCents),
-                    "借出" to formatMoneyCents(loanOutCents),
-                    "分期还款" to formatMoneyCents(installmentPayCents)
+                    "还款" to formatMoneyCents(repaymentCents, "CNY", hideAmounts),
+                    "转账" to formatMoneyCents(transferCents, "CNY", hideAmounts),
+                    "借入" to formatMoneyCents(loanInCents, "CNY", hideAmounts),
+                    "借出" to formatMoneyCents(loanOutCents, "CNY", hideAmounts),
+                    "分期还款" to formatMoneyCents(installmentPayCents, "CNY", hideAmounts)
                 )
             )
         }
@@ -883,7 +895,7 @@ fun ICostStatisticsScreen(
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     Text(
-                                        text = formatMoneyCents(max(maxPos, maxNeg)),
+                                        text = formatMoneyCents(max(maxPos, maxNeg), "CNY", hideAmounts),
                                         fontSize = 10.sp,
                                         color = ICostTextMuted
                                     )
@@ -892,7 +904,7 @@ fun ICostStatisticsScreen(
                                         color = barColor.copy(alpha = 0.12f)
                                     ) {
                                         Text(
-                                            text = "峰值 ${buckets.getOrNull(peakIdx)?.fullLabel.orEmpty()} ${formatMoneyCents(peakCents)}",
+                                            text = "峰值 ${buckets.getOrNull(peakIdx)?.fullLabel.orEmpty()} ${formatMoneyCents(peakCents, "CNY", hideAmounts)}",
                                             fontSize = 10.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = barColor,
@@ -903,6 +915,8 @@ fun ICostStatisticsScreen(
 
                                 Spacer(modifier = Modifier.height(6.dp))
 
+                                val gridLineColor = ICostDivider
+                                val zeroBarStubColor = ICostCellGray
                                 Canvas(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -921,7 +935,7 @@ fun ICostStatisticsScreen(
 
                                     listOf(topY, (topY + bottomY) / 2f, bottomY).forEach { y ->
                                         drawLine(
-                                            color = Color(0xFFEEEEEE),
+                                            color = gridLineColor,
                                             start = Offset(0f, y),
                                             end = Offset(w, y),
                                             strokeWidth = 1.dp.toPx(),
@@ -930,7 +944,7 @@ fun ICostStatisticsScreen(
                                     }
                                     if (maxNeg > 0L) {
                                         drawLine(
-                                            color = Color(0xFFDDDDDD),
+                                            color = gridLineColor,
                                             start = Offset(0f, baseY),
                                             end = Offset(w, baseY),
                                             strokeWidth = 1.dp.toPx()
@@ -945,7 +959,7 @@ fun ICostStatisticsScreen(
                                         val x = i * slotW + (slotW - barW) / 2f
                                         if (v == 0L) {
                                             drawRoundRect(
-                                                color = Color(0xFFF0F0F2),
+                                                color = zeroBarStubColor,
                                                 topLeft = Offset(x, baseY - 3.dp.toPx()),
                                                 size = Size(barW, 3.dp.toPx()),
                                                 cornerRadius = CornerRadius(barW / 2f, barW / 2f)
@@ -1042,6 +1056,8 @@ fun ICostStatisticsScreen(
                             } else {
                                 val points = if (trendPoints.size == 1) listOf(trendPoints[0], trendPoints[0]) else trendPoints
 
+                                val trendGridLineColor = ICostDivider
+                                val trendDotCenterColor = ICostCardWhite
                                 Canvas(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -1053,7 +1069,7 @@ fun ICostStatisticsScreen(
                                     val dash = PathEffect.dashPathEffect(floatArrayOf(8f, 8f), 0f)
                                     listOf(0.15f, 0.52f, 0.88f).forEach { ry ->
                                         drawLine(
-                                            color = Color(0xFFEEEEEE),
+                                            color = trendGridLineColor,
                                             start = Offset(0f, h * ry),
                                             end = Offset(w, h * ry),
                                             strokeWidth = 1.dp.toPx(),
@@ -1111,7 +1127,7 @@ fun ICostStatisticsScreen(
                                     }
                                     if (trendFrac > 0.92f) {
                                         coords.lastOrNull()?.let { lastPt ->
-                                            drawCircle(color = Color.White, radius = 5.dp.toPx(), center = lastPt)
+                                            drawCircle(color = trendDotCenterColor, radius = 5.dp.toPx(), center = lastPt)
                                             drawCircle(color = lineColor, radius = 3.5.dp.toPx(), center = lastPt)
                                         }
                                     }
@@ -1229,7 +1245,7 @@ fun ICostStatisticsScreen(
                                             color = ICostTextSecondary
                                         )
                                         Text(
-                                            text = formatMoneyCents(totalTargetCents),
+                                            text = formatMoneyCents(totalTargetCents, "CNY", hideAmounts),
                                             fontFamily = ICDinFontFamily,
                                             fontSize = 18.sp,
                                             fontWeight = FontWeight.Bold,
@@ -1315,7 +1331,7 @@ fun ICostStatisticsScreen(
                                                 }
                                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                                     Text(
-                                                        text = formatMoneyCents(cents),
+                                                        text = formatMoneyCents(cents, "CNY", hideAmounts),
                                                         fontFamily = ICDinFontFamily,
                                                         fontSize = 16.sp,
                                                         fontWeight = FontWeight.Bold,
@@ -1587,7 +1603,7 @@ private fun ChartMiniSegmentToggle(
     Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Surface(
             shape = RoundedCornerShape(18.dp),
-            color = Color(0xFFF2F2F4)
+            color = ICostPillGray
         ) {
             Row(modifier = Modifier.padding(3.dp)) {
                 options.forEachIndexed { idx, text ->

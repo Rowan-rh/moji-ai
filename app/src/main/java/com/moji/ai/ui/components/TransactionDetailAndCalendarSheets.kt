@@ -74,6 +74,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.moji.ai.ai.AgentBillTriageEngine
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.AppearanceConfigManager
@@ -184,8 +185,16 @@ fun TransactionDetailSheet(
         value = if (tx.screenshotPath.isNotBlank()) {
             withContext(Dispatchers.IO) {
                 runCatching {
-                    val f = File(tx.screenshotPath)
-                    if (f.exists()) BitmapFactory.decodeFile(f.absolutePath)?.asImageBitmap() else null
+                    val f = AgentBillTriageEngine.resolveSafeScreenshotFile(tx.screenshotPath) ?: return@runCatching null
+                    val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(f.absolutePath, boundsOpts)
+                    val maxDim = maxOf(boundsOpts.outWidth, boundsOpts.outHeight)
+                    var sample = 1
+                    while (maxDim / sample > 2048) {
+                        sample *= 2
+                    }
+                    val decodeOpts = BitmapFactory.Options().apply { inSampleSize = sample }
+                    BitmapFactory.decodeFile(f.absolutePath, decodeOpts)?.asImageBitmap()
                 }.getOrNull()
             }
         } else {
@@ -321,9 +330,10 @@ fun TransactionDetailSheet(
                 Spacer(modifier = Modifier.height(22.dp))
 
                 if (tx.duplicateSuspected) {
+                    val isDark = AppearanceConfigManager.isDarkThemeActive
                     Surface(
                         shape = RoundedCornerShape(14.dp),
-                        color = Color(0xFFFFEFEA),
+                        color = if (isDark) ICostCoralRed.copy(alpha = 0.20f) else Color(0xFFFFEFEA),
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(bottom = 12.dp)
@@ -339,7 +349,7 @@ fun TransactionDetailSheet(
                             Text(
                                 text = "该笔账单在识别时曾触发重复保护（订单Key或交易时间+金额一致），由您点击「录入」后手动写入账本。",
                                 fontSize = 12.sp,
-                                color = Color(0xFF8C2D19)
+                                color = if (isDark) ICostTextSecondary else Color(0xFF8C2D19)
                             )
                         }
                     }
@@ -382,10 +392,10 @@ fun TransactionDetailSheet(
                     DetailKeyValueRow("商户单号", tx.merchantOrderNo, singleLine = true, compactFont = true)
                 }
                 if (tx.type != TransactionType.EXPENSE && tx.discountCents > 0L) {
-                    DetailKeyValueRow("优惠金额", formatMoneyCents(tx.discountCents), singleLine = true)
+                    DetailKeyValueRow("优惠金额", formatMoneyCents(tx.discountCents, tx.currency), singleLine = true)
                 }
                 if (tx.feeCents > 0L) {
-                    DetailKeyValueRow("手续费", formatMoneyCents(tx.feeCents), singleLine = true)
+                    DetailKeyValueRow("手续费", formatMoneyCents(tx.feeCents, tx.currency), singleLine = true)
                 }
                 if (tx.reimbursable) {
                     DetailKeyValueRow("报销状态", if (tx.reimbursed) "已报销" else "待报销", singleLine = true)
@@ -1162,10 +1172,10 @@ fun MonthlyCalendarSheet(
 
     val selectedList = byDay[safeSelectedDay].orEmpty()
     val dayExpenseCents = selectedList
-        .filter { it.type == TransactionType.EXPENSE }
+        .filter { it.type == TransactionType.EXPENSE && !it.isSystemBalanceAnchor() }
         .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
     val dayIncomeCents = selectedList
-        .filter { it.type == TransactionType.INCOME }
+        .filter { it.type == TransactionType.INCOME && !it.isSystemBalanceAnchor() }
         .sumOf { it.amountCnyCents }
     val dayRefundCents = selectedList
         .filter { it.type == TransactionType.REFUND_OFFSET }
@@ -1299,9 +1309,9 @@ fun MonthlyCalendarSheet(
                                     val dayNum = cellIndex - firstDayOffset + 1
                                     if (dayNum in 1..daysInMonth) {
                                         val dayTxs = byDay[dayNum].orEmpty()
-                                        val dayExp = dayTxs.filter { it.type == TransactionType.EXPENSE }
+                                        val dayExp = dayTxs.filter { it.type == TransactionType.EXPENSE && !it.isSystemBalanceAnchor() }
                                             .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
-                                        val dayInc = dayTxs.filter { it.type == TransactionType.INCOME }
+                                        val dayInc = dayTxs.filter { it.type == TransactionType.INCOME && !it.isSystemBalanceAnchor() }
                                             .sumOf { it.amountCnyCents }
                                         val isSelected = safeSelectedDay == dayNum
                                         val hasExp = dayExp > 0L

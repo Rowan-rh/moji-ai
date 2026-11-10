@@ -57,14 +57,14 @@
 - **4 大账户类型**：
   1. **银行储蓄卡 (`DEBIT_BANK`)**：支持配置银行卡后四位（如 `8848`）及别名，供 AI 从银行扣款通知中精准定位。
   2. **数字钱包 (`DIGITAL_WALLET`)**：微信零钱、零钱通、支付宝余额、余额宝等。
-  3. **信用/透支账户 (`CREDIT`)**：信用卡、蚂蚁花呗、京东白条、美团月付等。支持管理 **授信总额度**、**当前待还欠款**、**可用额度**、**账单日** 与 **还款日**。
+  3. **信用/透支账户 (`CREDIT`)**：信用卡、蚂蚁花呗、京东白条、美团月付等。支持管理 **授信总额度**、**当前待还欠款（及多还/退款产生的负欠款「溢缴款」）**、**可用额度**、**账单日** 与 **还款日**。
   4. **现金/预付卡/其他 (`CASH_OTHER`)**：现金、饭卡、公交卡、海淘外币卡等。
 - **净资产实时核算与真实余额锚点平账 (`reconcileWalletBalance`)**：
-  - 自动汇总：`净资产 = 计入净资产的储蓄/数字钱包总额 - 信用账户待还总负债`。
+  - 自动汇总：`净资产 = 计入净资产的储蓄/数字钱包总额 - 信用账户待还总负债`（当信用账户存在负值溢缴款时按正资产抵扣负债，总额度保持不变）。
   - 支持在账户详情页输入微信/银行卡当前真实余额或信用卡真实待还欠款，自动计算与账面余额的差额并生成一笔可随时撤销的 `BALANCE_ANCHOR` 平账补差流水。
-- **全量快照备份恢复与多源 CSV 账单导入导出 (`BackupAndCsvTransferEngine`)**：
-  - 支持导出与恢复带 `BackupSchemaGuard` 默认值保护的 `.mojibackup` 全量 JSON 快照（含钱包、账单、周期规则、商户记忆库、条件规则、快捷模板、存钱计划、信用卡分期计划、自定义分类/标签/汇率、定时提醒、外观显示、多账本与预算）。
-  - 支持自动识别并预览导入 **微信支付官方账单 CSV、支付宝官方账单 CSV、钱迹 / iCost CSV**（内置重复流水指纹跳过），并支持导出标准 UTF-8 CSV 报表。
+- **全量快照备份恢复与多源 CSV/XLSX 账单导入导出 (`BackupAndCsvTransferEngine`)**：
+  - 支持导出与恢复带 `BackupSchemaGuard` 默认值保护的 `.mojibackup` 全量 JSON 快照（含钱包、账单、周期规则、商户记忆库、条件规则、快捷模板、存钱计划、信用卡分期计划、自定义分类/标签/汇率、定时提醒、外观显示、多账本与预算），并通过 `backup_rules.xml` 与 `data_extraction_rules.xml` 排除系统明文云端自动备份与换机直传，保障财务数据与 API 密钥安全。
+  - 支持自动识别并预览导入 **微信支付官方账单 CSV、支付宝官方账单 CSV、钱迹 / iCost CSV 与 `.xlsx`**（内置 RFC 4180 多行引号字段解析、`.xlsx` 解压体积上限防 Zip Bomb、超大文本只读预览防截断覆盖及重复流水指纹跳过），并支持导出带公式注入防护的标准 UTF-8 CSV 报表。
 
 ### 4. 七大真实交易形态与报销/优惠/手续费核算（解决“乱七八糟”的账务场景）
 | 交易类型 | 枚举值 | 真实场景举例 | 钱包余额与报表联动规则 |
@@ -77,11 +77,11 @@
 | **借入款项** | `LOAN_IN` | 向朋友临时周转借入资金 | 收款钱包增加余额，联动资产页「总借入」统计 |
 | **借出款项** | `LOAN_OUT` | 借钱给朋友或垫付资金 | 付款钱包扣减余额，联动资产页「总借出」统计 |
 
-- **报销闭环与批量核销 (`reimbursable -> reimbursed` & `batchSettleReimbursements`)**：支持将消费账单标记为「待报销」，并在「批量报销核销中心」多选待报销账单后一键批量结算入账、恢复指定收款账户余额。
-- **单笔分拆账单 (`splitExpenseTransaction`)**：支持在账单详情页将单笔消费（如超市综合采购）拆分为多个独立分类与金额的子账单，同时保持原付款账户总扣款金额严格不变。
+- **报销闭环与批量核销 (`reimbursable -> reimbursed` & `batchSettleReimbursements`)**：支持将消费账单标记为「待报销」，并在「批量报销核销中心」多选待报销账单后一键批量结算入账、恢复指定收款账户余额；对已报销账单执行删除、修改金额或取消已报销状态时，自动联动回退/同步报销收款流水的入账余额，确保账务守恒。
+- **单笔分拆账单 (`splitExpenseTransaction`)**：支持在账单详情页将单笔消费（如超市综合采购）拆分为多个独立分类与金额的子账单，同时保持原付款账户总扣款金额严格不变（并拒绝直接分拆已关联冲销/报销到账的复杂账单，防止关联引用断裂）。
 - **可视化条件规则引擎 (`SmartRuleEngine`, `When -> Then`)**：支持按关键词、金额上下限、24 小时时间窗组合条件，自动改写分类/账本/附加标签、自动标为待报销或静默拦截非账单通知。
-- **WebDAV 自托管云同步 (`WebDavSyncClient`)**：支持连接坚果云、Nextcloud、群晖 Synology 等标准 WebDAV 服务，一键上传或下载恢复 `.mojibackup` 全量快照。
-- **GitHub 私有仓库 / 公开仓库 OTA 自动更新 (`AppUpdateManager`)**：支持通过单仓库只读 Fine-grained PAT（编译期 `local.properties` 注入或设置页动态配置）查询 GitHub Releases、通过 Release Asset API（`Accept: application/octet-stream`）流式下载私有仓库 APK、校验 `PK` 签名头并通过 `FileProvider` 调起系统安装器一键覆盖升级。
+- **WebDAV 自托管云同步 (`WebDavSyncClient`)**：支持连接坚果云、Nextcloud、群晖 Synology 等标准 WebDAV 服务（公网强制 `HTTPS` 防基础认证凭据明文泄露，仅局域网私有地址允许 `HTTP`），采用 `.tmp` 临时上传 + `MOVE Overwrite: T` 原子替换策略上传或下载恢复 `.mojibackup` 全量快照。
+- **GitHub 私有仓库 / 公开仓库 OTA 自动更新 (`AppUpdateManager`)**：支持通过单仓库只读 Fine-grained PAT（编译期 `local.properties` 注入或设置页动态配置，跨源重定向自动剥离 `Authorization` 头防 Token 泄露）查询 GitHub Releases、按 SemVer 预发布/正式版语义比对版本号、通过 Release Asset API 流式下载 APK（上限 256 MB）、校验 GitHub Release Asset `sha256` 摘要与归档内包名/签名证书和本机已安装版本一致后，通过 `FileProvider` 调起系统安装器一键覆盖升级。
 - **独立包名测试包双包共存与全链路防串数据隔离 (`com.moji.ai.qa`)**：提供 `qa` 构建变体（`./gradlew assembleQa`，输出 `app/build/outputs/apk/qa/app-qa.apk`，使用 debug 签名），包名为 `com.moji.ai.qa`，可与手机上的正式包 `com.moji.ai` 同时安装共存。桌面与设置页采用「默记 QA」名称与晴空青蓝基底 + `QA` 角标专属自适应图标，通知监听/无障碍服务/快捷设置磁贴文案均带 `默记 QA` 标识；隔离沙盒数据库、`FileProvider`（`${applicationId}.fileprovider`）、通知渠道（`moji_silent_bookkeeping_qa_v2` / `moji_fluid_cloud_silent_qa_v2`）与显式包名广播 `PendingIntent`，并在 QA 通知正文附加防采集标记且双向忽略 `com.moji.ai*` 包名；QA 包默认禁用正式版 OTA 自动更新与覆盖安装，WebDAV 默认路径隔离为 `/dav/MoJi-QA/` 与 `moji_qa_latest.mojibackup` 并拦截向正式路径/文件名的上传操作。
 - **正式版公开分发**：release 构建从 `local.properties` / 环境变量读取正式签名证书（`MOJI_RELEASE_*`），未配置时不签名；`scripts/release.sh` 校验 `gh` 账号、`main` 分支与版本号高于最新 Release、构建并用 `apksigner` 校验签名（可选比对证书指纹），随后打 `v<versionName>` Tag 并创建附带固定名 `moji.apk` 的 GitHub Release，提供 `releases/latest/download/moji.apk` 公开直链。
 
@@ -109,8 +109,8 @@
   - **三入口全链路打通**：支持从「设置 › 更多功能 › 货币和汇率（动态显示 `本位币 CNY · 12 种货币` 或 `已自定义 M 项汇率`）」、记账计算器币种选择弹窗顶部「汇率设置」快捷按钮（通过 `suspendedBySubpage` 挂起计算器，返回后恢复草稿）以及资产页新建/编辑外币账户（`FlowRow` 自适应换行 + 底部生效汇率与折合人民币预览提示条）进入。
   - **实时汇率换算预览卡片与防挤压双行外币卡片**：顶部展示本位币 `人民币 (CNY ¥)` 与基准金额实时换算输入区（默认 `100`，支持自定义输入与 `100 / 1000 / 10000` 快捷切换，数字使用 `ICDinFontFamily` 凝缩字体）；支持按币种代码/中文名/符号实时搜索及 `全部 (11) / 已自定义 (M) / 常用外币 (8)` 三态分段筛选；外币卡片严格采用上下双行防挤压结构（首行符号徽标 + 币种名 + 状态胶囊 + `ICDIN` 汇率，次行实时换算预览 + `恢复默认` / `编辑汇率` 按钮）；编辑汇率底部弹窗支持最多 6 位小数自定义汇率输入与 `<= 0` / `> 1000` / 非数字反例红字拦截；`.mojibackup` 全量快照完整包含 `customCurrencyRates` 并向下兼容旧版备份。
 - **「密码保护」全屏隐私锁与安全验证遮罩（`PasswordProtectionScreen`、`AppLockOverlayScreen` & `AppLockManager`）**：
-  - **本机加盐哈希加密与防暴力破解冷却保护**：使用 `SHA-256 + 16 字节随机 Salt`（`moji_app_lock_prefs`）存储 4 位数字 PIN 摘要，严禁明文保存密码；连续输错达 5 次自动触发 30 秒冷却锁（期间拒绝校验并每秒倒计时提示剩余秒数）；应用锁凭据作为本机隐私设置不随 `.mojibackup` 备份导出或恢复覆盖。
-  - **全屏密码保护管理页与全屏数字键盘解锁遮罩**：支持从「设置 › 更多功能 › 密码保护（动态显示 `未开启` 或 `已开启 · 立即锁定 / 1 分钟后锁定 / 5 分钟后锁定`）」进入；提供两步式首次开启设置（两次不一致红字拦截）、验证原密码后修改/关闭密码保护、三档切后台超时自动锁定（`立即锁定 / 离开 1 分钟后 / 离开 5 分钟后`）、密码防遗忘提示语（最多 20 字，严禁包含当前 4 位 PIN 码本身）、多任务模糊与防截屏保护（`FLAG_SECURE` 动态开关，默认关闭以兼顾日常截屏识账）以及「立即锁定测试」一键弹出顶层全屏数字键盘解锁遮罩（拦截系统返回键）。
+  - **本机 PBKDF2 慢哈希加密与持久化冷却保护**：使用 `PBKDF2-HMAC-SHA256（120,000 轮迭代 + 16 字节随机 Salt，兼容旧版 SHA-256 首次校验通过后无感升级）`（`moji_app_lock_prefs`）存储 4 位数字 PIN 摘要，严禁明文保存密码；连续输错达 5 次自动触发并持久化 30 秒冷却锁（期间拒绝校验并每秒倒计时提示剩余秒数，内置时钟回调上限钳制防永久锁死）；会话锁定时拦截超时档位、截屏开关与提示语篡改；应用锁凭据作为本机隐私设置不随 `.mojibackup` 备份导出或恢复覆盖。
+  - **全屏密码保护管理页与顶层独立窗口数字键盘遮罩**：支持从「设置 › 更多功能 › 密码保护（动态显示 `未开启` 或 `已开启 · 立即锁定 / 1 分钟后锁定 / 5 分钟后锁定`）」进入；提供两步式首次开启设置（两次不一致红字拦截）、验证原密码后修改/关闭密码保护、基于单调时钟 (`SystemClock.elapsedRealtime()`) 的三档切后台超时自动锁定（`立即锁定 / 离开 1 分钟后 / 离开 5 分钟后`）、密码防遗忘提示语（最多 20 字，严禁包含当前 4 位 PIN 码本身）、多任务模糊与防截屏保护（`FLAG_SECURE` 动态开关，默认关闭以兼顾日常截屏识账）以及「立即锁定测试」一键弹出顶层独立窗口 `Dialog` 全屏数字键盘解锁遮罩（彻底遮蔽底层 `ModalBottomSheet` / 弹窗并拦截系统返回键）。
 - **「定时提醒」全屏管理页、智能免打扰与点击通知直达记账面板（`ReminderManagementScreen`、`ReminderConfigManager` & `DailyReminderScheduler`）**：
   - **多时段自定义提醒与响应式摘要**：持久化于 `moji_reminder_prefs`（首次初始化内置 `21:00 晚间记账提醒 · 每天`），支持总开关、多条自定义提醒时段（提供 `12:30 午间 / 18:30 晚餐 / 21:00 睡前 / 22:00 夜宵` 快捷芯片、时分加减微调、`每天 / 工作日 / 周末` 及周一至周日 7 天圆形多选、24 字内标题与 60 字内通知正文校验）；设置页「更多功能 › 定时提醒」实时展示 `未开启`、单条 `每天 21:00` 或多条 `已开启 N 个 · HH:mm`。
   - **无需特殊精确闹钟权限的安全调度、智能免打扰与 Deep-Link 闭环**：基于 `AlarmManager.setAndAllowWhileIdle`（带 `set` 兜底与异常捕获，不申请受限的 `SCHEDULE_EXACT_ALARM` / `USE_EXACT_ALARM`）及 `BOOT_COMPLETED / TIME_SET / TIMEZONE_CHANGED` 广播自动重注册；开启「今日已记账则免打扰」时，若本地自然日内已有非系统平账交易记录则静默跳过当次提醒；发送通知采用独立渠道 `moji_daily_reminder_channel` / `moji_daily_reminder_qa_channel`，点击通知携带 `MainActivity.EXTRA_OPEN_BOOKKEEPING_SHEET` 自动关闭二级页、回到账本首页并展开 `ICostCalculatorSheet` 记账面板；提供「立即发送测试提醒」一键验证，且完整兼容 `.mojibackup` 全量快照备份恢复。

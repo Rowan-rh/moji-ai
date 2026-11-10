@@ -132,7 +132,6 @@ class DailyReminderReceiver : BroadcastReceiver() {
             if (!config.masterEnabled) return
 
             val targetSlot = config.items.firstOrNull { it.id == slotId }
-                ?: config.items.firstOrNull { it.enabled }
                 ?: return
             if (!targetSlot.enabled) return
 

@@ -209,6 +209,12 @@ object RecognitionBanner {
                 }
             },
             onHoldTouch = { cancelTimers() },
+            onTouchCollapseStarted = {
+                watchdogRemoveRunnable?.let { mainHandler.removeCallbacks(it) }
+                val watchdog = Runnable { dismissImmediateOnMain() }
+                watchdogRemoveRunnable = watchdog
+                mainHandler.postDelayed(watchdog, 620L)
+            },
             onCollapseFinished = { view ->
                 removeSingleViewSafely(wm, view)
             }
@@ -322,6 +328,7 @@ object RecognitionBanner {
         private val onActionTriggered: () -> Unit,
         private val onBodyTriggered: () -> Unit,
         private val onHoldTouch: () -> Unit,
+        private val onTouchCollapseStarted: () -> Unit,
         private val onCollapseFinished: (FluidCloudMorphView) -> Unit
     ) : View(context) {
 
@@ -556,6 +563,7 @@ object RecognitionBanner {
         fun startCollapseIntoCamera() {
             if (isCollapsing) return
             isCollapsing = true
+            onTouchCollapseStarted()
             onAnimationWindowLock(460L)
             activeAnimator?.cancel()
             val startVal = morphFraction.coerceIn(0.05f, 1f)
@@ -811,12 +819,15 @@ object RecognitionBanner {
                 actionHitRect.setEmpty()
             }
 
-            // (C) 中部双行信息排印（零分配，直接使用预计算的宽度与截断文本）
+            // (C) 中部双行信息排印（零分配，直接使用预计算的宽度与截断文本，并裁剪右侧边界防止长标题溢出压住按钮）
             val textStartX = iconCx + iconRadius + 10f * dp
 
             titlePaint.alpha = contentAlpha
             amountPaint.alpha = contentAlpha
             subPaint.alpha = (contentAlphaF * 210).toInt()
+
+            canvas.save()
+            canvas.clipRect(textStartX, 0f, textRightBound.coerceAtLeast(textStartX), height.toFloat())
 
             val topRowBaseline = capsuleRect.centerY() - 4.5f * dp + contentSlideOffsetY
             canvas.drawText(statusTitle, textStartX, topRowBaseline, titlePaint)
@@ -847,6 +858,7 @@ object RecognitionBanner {
                 val subBaseline = capsuleRect.centerY() + 13.5f * dp + contentSlideOffsetY
                 canvas.drawText(cachedEllipsizedSub, textStartX, subBaseline, subPaint)
             }
+            canvas.restore()
         }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {

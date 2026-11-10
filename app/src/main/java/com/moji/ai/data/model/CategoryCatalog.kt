@@ -356,6 +356,11 @@ object CategoryCatalog {
             .distinctBy { it.name }
     }
 
+    private val cachedAllIcons: List<CategoryIconOption> by lazy {
+        iconGroups.flatMap { it.icons }
+    }
+
+    @Synchronized
     fun init(context: Context) {
         val sp = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs = sp
@@ -445,6 +450,7 @@ object CategoryCatalog {
         return mapped?.takeIf { it != current }
     }
 
+    @Synchronized
     fun replaceAllCategories(
         expenseList: List<CategoryDef>,
         incomeList: List<CategoryDef>
@@ -465,6 +471,7 @@ object CategoryCatalog {
         _versionFlow.value += 1
     }
 
+    @Synchronized
     fun addPrimaryCategory(
         isExpense: Boolean,
         name: String,
@@ -485,6 +492,7 @@ object CategoryCatalog {
         return Result.success(created)
     }
 
+    @Synchronized
     fun updatePrimaryCategory(
         isExpense: Boolean,
         oldName: String,
@@ -505,6 +513,7 @@ object CategoryCatalog {
         return Result.success(updated)
     }
 
+    @Synchronized
     fun movePrimaryCategory(isExpense: Boolean, index: Int, delta: Int): Boolean {
         val current = (if (isExpense) expenseCategories else incomeCategories).toMutableList()
         val targetIndex = index + delta
@@ -515,6 +524,7 @@ object CategoryCatalog {
         return true
     }
 
+    @Synchronized
     fun deletePrimaryCategory(isExpense: Boolean, name: String): Result<Unit> {
         val current = (if (isExpense) expenseCategories else incomeCategories).toMutableList()
         if (current.size <= 1) {
@@ -526,6 +536,7 @@ object CategoryCatalog {
         return Result.success(Unit)
     }
 
+    @Synchronized
     fun addSubCategory(
         isExpense: Boolean,
         parentName: String,
@@ -547,6 +558,7 @@ object CategoryCatalog {
         return Result.success(created)
     }
 
+    @Synchronized
     fun updateSubCategory(
         isExpense: Boolean,
         parentName: String,
@@ -576,6 +588,7 @@ object CategoryCatalog {
         return Result.success(updatedSub)
     }
 
+    @Synchronized
     fun moveSubCategory(
         isExpense: Boolean,
         parentName: String,
@@ -595,6 +608,7 @@ object CategoryCatalog {
         return true
     }
 
+    @Synchronized
     fun deleteSubCategory(
         isExpense: Boolean,
         parentName: String,
@@ -618,6 +632,7 @@ object CategoryCatalog {
      * @param isExpense true=仅支出, false=仅收入, null=支出与收入全部处理
      * @param mergeOnly true=补全缺失的默认分类（保留用户自建分类与自定义图标）, false=重置为出厂默认分类树
      */
+    @Synchronized
     fun restoreDefaultCategories(isExpense: Boolean? = null, mergeOnly: Boolean = true) {
         val nextExp = if (mergeOnly) {
             mergeWithDefaults(expenseCategories, defaultExpenseCategories)
@@ -696,6 +711,7 @@ object CategoryCatalog {
      * 确保「一级分类」或「一级-二级分类」在分类树中存在（若缺失则自动创建并匹配最佳图标）
      * @return 是否实际新建了分类节点
      */
+    @Synchronized
     fun ensureCategoryPathExists(
         fullCategory: String,
         isExpense: Boolean = true,
@@ -735,11 +751,15 @@ object CategoryCatalog {
         parentName: String? = null,
         isExpense: Boolean = true
     ): String {
-        val combined = listOfNotNull(parentName, name).joinToString("-")
-        val allIcons = iconGroups.flatMap { it.icons }
-        allIcons.firstOrNull { it.label == name.trim() }?.let { return it.assetFile }
-        allIcons.firstOrNull { name.contains(it.label) || it.label.contains(name.trim()) }?.let {
-            return it.assetFile
+        val trimmedName = name.trim()
+        val combined = listOfNotNull(parentName, trimmedName).joinToString("-")
+        cachedAllIcons.firstOrNull { it.label == trimmedName }?.let { return it.assetFile }
+        if (trimmedName.length >= 2) {
+            cachedAllIcons.firstOrNull {
+                trimmedName.contains(it.label) || it.label.contains(trimmedName)
+            }?.let {
+                return it.assetFile
+            }
         }
         return when {
             combined.contains("夜宵") || combined.contains("烧烤") || combined.contains("聚餐") ||

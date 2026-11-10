@@ -44,8 +44,13 @@ enum class RecurrenceFrequency(val displayName: String, val daysInterval: Int) {
 
     /**
      * 按自然日历（月/年/周/天）递推下一次触发时间，避免固定 30 天 / 365 天产生长期漂移。
+     * 针对每月触发且指定了 anchorDay（如 31 号）的规则，在 2 月等短月收敛至月末后，后续大月自动恢复到 anchorDay。
      */
-    fun computeNextTriggerMillis(baseMillis: Long, nowMillis: Long = baseMillis): Long {
+    fun computeNextTriggerMillis(
+        baseMillis: Long,
+        nowMillis: Long = baseMillis,
+        anchorDay: Int? = null
+    ): Long {
         val cal = Calendar.getInstance().apply {
             timeInMillis = if (baseMillis > 0L) baseMillis else nowMillis
         }
@@ -53,7 +58,13 @@ enum class RecurrenceFrequency(val displayName: String, val daysInterval: Int) {
             when (this) {
                 DAILY -> cal.add(Calendar.DAY_OF_YEAR, 1)
                 WEEKLY -> cal.add(Calendar.DAY_OF_YEAR, 7)
-                MONTHLY -> cal.add(Calendar.MONTH, 1)
+                MONTHLY -> {
+                    cal.add(Calendar.MONTH, 1)
+                    if (anchorDay != null && anchorDay in 1..31) {
+                        val maxDay = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
+                        cal.set(Calendar.DAY_OF_MONTH, anchorDay.coerceAtMost(maxDay))
+                    }
+                }
                 YEARLY -> cal.add(Calendar.YEAR, 1)
             }
         } while (cal.timeInMillis <= nowMillis)

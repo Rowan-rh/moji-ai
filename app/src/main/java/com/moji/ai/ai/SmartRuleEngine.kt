@@ -92,10 +92,12 @@ class SmartRuleEngine(context: Context) {
         }
     }
 
+    @Synchronized
     private fun saveInternal(list: List<SmartConditionRule>) {
         prefs.edit().putString("smart_rules_json", jsonCodec.encodeToString(list)).apply()
     }
 
+    @Synchronized
     fun upsertRule(rule: SmartConditionRule) {
         val current = _rules.value.toMutableList()
         val idx = current.indexOfFirst { it.id == rule.id }
@@ -108,18 +110,21 @@ class SmartRuleEngine(context: Context) {
         saveInternal(current)
     }
 
+    @Synchronized
     fun toggleRuleEnabled(ruleId: Long, enabled: Boolean) {
         val updated = _rules.value.map { if (it.id == ruleId) it.copy(enabled = enabled) else it }
         _rules.value = updated
         saveInternal(updated)
     }
 
+    @Synchronized
     fun deleteRule(ruleId: Long) {
         val updated = _rules.value.filterNot { it.id == ruleId }
         _rules.value = updated
         saveInternal(updated)
     }
 
+    @Synchronized
     fun replaceAllRules(newRules: List<SmartConditionRule>) {
         _rules.value = newRules
         saveInternal(newRules)
@@ -128,6 +133,7 @@ class SmartRuleEngine(context: Context) {
     /**
      * 当分类被重命名或删除迁移时，同步级联更新条件规则中的 targetCategory
      */
+    @Synchronized
     fun migrateCategoryCascade(
         oldCategory: String,
         newCategory: String,
@@ -161,6 +167,7 @@ class SmartRuleEngine(context: Context) {
     /**
      * 当标签被重命名、合并或从规则中移除时，精确按 Token 级联更新条件规则中的 appendTag
      */
+    @Synchronized
     fun migrateTagCascade(
         oldTag: String,
         newTag: String?
@@ -204,10 +211,10 @@ class SmartRuleEngine(context: Context) {
         for (rule in activeRules) {
             if (rule.onlyExpense && currentTx.type != TransactionType.EXPENSE) continue
 
-            // 1. 关键词匹配
+            // 1. 关键词匹配（仅按逗号/顿号/竖线切分，保留英文品牌名如 "Apple Music"、"Sam's Club" 中的内部空格）
             if (rule.keywordContains.isNotBlank()) {
                 val keywords = rule.keywordContains
-                    .split(",", "，", "|", " ")
+                    .split(",", "，", "|", "、")
                     .map { it.trim() }
                     .filter { it.isNotEmpty() }
                 if (keywords.isNotEmpty() && keywords.none { kw -> haystack.contains(kw, ignoreCase = true) }) {

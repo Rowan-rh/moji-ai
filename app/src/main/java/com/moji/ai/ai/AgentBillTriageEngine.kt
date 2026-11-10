@@ -6,6 +6,7 @@ import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.service.BillScreenshotStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -21,6 +22,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
+import java.net.URLEncoder
 import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -231,15 +233,7 @@ class AgentBillTriageEngine(
             if (path.isNullOrBlank()) return null
             return runCatching {
                 val f = File(path)
-                if (!f.exists() || !f.isFile) return null
-                val canonical = f.canonicalPath.replace('\\', '/')
-                if (canonical.contains("/files/bill_screenshots/") &&
-                    f.extension.equals("webp", ignoreCase = true)
-                ) {
-                    f
-                } else {
-                    null
-                }
+                if (BillScreenshotStorage.isSafeScreenshotFile(f)) f else null
             }.getOrNull()
         }
     }
@@ -256,28 +250,35 @@ class AgentBillTriageEngine(
             (it.type == TransactionType.EXPENSE || it.type == TransactionType.INCOME) &&
                 it.category != CategoryCatalog.SYSTEM_BALANCE_ANCHOR_CATEGORY
         }
-        val evidenceByTxId = captureEvidences
-            .mapNotNull { ev -> ev.transactionId?.let { txId -> txId to ev } }
-            .toMap()
+        val evidencesByTxId = captureEvidences
+            .filter { it.transactionId > 0L }
+            .groupBy { it.transactionId }
 
         val pendingList = eligibleTxs.filter { CategoryCatalog.isPendingTriage(it.category) }
-        val screenshotCount = eligibleTxs.count {
-            it.screenshotPath.isNotBlank() || !evidenceByTxId[it.id]?.screenshotPath.isNullOrBlank()
+        val screenshotCount = eligibleTxs.count { tx ->
+            tx.screenshotPath.isNotBlank() ||
+                evidencesByTxId[tx.id].orEmpty().any { it.screenshotPath.isNotBlank() }
         }
 
         val reclassifyItems = mutableListOf<TriageBillItem>()
         val categoryBuckets = linkedMapOf<String, ProposedCategoryItem>()
         val ruleBuckets = linkedMapOf<String, ProposedRuleItem>()
         val memoryBuckets = linkedMapOf<String, ProposedMemoryItem>()
+        val pendingProposals = mutableListOf<Triple<Long, ProposedRuleItem?, ProposedMemoryItem?>>()
 
         for (tx in eligibleTxs) {
-            val ev = evidenceByTxId[tx.id]
-            val resolvedScreenshot = tx.screenshotPath.takeIf { it.isNotBlank() } ?: ev?.screenshotPath
+            val txEvidences = evidencesByTxId[tx.id].orEmpty()
+            val resolvedScreenshot = tx.screenshotPath.takeIf { it.isNotBlank() }
+                ?: txEvidences.asReversed().firstNotNullOfOrNull { it.screenshotPath.takeIf { p -> p.isNotBlank() } }
             val combinedText = buildString {
                 append(tx.merchant).append(" ")
                 append(tx.note).append(" ")
                 append(tx.rawCapturedText).append(" ")
-                if (ev != null) append(ev.rawText)
+                for (ev in txEvidences) {
+                    if (ev.rawText.isNotBlank()) {
+                        append(ev.rawText).append(" ")
+                    }
+                }
             }.trim()
 
             val isPending = CategoryCatalog.isPendingTriage(tx.category)
@@ -331,36 +332,8 @@ class AgentBillTriageEngine(
                 )
             }
 
-            // 归纳 When -> Then 条件规则提案
-            inference.proposedRule?.let { draftRule ->
-                val alreadyHasRule = existingRules.any {
-                    it.targetCategory == draftRule.rule.targetCategory &&
-                        it.keywordContains.equals(draftRule.rule.keywordContains, ignoreCase = true)
-                }
-                if (!alreadyHasRule) {
-                    val prev = ruleBuckets[draftRule.id]
-                    ruleBuckets[draftRule.id] = if (prev == null) {
-                        draftRule
-                    } else {
-                        prev.copy(matchedCount = prev.matchedCount + 1)
-                    }
-                }
-            }
-
-            // 归纳商户记忆提案
-            inference.proposedMemory?.let { draftMem ->
-                val alreadyHasMem = existingMemories.any {
-                    it.merchantKeyword.equals(draftMem.merchantKeyword, ignoreCase = true) &&
-                        it.category == draftMem.targetCategory
-                }
-                if (!alreadyHasMem) {
-                    val prev = memoryBuckets[draftMem.id]
-                    memoryBuckets[draftMem.id] = if (prev == null) {
-                        draftMem
-                    } else {
-                        prev.copy(matchedCount = prev.matchedCount + 1)
-                    }
-                }
+            if (inference.proposedRule != null || inference.proposedMemory != null) {
+                pendingProposals.add(Triple(tx.id, inference.proposedRule, inference.proposedMemory))
             }
         }
 
@@ -374,6 +347,50 @@ class AgentBillTriageEngine(
                 expenseCategories = expenseCategories,
                 incomeCategories = incomeCategories
             )
+        }
+
+        val finalSuggestedByTxId = reclassifyItems.associate { it.transactionId to it.suggestedCategory }
+        for ((txId, draftRuleRaw, draftMemRaw) in pendingProposals) {
+            val finalCat = finalSuggestedByTxId[txId]
+            val draftRule = if (draftRuleRaw != null && !finalCat.isNullOrBlank() && finalCat != draftRuleRaw.rule.targetCategory) {
+                val newRuleKey = "RULE:$finalCat:${draftRuleRaw.rule.keywordContains}"
+                draftRuleRaw.copy(
+                    id = newRuleKey,
+                    rule = draftRuleRaw.rule.copy(targetCategory = finalCat)
+                )
+            } else {
+                draftRuleRaw
+            }
+            draftRule?.let { r ->
+                val alreadyHasRule = existingRules.any {
+                    it.targetCategory == r.rule.targetCategory &&
+                        it.keywordContains.equals(r.rule.keywordContains, ignoreCase = true)
+                }
+                if (!alreadyHasRule) {
+                    val prev = ruleBuckets[r.id]
+                    ruleBuckets[r.id] = if (prev == null) r else prev.copy(matchedCount = prev.matchedCount + 1)
+                }
+            }
+
+            val draftMem = if (draftMemRaw != null && !finalCat.isNullOrBlank() && finalCat != draftMemRaw.targetCategory) {
+                draftMemRaw.copy(
+                    id = "MEM:${draftMemRaw.merchantKeyword}:$finalCat",
+                    targetCategory = finalCat,
+                    reason = "记住商户「${draftMemRaw.merchantKeyword}」习惯分类为「$finalCat」"
+                )
+            } else {
+                draftMemRaw
+            }
+            draftMem?.let { m ->
+                val alreadyHasMem = existingMemories.any {
+                    it.merchantKeyword.equals(m.merchantKeyword, ignoreCase = true) &&
+                        it.category == m.targetCategory
+                }
+                if (!alreadyHasMem) {
+                    val prev = memoryBuckets[m.id]
+                    memoryBuckets[m.id] = if (prev == null) m else prev.copy(matchedCount = prev.matchedCount + 1)
+                }
+            }
         }
 
         val finalCategories = categoryBuckets.values.toList()
@@ -678,7 +695,7 @@ class AgentBillTriageEngine(
         if (rule.onlyExpense && !isExpense) return false
         if (rule.keywordContains.isNotBlank()) {
             val keywords = rule.keywordContains
-                .split(",", "，", "|", " ")
+                .split(",", "，", "|", "、")
                 .map { it.trim() }
                 .filter { it.isNotEmpty() }
             if (keywords.isNotEmpty() && keywords.none { kw -> combinedText.contains(kw, ignoreCase = true) }) {
@@ -803,23 +820,28 @@ class AgentBillTriageEngine(
                 val typeTag = if (item.type == TransactionType.INCOME) "收入" else "支出"
                 "- id=${item.transactionId}, 类型=$typeTag, 商户=${item.merchant}, 备注=${item.note}, 金额=¥${String.format(Locale.US, "%.2f", item.amountCnyCents / 100.0)}, 证据=${item.evidenceSnippet}, 初筛建议=${item.suggestedCategory}"
             }
+            val screenshotOwner = sampleItems.firstNotNullOfOrNull { item ->
+                resolveSafeScreenshotFile(item.screenshotPath)?.let { file ->
+                    if (file.length() in 1..512_000) {
+                        runCatching { Base64.encodeToString(file.readBytes(), Base64.NO_WRAP) }.getOrNull()
+                            ?.let { encoded -> item.transactionId to encoded }
+                    } else null
+                }
+            }
+            val base64Screenshot = screenshotOwner?.second
+            val screenshotNotice = if (screenshotOwner != null) {
+                "\n（注意：随附的截图图片仅属于账单 id=${screenshotOwner.first}，切勿将其商品内容套用到其他 id 的账单）"
+            } else ""
+
             val prompt = """
                 你是默记(MoJi)的智能记账分类梳理 Agent。
                 当前支出分类树：$expSummary
                 当前收入分类树：$incSummary
                 待梳理账单列表：
-                $billsPrompt
+                $billsPrompt$screenshotNotice
                 请核对每笔账单最贴合的「一级-二级」分类（若现有分类不足，可提出「一级-新二级」分类）。
                 严格只返回 JSON 数组：[{"id":123,"category":"餐饮-夜宵","reason":"简短理由"}]
             """.trimIndent()
-
-            val base64Screenshot = sampleItems
-                .firstNotNullOfOrNull { resolveSafeScreenshotFile(it.screenshotPath) }
-                ?.let { file ->
-                    if (file.length() in 1..512_000) {
-                        runCatching { Base64.encodeToString(file.readBytes(), Base64.NO_WRAP) }.getOrNull()
-                    } else null
-                }
 
             val rawResp = if (cfg.provider == AiProviderType.GEMINI_OFFICIAL) {
                 callGeminiTriage(cfg, prompt, base64Screenshot)
@@ -891,7 +913,8 @@ class AgentBillTriageEngine(
 
     private fun callGeminiTriage(cfg: AiConfig, prompt: String, base64Webp: String?): String? {
         val baseUrl = cfg.baseUrl.trimEnd('/').ifBlank { "https://generativelanguage.googleapis.com/v1beta" }
-        val url = "$baseUrl/models/${cfg.modelName}:generateContent?key=${cfg.apiKey}"
+        val encodedModel = URLEncoder.encode(cfg.modelName.trim(), "UTF-8")
+        val url = "$baseUrl/models/$encodedModel:generateContent"
         val bodyJson = buildJsonObject {
             put("contents", buildJsonArray {
                 add(buildJsonObject {
@@ -911,6 +934,11 @@ class AgentBillTriageEngine(
         }
         val req = Request.Builder()
             .url(url)
+            .apply {
+                if (cfg.apiKey.isNotBlank()) {
+                    addHeader("x-goog-api-key", cfg.apiKey)
+                }
+            }
             .post(json.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), bodyJson).toRequestBody("application/json".toMediaType()))
             .build()
         httpClient.newCall(req).execute().use { resp ->

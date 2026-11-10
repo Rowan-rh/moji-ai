@@ -90,6 +90,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -188,7 +189,10 @@ import com.moji.ai.ui.theme.iCostPressScale
 import com.moji.ai.ui.theme.preloadAllICostAssets
 import java.util.Calendar
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1081,12 +1085,12 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     initialTab = backupInitialTab,
                     statusMessage = sandboxStatus,
                     webDavConfig = webDavConfig,
-                    onPreviewCsv = { csv -> viewModel.previewCsvImport(csv) },
+                    onPreviewCsv = { csv -> viewModel.previewCsvImportAsync(csv) },
                     onCommitCsvImport = { csv, applyBalance, onDone ->
                         viewModel.commitCsvImport(csv, applyBalance, onDone)
                     },
-                    onExportCsv = { viewModel.generateCsvExportString() },
-                    onExportFullBackup = { viewModel.generateFullBackupJson() },
+                    onExportCsv = { viewModel.buildCsvExportString() },
+                    onExportFullBackup = { viewModel.buildFullBackupJson() },
                     onRestoreFullBackup = { json, onDone ->
                         viewModel.restoreFromBackupJson(json, onDone)
                     },
@@ -2763,9 +2767,25 @@ private fun isAccessibilityServiceEnabled(context: Context): Boolean {
     return RomKeepAliveGuideHelper.checkAccessibilityServiceEnabled(context)
 }
 
-private fun readUriTextWithAutoCharset(context: Context, uri: Uri): String? {
-    return runCatching {
-        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
+private const val MAX_IMPORT_RAW_BYTES = 25 * 1024 * 1024
+
+private suspend fun readUriTextWithAutoCharset(context: Context, uri: Uri): String? = withContext(Dispatchers.IO) {
+    runCatching {
+        val bytes = context.contentResolver.openInputStream(uri)?.use { input ->
+            val out = java.io.ByteArrayOutputStream()
+            val buf = ByteArray(8192)
+            var total = 0
+            while (true) {
+                val n = input.read(buf)
+                if (n < 0) break
+                total += n
+                if (total > MAX_IMPORT_RAW_BYTES) {
+                    throw IllegalArgumentException("导入文件超过 25MB 大小限制")
+                }
+                out.write(buf, 0, n)
+            }
+            out.toByteArray()
+        } ?: return@withContext null
         BackupAndCsvTransferEngine.extractTextOrXlsxToCsv(bytes)
     }.getOrNull()
 }
@@ -2779,16 +2799,17 @@ private fun BackupAndCsvTransferSheet(
     initialTab: Int,
     statusMessage: String?,
     webDavConfig: WebDavConfig = WebDavConfig(),
-    onPreviewCsv: (String) -> CsvParsePreviewResult,
+    onPreviewCsv: suspend (String) -> CsvParsePreviewResult,
     onCommitCsvImport: (String, Boolean, (String) -> Unit) -> Unit,
-    onExportCsv: () -> String,
-    onExportFullBackup: () -> String,
+    onExportCsv: suspend () -> String,
+    onExportFullBackup: suspend () -> String,
     onRestoreFullBackup: (String, (String) -> Unit) -> Unit,
     onUploadWebDav: (WebDavConfig, (String) -> Unit) -> Unit = { _, _ -> },
     onRestoreWebDav: (WebDavConfig, (String) -> Unit) -> Unit = { _, _ -> },
     onClose: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var currentTab by remember(initialTab) { mutableIntStateOf(initialTab) }
     var csvText by remember { mutableStateOf("") }
     var showDavPassword by remember { mutableStateOf(false) }
@@ -2798,6 +2819,7 @@ private fun BackupAndCsvTransferSheet(
     var exportedCsvText by remember { mutableStateOf("") }
     var backupJsonText by remember { mutableStateOf("") }
     var localBanner by remember { mutableStateOf<String?>(null) }
+    var isWorking by remember { mutableStateOf(false) }
 
     var davUrl by remember(webDavConfig) { mutableStateOf(webDavConfig.serverUrl) }
     var davUser by remember(webDavConfig) { mutableStateOf(webDavConfig.username) }
@@ -2812,14 +2834,22 @@ private fun BackupAndCsvTransferSheet(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         if (uri != null) {
-            val loaded = readUriTextWithAutoCharset(context, uri)
-            if (!loaded.isNullOrBlank()) {
-                csvText = loaded
-                val parsed = onPreviewCsv(loaded)
-                previewResult = parsed
-                localBanner = "已解析文件：${parsed.detectedSourceFormat}（共 ${parsed.parsedTransactions.size} 笔流水，新建 ${parsed.newWalletsToCreate.size} 个账户）"
-            } else {
-                localBanner = "文件无法解析，请选择有效的 iCost Excel(.xlsx) 或 CSV 文件"
+            scope.launch {
+                isWorking = true
+                localBanner = "正在读取并解析文件…"
+                try {
+                    val loaded = readUriTextWithAutoCharset(context, uri)
+                    if (!loaded.isNullOrBlank()) {
+                        csvText = loaded
+                        val parsed = onPreviewCsv(loaded)
+                        previewResult = parsed
+                        localBanner = "已解析文件：${parsed.detectedSourceFormat}（共 ${parsed.parsedTransactions.size} 笔流水，新建 ${parsed.newWalletsToCreate.size} 个账户）"
+                    } else {
+                        localBanner = "文件无法解析或超过 25MB，请选择有效的 iCost Excel(.xlsx) 或 CSV 文件"
+                    }
+                } finally {
+                    isWorking = false
+                }
             }
         }
     }
@@ -2897,8 +2927,10 @@ private fun BackupAndCsvTransferSheet(
                                     val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
                                     if (!clipText.isNullOrBlank()) {
                                         csvText = clipText
-                                        previewResult = onPreviewCsv(csvText)
-                                        localBanner = "已从剪贴板粘贴并解析 CSV"
+                                        scope.launch {
+                                            previewResult = onPreviewCsv(clipText)
+                                            localBanner = "已从剪贴板粘贴并解析 CSV"
+                                        }
                                     } else {
                                         localBanner = "剪贴板为空"
                                     }
@@ -2907,26 +2939,46 @@ private fun BackupAndCsvTransferSheet(
                             )
                             AssistChip(
                                 onClick = {
-                                    csvText = BackupAndCsvTransferEngine.SAMPLE_ICOST_FULL_CSV
-                                    previewResult = onPreviewCsv(csvText)
-                                    localBanner = "已载入 iCost「多账本 + 资产账户 + 账单」全量迁移示例"
+                                    val sample = BackupAndCsvTransferEngine.SAMPLE_ICOST_FULL_CSV
+                                    csvText = sample
+                                    scope.launch {
+                                        previewResult = onPreviewCsv(sample)
+                                        localBanner = "已载入 iCost「多账本 + 资产账户 + 账单」全量迁移示例"
+                                    }
                                 },
                                 label = { Text("iCost 账本+资产示例", fontSize = 12.sp) }
                             )
                             AssistChip(
                                 onClick = {
-                                    csvText = BackupAndCsvTransferEngine.SAMPLE_WECHAT_CSV
-                                    previewResult = onPreviewCsv(csvText)
-                                    localBanner = "已载入微信支付官方 CSV 示例"
+                                    val sample = BackupAndCsvTransferEngine.SAMPLE_WECHAT_CSV
+                                    csvText = sample
+                                    scope.launch {
+                                        previewResult = onPreviewCsv(sample)
+                                        localBanner = "已载入微信支付官方 CSV 示例"
+                                    }
                                 },
                                 label = { Text("微信账单示例", fontSize = 12.sp) }
                             )
+                            if (csvText.isNotEmpty()) {
+                                AssistChip(
+                                    onClick = {
+                                        csvText = ""
+                                        previewResult = null
+                                        localBanner = "已清空待导入内容"
+                                    },
+                                    label = { Text("清空重填", fontSize = 12.sp) }
+                                )
+                            }
                         }
 
-                        val displayCsvPreview = remember(csvText) {
-                            val lines = csvText.lines()
-                            if (lines.size > 25) {
-                                lines.take(25).joinToString("\n") + "\n...（共 ${lines.size} 行，完整内容已载入内存）"
+                        val isLargeCsvLoaded = remember(csvText) {
+                            csvText.lineSequence().take(26).count() > 25
+                        }
+                        val displayCsvPreview = remember(csvText, isLargeCsvLoaded) {
+                            if (isLargeCsvLoaded) {
+                                val totalLines = csvText.lineSequence().count()
+                                csvText.lineSequence().take(25).joinToString("\n") +
+                                    "\n...（共 $totalLines 行，完整内容已载入内存；大文件预览锁定只读，点击「清空重填」可重新粘贴）"
                             } else {
                                 csvText
                             }
@@ -2935,11 +2987,14 @@ private fun BackupAndCsvTransferSheet(
                         ICostFormField(
                             value = displayCsvPreview,
                             onValueChange = {
-                                csvText = it
-                                previewResult = null
+                                if (!isLargeCsvLoaded) {
+                                    csvText = it
+                                    previewResult = null
+                                }
                             },
-                            label = "表格内容（支持 .xlsx / CSV）",
+                            label = if (isLargeCsvLoaded) "表格预览（大文件只读保护）" else "表格内容（支持 .xlsx / CSV）",
                             placeholder = "点击上方「选择 Excel / CSV 文件」或粘贴 CSV 文本",
+                            readOnly = isLargeCsvLoaded,
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = false,
                             minLines = 4,
@@ -2997,8 +3052,18 @@ private fun BackupAndCsvTransferSheet(
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
                         OutlinedButton(
-                            onClick = { previewResult = onPreviewCsv(csvText) },
-                            enabled = csvText.isNotBlank(),
+                            onClick = {
+                                val targetCsv = csvText
+                                scope.launch {
+                                    isWorking = true
+                                    try {
+                                        previewResult = onPreviewCsv(targetCsv)
+                                    } finally {
+                                        isWorking = false
+                                    }
+                                }
+                            },
+                            enabled = csvText.isNotBlank() && !isWorking,
                             shape = RoundedCornerShape(16.dp),
                             modifier = Modifier
                                 .weight(1f)
@@ -3008,12 +3073,20 @@ private fun BackupAndCsvTransferSheet(
                         }
                         Button(
                             onClick = {
-                                onCommitCsvImport(csvText, applyImportToWalletBalance) { msg ->
+                                val targetCsv = csvText
+                                isWorking = true
+                                onCommitCsvImport(targetCsv, applyImportToWalletBalance) { msg ->
                                     localBanner = msg
-                                    previewResult = onPreviewCsv(csvText)
+                                    scope.launch {
+                                        try {
+                                            previewResult = onPreviewCsv(targetCsv)
+                                        } finally {
+                                            isWorking = false
+                                        }
+                                    }
                                 }
                             },
-                            enabled = canCommit,
+                            enabled = canCommit && !isWorking,
                             colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
                             shape = RoundedCornerShape(16.dp),
                             modifier = Modifier
@@ -3128,10 +3201,18 @@ private fun BackupAndCsvTransferSheet(
                         ) {
                             Button(
                                 onClick = {
-                                    val csv = onExportCsv()
-                                    exportedCsvText = csv
-                                    localBanner = "已生成 ${(csv.lines().size - 1).coerceAtLeast(0)} 条账单 CSV 报表"
+                                    scope.launch {
+                                        isWorking = true
+                                        try {
+                                            val csv = onExportCsv()
+                                            exportedCsvText = csv
+                                            localBanner = "已生成 ${(csv.lineSequence().count() - 1).coerceAtLeast(0)} 条账单 CSV 报表"
+                                        } finally {
+                                            isWorking = false
+                                        }
+                                    }
                                 },
+                                enabled = !isWorking,
                                 colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
                                 shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier
@@ -3184,11 +3265,19 @@ private fun BackupAndCsvTransferSheet(
                         ) {
                             Button(
                                 onClick = {
-                                    val json = onExportFullBackup()
-                                    backupJsonText = json
-                                    clipboard?.setPrimaryClip(ClipData.newPlainText("MoJi_Backup", json))
-                                    localBanner = "备份已生成并复制到剪贴板"
+                                    scope.launch {
+                                        isWorking = true
+                                        try {
+                                            val json = onExportFullBackup()
+                                            backupJsonText = json
+                                            clipboard?.setPrimaryClip(ClipData.newPlainText("MoJi_Backup", json))
+                                            localBanner = "备份已生成并复制到剪贴板"
+                                        } finally {
+                                            isWorking = false
+                                        }
+                                    }
                                 },
+                                enabled = !isWorking,
                                 colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
                                 shape = RoundedCornerShape(14.dp),
                                 modifier = Modifier

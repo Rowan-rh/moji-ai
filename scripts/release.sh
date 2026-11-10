@@ -65,7 +65,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
   command -v gh >/dev/null || die "未安装 gh"
   [[ "$(gh api user --jq .login)" == "$OWNER" ]] || die "gh 当前登录账号不是 ${OWNER}"
   [[ "$(git branch --show-current)" == "main" ]] || die "请在 main 分支上发布（发布 PR 合并后 git switch main && git pull）"
-  [[ -z "$(git status --porcelain --untracked-files=no)" ]] || die "工作区有未提交的改动"
+  [[ -z "$(git status --porcelain)" ]] || die "工作区存在未提交改动或未跟踪文件，请先清理后再执行正式发布"
   git fetch origin main --tags --quiet
   [[ "$(git rev-parse HEAD)" == "$(git rev-parse origin/main)" ]] || die "本地 main 与 origin/main 不一致，请先 git pull"
   git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null && die "Tag ${TAG} 已存在；已推送的 Tag 不移动，请先升 versionName / versionCode"
@@ -75,6 +75,12 @@ if [[ $DRY_RUN -eq 0 ]]; then
     NEWEST="$(printf '%s\n%s\n' "${LATEST_TAG#v}" "$VERSION_NAME" | sort -V | tail -n1)"
     [[ "$NEWEST" == "$VERSION_NAME" && "${LATEST_TAG#v}" != "$VERSION_NAME" ]] \
       || die "版本 ${VERSION_NAME} 不高于已发布的 ${LATEST_TAG}，用户端不会收到更新"
+    if git rev-parse -q --verify "refs/tags/${LATEST_TAG}" >/dev/null; then
+      PREV_CODE="$(git show "${LATEST_TAG}:app/build.gradle.kts" 2>/dev/null | sed -nE 's/^[[:space:]]*versionCode[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' | head -n1 || true)"
+      if [[ -n "$PREV_CODE" && "$VERSION_CODE" -le "$PREV_CODE" ]]; then
+        die "versionCode (${VERSION_CODE}) 必须严格大于上一发布版 ${LATEST_TAG} 的 versionCode (${PREV_CODE})"
+      fi
+    fi
     info "当前最新 Release：${LATEST_TAG}"
   fi
   [[ -z "$NOTES_FILE" || -f "$NOTES_FILE" ]] || die "更新说明文件不存在：$NOTES_FILE"
@@ -108,6 +114,7 @@ SDK_DIR="$(prop sdk.dir)"
 SDK_DIR="${SDK_DIR:-${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}}"
 APKSIGNER="$(ls -d "$SDK_DIR"/build-tools/*/ 2>/dev/null | sort -V | tail -n1)apksigner"
 [[ -x "$APKSIGNER" ]] || die "找不到 apksigner（Android SDK build-tools）：$APKSIGNER"
+"$APKSIGNER" verify --verbose "$APK" >/dev/null || die "APK apksigner verify 签名完整性校验未通过"
 CERT_SHA256="$("$APKSIGNER" verify --print-certs "$APK" | sed -nE 's/.*certificate SHA-256 digest: ([0-9a-f]+).*/\1/p' | head -n1)"
 [[ -n "$CERT_SHA256" ]] || die "APK 签名校验失败"
 info "签名证书 SHA-256：${CERT_SHA256}"

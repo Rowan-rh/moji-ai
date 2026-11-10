@@ -46,6 +46,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.moji.ai.data.model.AppLockManager
 import com.moji.ai.data.model.PinVerifyResult
 import com.moji.ai.ui.theme.ICDinFontFamily
@@ -89,9 +91,9 @@ fun AppLockUnlockOverlay(
     var cooldownSeconds by remember { mutableIntStateOf(AppLockManager.getRemainingCooldownSeconds()) }
     var showHintExpanded by remember { mutableStateOf(false) }
 
-    LaunchedEffect(cooldownSeconds) {
-        if (cooldownSeconds > 0) {
-            delay(1000L)
+    LaunchedEffect(cooldownSeconds > 0) {
+        while (cooldownSeconds > 0) {
+            delay(250L)
             val next = AppLockManager.getRemainingCooldownSeconds()
             cooldownSeconds = next
             if (next > 0) {
@@ -136,29 +138,41 @@ fun AppLockUnlockOverlay(
         }
     }
 
-    AppLockKeypadScaffold(
-        title = "请输入默记安全密码",
-        subtitle = "输入 4 位数字安全密码以解锁账本",
-        enteredLength = enteredPin.length,
-        errorMessage = errorMessage,
-        isCooldownLocked = cooldownSeconds > 0,
-        pinHint = pinHint,
-        showHintExpanded = showHintExpanded,
-        onToggleHint = { showHintExpanded = !showHintExpanded },
-        topLeftButton = null,
-        secondaryActionText = null,
-        onSecondaryAction = null,
-        onDigitClick = handleDigit,
-        onClearClick = {
-            enteredPin = ""
-            if (cooldownSeconds <= 0) errorMessage = null
-        },
-        onDeleteClick = {
-            if (enteredPin.isNotEmpty()) {
-                enteredPin = enteredPin.dropLast(1)
+    // 使用独立窗口级不可关闭 Dialog 挂载解锁层，彻底隔离底层 Activity 的无障碍焦点树、软键盘输入焦点与预测性返回手势
+    Dialog(
+        onDismissRequest = {},
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false
+        )
+    ) {
+        BackHandler(enabled = true) {}
+        AppLockKeypadScaffold(
+            title = "请输入默记安全密码",
+            subtitle = "输入 4 位数字安全密码以解锁账本",
+            enteredLength = enteredPin.length,
+            errorMessage = errorMessage,
+            isCooldownLocked = cooldownSeconds > 0,
+            pinHint = pinHint,
+            showHintExpanded = showHintExpanded,
+            onToggleHint = { showHintExpanded = !showHintExpanded },
+            topLeftButton = null,
+            secondaryActionText = null,
+            onSecondaryAction = null,
+            onDigitClick = handleDigit,
+            onClearClick = {
+                enteredPin = ""
+                if (cooldownSeconds <= 0) errorMessage = null
+            },
+            onDeleteClick = {
+                if (enteredPin.isNotEmpty()) {
+                    enteredPin = enteredPin.dropLast(1)
+                }
             }
-        }
-    )
+        )
+    }
 }
 
 /**
@@ -201,9 +215,9 @@ fun AppLockPinFlowOverlay(
 
     BackHandler(onBack = handleBackOrClose)
 
-    LaunchedEffect(cooldownSeconds) {
-        if (cooldownSeconds > 0) {
-            delay(1000L)
+    LaunchedEffect(cooldownSeconds > 0) {
+        while (cooldownSeconds > 0) {
+            delay(250L)
             val next = AppLockManager.getRemainingCooldownSeconds()
             cooldownSeconds = next
             if (next > 0) {

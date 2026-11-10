@@ -21,9 +21,12 @@ app/build/
 # Local configuration file (sdk path, etc)
 local.properties
 
-# Release signing keys
+# Release signing keys & local backups
 *.jks
 *.keystore
+*.p12
+*.pfx
+*.mojibackup
 
 # Android Studio / IntelliJ
 *.iml

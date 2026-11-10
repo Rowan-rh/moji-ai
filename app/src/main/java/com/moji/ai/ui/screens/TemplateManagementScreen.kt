@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -76,6 +77,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TagCatalog
@@ -276,6 +278,8 @@ private fun TemplateManagementContent(
         modifier = Modifier
             .fillMaxSize()
             .background(ICostBgGray)
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -434,17 +438,27 @@ private fun TemplateManagementContent(
                 itemsIndexed(
                     items = filteredWithGlobalIndex,
                     key = { _, pair -> pair.second.id }
-                ) { _, (globalIdx, tpl) ->
+                ) { filteredIdx, (globalIdx, tpl) ->
                     TemplateManagementCard(
                         tpl = tpl,
-                        globalIndex = globalIdx,
-                        totalSize = templates.size,
+                        canMoveUp = filteredIdx > 0,
+                        canMoveDown = filteredIdx < filteredWithGlobalIndex.lastIndex,
                         walletMap = walletMap,
                         defaultWallet = defaultWallet,
                         onApplyNow = { onApplyTemplateNow(tpl) },
                         onFillCalculator = { onFillCalculator(tpl) },
-                        onMoveUp = { onMoveTemplate(globalIdx, -1) },
-                        onMoveDown = { onMoveTemplate(globalIdx, 1) },
+                        onMoveUp = {
+                            if (filteredIdx > 0) {
+                                val prevGlobalIdx = filteredWithGlobalIndex[filteredIdx - 1].first
+                                onMoveTemplate(globalIdx, prevGlobalIdx - globalIdx)
+                            }
+                        },
+                        onMoveDown = {
+                            if (filteredIdx < filteredWithGlobalIndex.lastIndex) {
+                                val nextGlobalIdx = filteredWithGlobalIndex[filteredIdx + 1].first
+                                onMoveTemplate(globalIdx, nextGlobalIdx - globalIdx)
+                            }
+                        },
                         onDuplicate = { onDuplicateTemplate(tpl.id) },
                         onEdit = { onEditTemplate(tpl) },
                         onDelete = { onRequestDelete(tpl) }
@@ -576,7 +590,7 @@ private fun TemplateEmptyCard(
                     }
                     Surface(
                         shape = RoundedCornerShape(16.dp),
-                        color = Color(0xFFFFF3E0),
+                        color = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF332614) else Color(0xFFFFF3E0),
                         modifier = Modifier.iCostPressScale(pressedScale = 0.94f, onClick = onLoadPresetTemplates)
                     ) {
                         Row(
@@ -608,8 +622,8 @@ private fun TemplateEmptyCard(
 @Composable
 private fun TemplateManagementCard(
     tpl: QuickBookkeepingTemplate,
-    globalIndex: Int,
-    totalSize: Int,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
     walletMap: Map<Long, WalletEntity>,
     defaultWallet: WalletEntity?,
     onApplyNow: () -> Unit,
@@ -718,7 +732,7 @@ private fun TemplateManagementCard(
                 } else {
                     Surface(
                         shape = RoundedCornerShape(8.dp),
-                        color = Color(0xFFFFF3E0)
+                        color = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF332614) else Color(0xFFFFF3E0)
                     ) {
                         Text(
                             text = "待填金额",
@@ -823,13 +837,13 @@ private fun TemplateManagementCard(
                     TemplateSmallIconBtn(
                         icon = Icons.Default.KeyboardArrowUp,
                         contentDescription = "上移${tpl.title}",
-                        enabled = globalIndex > 0,
+                        enabled = canMoveUp,
                         onClick = onMoveUp
                     )
                     TemplateSmallIconBtn(
                         icon = Icons.Default.KeyboardArrowDown,
                         contentDescription = "下移${tpl.title}",
-                        enabled = globalIndex < totalSize - 1,
+                        enabled = canMoveDown,
                         onClick = onMoveDown
                     )
                     TemplateSmallIconBtn(

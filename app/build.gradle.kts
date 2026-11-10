@@ -67,6 +67,8 @@ android {
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
+            // 正式发布包禁止把本机 local.properties 中的开发者 Token 打进公开 APK DEX
+            buildConfigField("String", "GITHUB_UPDATE_TOKEN", "\"\"")
             isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

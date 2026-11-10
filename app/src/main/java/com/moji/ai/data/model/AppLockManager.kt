@@ -2,11 +2,14 @@ package com.moji.ai.data.model
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.os.SystemClock
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.security.MessageDigest
 import java.security.SecureRandom
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.PBEKeySpec
 import kotlin.math.ceil
 
 data class PasswordProtectionConfig(
@@ -47,6 +50,8 @@ object AppLockManager {
     const val MAX_FAILED_ATTEMPTS = 5
     const val COOLDOWN_DURATION_MILLIS = 30_000L
     const val MAX_PIN_HINT_LENGTH = 20
+    private const val PBKDF2_ITERATIONS = 120_000
+    private const val PBKDF2_KEY_BITS = 256
     val SUPPORTED_TIMEOUT_SECONDS = listOf(0, 60, 300)
 
     private val secureRandom = SecureRandom()
@@ -63,6 +68,11 @@ object AppLockManager {
     private val _isSessionLockedFlow = MutableStateFlow(false)
     val isSessionLockedFlow: StateFlow<Boolean> = _isSessionLockedFlow.asStateFlow()
 
+    private fun defaultMonotonicMillis(): Long {
+        val elapsed = runCatching { SystemClock.elapsedRealtime() }.getOrDefault(0L)
+        return if (elapsed > 0L) elapsed else System.currentTimeMillis()
+    }
+
     @Synchronized
     fun init(context: Context) {
         val sp = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -77,7 +87,14 @@ object AppLockManager {
             pinHint = (sp.getString(KEY_PIN_HINT, "") ?: "").take(MAX_PIN_HINT_LENGTH)
         )
         failedAttempts = sp.getInt(KEY_FAILED_ATTEMPTS, 0).coerceIn(0, MAX_FAILED_ATTEMPTS)
-        cooldownUntilMillis = sp.getLong(KEY_COOLDOWN_UNTIL, 0L).coerceAtLeast(0L)
+        val now = System.currentTimeMillis()
+        // 钳制持久化冷却时间不超过当前时刻 + 30 秒，防止系统时钟曾被大幅调快又调回后导致永久锁死
+        val rawCooldownUntil = sp.getLong(KEY_COOLDOWN_UNTIL, 0L).coerceAtLeast(0L)
+        cooldownUntilMillis = if (rawCooldownUntil > now + COOLDOWN_DURATION_MILLIS) {
+            now + COOLDOWN_DURATION_MILLIS
+        } else {
+            rawCooldownUntil
+        }
         lastBackgroundedAtMillis = 0L
         _isSessionLockedFlow.value = enabled
     }
@@ -96,11 +113,52 @@ object AppLockManager {
 
     fun generateSaltHex(): String = ByteArray(16).also { secureRandom.nextBytes(it) }.joinToString("") { "%02x".format(it) }
 
-    fun hashPin(pin: String, salt: String): String =
-        MessageDigest.getInstance("SHA-256").digest("$salt:$pin".toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+    /**
+     * 使用 PBKDF2-HMAC-SHA256（120,000 轮迭代，256-bit 输出）派生 PIN 摘要，抵御对 10,000 种 4 位 PIN 的瞬间离线穷举。
+     */
+    fun hashPin(pin: String, salt: String): String {
+        val spec = PBEKeySpec(
+            pin.toCharArray(),
+            salt.toByteArray(Charsets.UTF_8),
+            PBKDF2_ITERATIONS,
+            PBKDF2_KEY_BITS
+        )
+        return try {
+            SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                .generateSecret(spec)
+                .encoded
+                .joinToString("") { "%02x".format(it) }
+        } finally {
+            spec.clearPassword()
+        }
+    }
+
+    internal fun legacySha256HashPin(pin: String, salt: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest("$salt:$pin".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+    private fun constantTimeEqualsHex(a: String, b: String): Boolean =
+        MessageDigest.isEqual(a.toByteArray(Charsets.UTF_8), b.toByteArray(Charsets.UTF_8))
+
+    private fun matchesStoredPin(pin: String, salt: String, storedHash: String): Pair<Boolean, Boolean> {
+        if (salt.isBlank() || storedHash.isBlank()) return false to false
+        val pbkdf2Hex = hashPin(pin, salt)
+        if (constantTimeEqualsHex(pbkdf2Hex, storedHash)) {
+            return true to false
+        }
+        val legacyHex = legacySha256HashPin(pin, salt)
+        if (constantTimeEqualsHex(legacyHex, storedHash)) {
+            return true to true
+        }
+        return false to false
+    }
 
     @Synchronized
     fun validatePinHint(rawHint: String, candidatePin: String? = null): Result<String> {
+        if (_isSessionLockedFlow.value && candidatePin == null) {
+            return Result.failure(IllegalStateException("请先解锁应用后再修改密码提示语"))
+        }
         val trimmed = rawHint.trim()
         if (trimmed.length > MAX_PIN_HINT_LENGTH) {
             return Result.failure(IllegalArgumentException("密码提示语不能超过 $MAX_PIN_HINT_LENGTH 个字符"))
@@ -111,7 +169,7 @@ object AppLockManager {
         if (pinSalt.isNotBlank() && pinHash.isNotBlank() && trimmed.length >= 4) {
             for (i in 0..(trimmed.length - 4)) {
                 val sub = trimmed.substring(i, i + 4)
-                if (isValidPinFormat(sub) && hashPin(sub, pinSalt) == pinHash) {
+                if (isValidPinFormat(sub) && matchesStoredPin(sub, pinSalt, pinHash).first) {
                     return Result.failure(IllegalArgumentException("密码提示语不能包含当前密码本身"))
                 }
             }
@@ -120,17 +178,33 @@ object AppLockManager {
     }
 
     @Synchronized
-    fun getRemainingCooldownSeconds(nowMillis: Long = System.currentTimeMillis()): Int =
-        if (nowMillis >= cooldownUntilMillis) 0 else ceil((cooldownUntilMillis - nowMillis) / 1000.0).toInt().coerceAtLeast(1)
+    fun getRemainingCooldownSeconds(nowMillis: Long = System.currentTimeMillis()): Int {
+        if (cooldownUntilMillis > nowMillis + COOLDOWN_DURATION_MILLIS) {
+            cooldownUntilMillis = nowMillis + COOLDOWN_DURATION_MILLIS
+            persistAttemptState()
+        }
+        return if (nowMillis >= cooldownUntilMillis) {
+            0
+        } else {
+            ceil((cooldownUntilMillis - nowMillis) / 1000.0).toInt().coerceAtLeast(1)
+        }
+    }
 
     @Synchronized
     fun verifyPin(pin: String, unlockSessionOnSuccess: Boolean = true, nowMillis: Long = System.currentTimeMillis()): PinVerifyResult {
         val remainingCooldown = getRemainingCooldownSeconds(nowMillis)
         if (remainingCooldown > 0) return PinVerifyResult.CooldownLocked(remainingCooldown, "错误次数过多，请 $remainingCooldown 秒后再试")
         if (!isValidPinFormat(pin)) return PinVerifyResult.InvalidFormat("请输入 4 位数字密码")
-        if (pinSalt.isNotBlank() && pinHash.isNotBlank() && hashPin(pin, pinSalt) == pinHash) {
+        val (matched, needsPbkdf2Upgrade) = matchesStoredPin(pin, pinSalt, pinHash)
+        if (matched) {
             failedAttempts = 0; cooldownUntilMillis = 0L
-            persistAttemptState()
+            if (needsPbkdf2Upgrade) {
+                pinSalt = generateSaltHex()
+                pinHash = hashPin(pin, pinSalt)
+                persist(_configFlow.value)
+            } else {
+                persistAttemptState()
+            }
             if (unlockSessionOnSuccess) _isSessionLockedFlow.value = false
             return PinVerifyResult.Success
         }
@@ -197,30 +271,40 @@ object AppLockManager {
     }
 
     @Synchronized
-    fun updateLockTimeout(timeoutSeconds: Int): PasswordProtectionConfig =
-        _configFlow.value.copy(lockTimeoutSeconds = normalizeTimeout(timeoutSeconds)).also { persist(it) }
+    fun updateLockTimeout(timeoutSeconds: Int): PasswordProtectionConfig {
+        if (_isSessionLockedFlow.value) return _configFlow.value
+        return _configFlow.value.copy(lockTimeoutSeconds = normalizeTimeout(timeoutSeconds)).also { persist(it) }
+    }
 
     @Synchronized
-    fun updateHideRecentTaskPreview(hide: Boolean): PasswordProtectionConfig =
-        _configFlow.value.copy(hideRecentTaskPreview = hide).also { persist(it) }
+    fun updateHideRecentTaskPreview(hide: Boolean): PasswordProtectionConfig {
+        if (_isSessionLockedFlow.value) return _configFlow.value
+        return _configFlow.value.copy(hideRecentTaskPreview = hide).also { persist(it) }
+    }
 
     @Synchronized
     fun updatePinHint(rawHint: String): Result<PasswordProtectionConfig> {
+        if (_isSessionLockedFlow.value) {
+            return Result.failure(IllegalStateException("请先解锁应用后再修改密码提示语"))
+        }
         val clean = validatePinHint(rawHint).getOrElse { return Result.failure(it) }
         return Result.success(_configFlow.value.copy(pinHint = clean).also { persist(it) })
     }
 
     @Synchronized
-    fun onAppBackgrounded(nowMillis: Long = System.currentTimeMillis()) {
+    fun onAppBackgrounded(nowMillis: Long = defaultMonotonicMillis()) {
         if (!_configFlow.value.enabled) return
         lastBackgroundedAtMillis = nowMillis
         if (_configFlow.value.lockTimeoutSeconds == 0) _isSessionLockedFlow.value = true
     }
 
     @Synchronized
-    fun onAppForegrounded(nowMillis: Long = System.currentTimeMillis()) {
+    fun onAppForegrounded(nowMillis: Long = defaultMonotonicMillis()) {
         if (!_configFlow.value.enabled || lastBackgroundedAtMillis <= 0L) return
-        if (nowMillis - lastBackgroundedAtMillis >= _configFlow.value.lockTimeoutSeconds * 1000L) _isSessionLockedFlow.value = true
+        val elapsed = nowMillis - lastBackgroundedAtMillis
+        if (elapsed < 0L || elapsed >= _configFlow.value.lockTimeoutSeconds * 1000L) {
+            _isSessionLockedFlow.value = true
+        }
         lastBackgroundedAtMillis = 0L
     }
 

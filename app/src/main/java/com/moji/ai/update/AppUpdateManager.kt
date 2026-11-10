@@ -2,11 +2,14 @@ package com.moji.ai.update
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import com.moji.ai.BuildConfig
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,10 +24,12 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.io.FileOutputStream
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 data class AppUpdateConfig(
@@ -52,7 +57,8 @@ data class ReleaseUpdateInfo(
     val browserDownloadUrl: String,
     val htmlUrl: String,
     val isPrerelease: Boolean,
-    val repoIsPrivate: Boolean
+    val repoIsPrivate: Boolean,
+    val sha256Digest: String = ""
 )
 
 sealed class UpdateCheckState {
@@ -107,6 +113,11 @@ class AppUpdateManager(context: Context) {
         .followSslRedirects(true)
         .build()
 
+    private val noRedirectHttpClient = httpClient.newBuilder()
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
+
     private val _configFlow = MutableStateFlow(loadConfig())
     val configFlow: StateFlow<AppUpdateConfig> = _configFlow.asStateFlow()
 
@@ -125,11 +136,16 @@ class AppUpdateManager(context: Context) {
     }
 
     fun updateConfig(newConfig: AppUpdateConfig) {
-        val normalizedRepo = newConfig.repoFullName.trim()
+        val candidateRepo = newConfig.repoFullName.trim()
             .removePrefix("https://github.com/")
             .removePrefix("http://github.com/")
             .trim('/')
             .ifBlank { "Rowan-rh/moji-ai" }
+        val normalizedRepo = if (REPO_FULL_NAME_REGEX.matches(candidateRepo)) {
+            candidateRepo
+        } else {
+            BuildConfig.GITHUB_UPDATE_REPO.ifBlank { "Rowan-rh/moji-ai" }
+        }
         val sanitized = newConfig.copy(
             repoFullName = normalizedRepo,
             customGithubToken = newConfig.customGithubToken.trim()
@@ -173,6 +189,12 @@ class AppUpdateManager(context: Context) {
                 _stateFlow.value = qaUpToDate
             }
             return@withContext qaUpToDate
+        }
+
+        if (!REPO_FULL_NAME_REGEX.matches(repo)) {
+            val invalidErr = UpdateCheckState.Error("GitHub 仓库名称格式无效（应为 owner/repo）", needTokenConfig = false)
+            if (isManual) _stateFlow.value = invalidErr
+            return@withContext invalidErr
         }
 
         if (isManual) {
@@ -258,6 +280,7 @@ class AppUpdateManager(context: Context) {
             _stateFlow.value = available
             available
         }.getOrElse { e ->
+            if (e is CancellationException) throw e
             val err = UpdateCheckState.Error(
                 message = "检查更新失败：${e.localizedMessage ?: "网络连接异常"}",
                 needTokenConfig = false
@@ -294,7 +317,7 @@ class AppUpdateManager(context: Context) {
                     val draft = obj["draft"]?.jsonPrimitive?.booleanOrNull ?: false
                     val prerelease = obj["prerelease"]?.jsonPrimitive?.booleanOrNull ?: false
                     !draft && (includePrerelease || !prerelease)
-                } ?: arr.firstOrNull()?.jsonObject
+                }
         }
     }
 
@@ -330,6 +353,12 @@ class AppUpdateManager(context: Context) {
         val apkSize = apkAsset["size"]?.jsonPrimitive?.longOrNull ?: 0L
         val assetApiUrl = apkAsset["url"]?.jsonPrimitive?.contentOrNull.orEmpty()
         val browserUrl = apkAsset["browser_download_url"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val rawDigest = apkAsset["digest"]?.jsonPrimitive?.contentOrNull.orEmpty().trim()
+        val sha256Digest = if (rawDigest.startsWith("sha256:", ignoreCase = true)) {
+            rawDigest.substringAfter(':').trim().takeIf { it.length == 64 } ?: ""
+        } else {
+            ""
+        }
         if (assetApiUrl.isBlank() && browserUrl.isBlank()) return null
 
         return ReleaseUpdateInfo(
@@ -343,12 +372,14 @@ class AppUpdateManager(context: Context) {
             browserDownloadUrl = browserUrl,
             htmlUrl = htmlUrl,
             isPrerelease = isPrerelease,
-            repoIsPrivate = repoIsPrivate
+            repoIsPrivate = repoIsPrivate,
+            sha256Digest = sha256Digest
         )
     }
 
     /**
-     * 下载 Release APK（兼容私有仓库 API Asset URL + `Accept: application/octet-stream` 鉴权流式下载）
+     * 下载 Release APK（兼容私有仓库 API Asset URL + `Accept: application/octet-stream` 鉴权流式下载，
+     * 并在跨域重定向时剥离 Authorization 头、校验文件字节数、SHA-256 摘要以及 APK 包名与签名证书一致性）
      */
     suspend fun downloadReleaseApk(release: ReleaseUpdateInfo): UpdateCheckState = withContext(Dispatchers.IO) {
         val token = _configFlow.value.effectiveToken
@@ -356,6 +387,15 @@ class AppUpdateManager(context: Context) {
         val safeFileName = release.apkFileName.replace(Regex("""[^a-zA-Z0-9._-]"""), "_")
         val targetFile = File(updatesDir, safeFileName)
         val tempFile = File(updatesDir, "$safeFileName.tmp")
+
+        // 下载前清理历史残留的旧版 .apk / .tmp 文件，避免缓存累积
+        runCatching {
+            updatesDir.listFiles()?.forEach { f ->
+                if (f.isFile && (f.name.endsWith(".apk", ignoreCase = true) || f.name.endsWith(".tmp", ignoreCase = true))) {
+                    f.delete()
+                }
+            }
+        }
 
         _stateFlow.value = UpdateCheckState.Downloading(
             release = release,
@@ -365,23 +405,56 @@ class AppUpdateManager(context: Context) {
         )
 
         runCatching {
-            // 私有仓库或已配置 Token 时，必须请求 GitHub API Asset URL 并携带 Accept: application/octet-stream
-            val downloadUrl = if (release.assetApiUrl.isNotBlank() && (release.repoIsPrivate || token.isNotBlank())) {
+            val initialUrlStr = if (release.assetApiUrl.isNotBlank() && (release.repoIsPrivate || token.isNotBlank())) {
                 release.assetApiUrl
             } else {
                 release.browserDownloadUrl.ifBlank { release.assetApiUrl }
             }
-
-            val reqBuilder = Request.Builder()
-                .url(downloadUrl)
-                .header("Accept", "application/octet-stream")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .header("User-Agent", "MoJi-Android/${BuildConfig.VERSION_NAME}")
-            if (token.isNotBlank()) {
-                reqBuilder.header("Authorization", "Bearer $token")
+            val parsedInitialUrl = initialUrlStr.toHttpUrlOrNull()
+            if (parsedInitialUrl == null || !parsedInitialUrl.isHttps || !isTrustedGitHubHost(parsedInitialUrl.host)) {
+                val err = UpdateCheckState.Error("下载地址不受信任或非 HTTPS 安全连接，已拦截下载")
+                _stateFlow.value = err
+                return@withContext err
             }
 
-            httpClient.newCall(reqBuilder.build()).execute().use { response ->
+            // 仅当目标域名严格为 api.github.com 时才附加 Bearer Token；若收到 301/302 重定向至对象存储则不携带 Token 请求直链
+            val resolvedStreamResponse = if (parsedInitialUrl.host.equals("api.github.com", ignoreCase = true) && token.isNotBlank()) {
+                val apiReq = Request.Builder()
+                    .url(parsedInitialUrl)
+                    .header("Accept", "application/octet-stream")
+                    .header("X-GitHub-Api-Version", "2022-11-28")
+                    .header("User-Agent", "MoJi-Android/${BuildConfig.VERSION_NAME}")
+                    .header("Authorization", "Bearer $token")
+                    .build()
+                val firstResp = noRedirectHttpClient.newCall(apiReq).execute()
+                if (firstResp.code in listOf(301, 302, 303, 307, 308)) {
+                    val redirectLoc = firstResp.header("Location").orEmpty()
+                    firstResp.close()
+                    val redirectUrl = redirectLoc.toHttpUrlOrNull()
+                    if (redirectUrl == null || !redirectUrl.isHttps) {
+                        val err = UpdateCheckState.Error("下载重定向地址非 HTTPS 安全连接，已拦截下载")
+                        _stateFlow.value = err
+                        return@withContext err
+                    }
+                    val cdnReq = Request.Builder()
+                        .url(redirectUrl)
+                        .header("User-Agent", "MoJi-Android/${BuildConfig.VERSION_NAME}")
+                        .build()
+                    httpClient.newCall(cdnReq).execute()
+                } else {
+                    firstResp
+                }
+            } else {
+                val publicReq = Request.Builder()
+                    .url(parsedInitialUrl)
+                    .header("Accept", "application/octet-stream")
+                    .header("User-Agent", "MoJi-Android/${BuildConfig.VERSION_NAME}")
+                    .build()
+                httpClient.newCall(publicReq).execute()
+            }
+
+            var computedSha256Hex = ""
+            resolvedStreamResponse.use { response ->
                 if (!response.isSuccessful) {
                     val err = UpdateCheckState.Error(
                         message = "下载安装包失败（HTTP ${response.code}），请检查网络或 Token 权限",
@@ -400,6 +473,7 @@ class AppUpdateManager(context: Context) {
                 val contentLength = body.contentLength().takeIf { it > 0L } ?: release.apkSizeBytes
                 var downloaded = 0L
                 var lastEmitTime = 0L
+                val sha256Digest = MessageDigest.getInstance("SHA-256")
 
                 body.byteStream().use { input ->
                     FileOutputStream(tempFile).use { output ->
@@ -407,7 +481,11 @@ class AppUpdateManager(context: Context) {
                         var read: Int
                         while (input.read(buffer).also { read = it } != -1) {
                             output.write(buffer, 0, read)
+                            sha256Digest.update(buffer, 0, read)
                             downloaded += read
+                            if (downloaded > MAX_APK_DOWNLOAD_BYTES) {
+                                throw IllegalStateException("安装包体积超过安全上限")
+                            }
                             val now = System.currentTimeMillis()
                             if (now - lastEmitTime >= 100L || downloaded == contentLength) {
                                 lastEmitTime = now
@@ -425,18 +503,44 @@ class AppUpdateManager(context: Context) {
                         output.flush()
                     }
                 }
+                if (release.apkSizeBytes > 0L && downloaded != release.apkSizeBytes) {
+                    tempFile.delete()
+                    val err = UpdateCheckState.Error("安装包下载不完整（已下载 $downloaded / 预期 ${release.apkSizeBytes} 字节），请重试")
+                    _stateFlow.value = err
+                    return@withContext err
+                }
+                computedSha256Hex = sha256Digest.digest().joinToString("") { "%02x".format(it) }
             }
 
-            // 校验 APK 文件头（ZIP PK\x03\x04）
+            if (release.sha256Digest.isNotBlank() &&
+                !computedSha256Hex.equals(release.sha256Digest, ignoreCase = true)
+            ) {
+                tempFile.delete()
+                val err = UpdateCheckState.Error("安装包 SHA-256 完整性校验未通过，已拒绝安装")
+                _stateFlow.value = err
+                return@withContext err
+            }
+
+            // 校验 APK 文件头（ZIP PK\x03\x04）及包名、签名证书一致性
             if (!isValidApkFile(tempFile)) {
                 tempFile.delete()
                 val err = UpdateCheckState.Error("下载的文件不是有效的 APK 安装包，请检查 Release 附件")
                 _stateFlow.value = err
                 return@withContext err
             }
+            val archiveVerifyErr = verifyDownloadedApkPackageAndSignature(tempFile)
+            if (archiveVerifyErr != null) {
+                tempFile.delete()
+                val err = UpdateCheckState.Error(archiveVerifyErr)
+                _stateFlow.value = err
+                return@withContext err
+            }
 
             if (targetFile.exists()) targetFile.delete()
-            tempFile.renameTo(targetFile)
+            if (!tempFile.renameTo(targetFile)) {
+                tempFile.copyTo(targetFile, overwrite = true)
+                tempFile.delete()
+            }
 
             val needsPerm = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
                 !appContext.packageManager.canRequestPackageInstalls()
@@ -450,6 +554,7 @@ class AppUpdateManager(context: Context) {
             readyState
         }.getOrElse { e ->
             tempFile.delete()
+            if (e is CancellationException) throw e
             val err = UpdateCheckState.Error("下载失败：${e.localizedMessage ?: "网络中断"}")
             _stateFlow.value = err
             err
@@ -469,6 +574,11 @@ class AppUpdateManager(context: Context) {
             _stateFlow.value = UpdateCheckState.Error("安装包文件不存在，请重新下载")
             return false
         }
+        val archiveVerifyErr = verifyDownloadedApkPackageAndSignature(apkFile)
+        if (archiveVerifyErr != null) {
+            _stateFlow.value = UpdateCheckState.Error(archiveVerifyErr)
+            return false
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             !context.packageManager.canRequestPackageInstalls()
@@ -479,7 +589,11 @@ class AppUpdateManager(context: Context) {
             ).apply {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(permIntent)
+            val opened = runCatching { context.startActivity(permIntent) }.isSuccess
+            if (!opened) {
+                _stateFlow.value = UpdateCheckState.Error("无法打开系统安装未知应用授权页面，请在系统设置中手动开启")
+                return false
+            }
             val current = _stateFlow.value
             if (current is UpdateCheckState.ReadyToInstall) {
                 _stateFlow.value = current.copy(needsInstallPermission = true)
@@ -487,18 +601,91 @@ class AppUpdateManager(context: Context) {
             return false
         }
 
-        val apkUri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            apkFile
-        )
-        val installIntent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(apkUri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return runCatching {
+            val apkUri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                apkFile
+            )
+            val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(apkUri, "application/vnd.android.package-archive")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(installIntent)
+            true
+        }.getOrElse { e ->
+            _stateFlow.value = UpdateCheckState.Error("无法调起系统安装器：${e.localizedMessage ?: "未找到安装组件"}")
+            false
         }
-        context.startActivity(installIntent)
-        return true
+    }
+
+    private fun verifyDownloadedApkPackageAndSignature(apkFile: File): String? {
+        return runCatching {
+            val pm = appContext.packageManager
+            val archiveInfo: PackageInfo? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getPackageArchiveInfo(
+                    apkFile.absolutePath,
+                    PackageManager.PackageInfoFlags.of(PackageManager.GET_SIGNING_CERTIFICATES.toLong())
+                )
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                @Suppress("DEPRECATION")
+                pm.getPackageArchiveInfo(apkFile.absolutePath, PackageManager.GET_SIGNING_CERTIFICATES)
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getPackageArchiveInfo(apkFile.absolutePath, PackageManager.GET_SIGNATURES)
+            }
+            if (archiveInfo == null) {
+                return "无法解析 APK 包信息，安装包可能已损坏"
+            }
+            if (archiveInfo.packageName != appContext.packageName) {
+                return "安装包应用包名（${archiveInfo.packageName}）与当前应用不一致，已拦截安装"
+            }
+            val archiveCertDigests = extractCertSha256Set(archiveInfo)
+            if (archiveCertDigests.isEmpty()) {
+                return "安装包缺少有效签名证书，已拒绝安装"
+            }
+            val installedInfo: PackageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getPackageInfo(
+                    appContext.packageName,
+                    PackageManager.PackageInfoFlags.of(PackageManager.GET_SIGNING_CERTIFICATES.toLong())
+                )
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                @Suppress("DEPRECATION")
+                pm.getPackageInfo(appContext.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getPackageInfo(appContext.packageName, PackageManager.GET_SIGNATURES)
+            }
+            val installedCertDigests = extractCertSha256Set(installedInfo)
+            if (installedCertDigests.isNotEmpty() && archiveCertDigests.intersect(installedCertDigests).isEmpty()) {
+                return "安装包签名证书与当前已安装版本不一致，无法覆盖安装"
+            }
+            null
+        }.getOrElse {
+            "校验安装包签名时发生异常，已中止安装"
+        }
+    }
+
+    private fun extractCertSha256Set(pkgInfo: PackageInfo): Set<String> {
+        val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val signingInfo = pkgInfo.signingInfo ?: return emptySet()
+            if (signingInfo.hasMultipleSigners()) {
+                signingInfo.apkContentsSigners
+            } else {
+                signingInfo.signingCertificateHistory
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            pkgInfo.signatures
+        } ?: return emptySet()
+        return signatures.mapNotNull { sig ->
+            runCatching {
+                MessageDigest.getInstance("SHA-256")
+                    .digest(sig.toByteArray())
+                    .joinToString("") { "%02x".format(it) }
+            }.getOrNull()
+        }.toSet()
     }
 
     private fun isValidApkFile(file: File): Boolean {
@@ -523,27 +710,73 @@ class AppUpdateManager(context: Context) {
         private const val KEY_AUTO_CHECK = "auto_check_on_launch"
         private const val KEY_INCLUDE_PRERELEASE = "include_prerelease"
         private const val KEY_IGNORED_TAG = "ignored_release_tag"
+        private const val MAX_APK_DOWNLOAD_BYTES = 256L * 1024L * 1024L
+
+        private val REPO_FULL_NAME_REGEX = Regex("""^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$""")
+        private val TRUSTED_GITHUB_HOSTS = setOf(
+            "api.github.com",
+            "github.com",
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com"
+        )
+
+        fun isTrustedGitHubHost(host: String): Boolean {
+            val lower = host.lowercase()
+            return lower in TRUSTED_GITHUB_HOSTS || lower.endsWith(".githubusercontent.com")
+        }
 
         /**
-         * 对比远端 Release Tag（如 `v1.1.0`、`v1.0.0-20261108`）与当前 `versionName`（如 `1.0.0`）
+         * 对比远端 Release Tag（如 `v1.1.1`、`v1.1.1-rc1`、`v1.0.0-20261108`）与当前 `versionName`（如 `1.1.1`）：
+         * 严格遵循 SemVer 规则：相同主版本核心号下，正式版高于预发布后缀（如 `1.1.1 > 1.1.1-rc1`），纯日期构建号后缀则按数值递增比较。
          */
         fun isNewerVersion(remoteTag: String, currentVersion: String): Boolean {
-            val cleanRemote = remoteTag.trim().removePrefix("v").removePrefix("V")
-            val cleanCurrent = currentVersion.trim().removePrefix("v").removePrefix("V")
+            val cleanRemote = remoteTag.trim().removePrefix("v").removePrefix("V").substringBefore('+')
+            val cleanCurrent = currentVersion.trim().removePrefix("v").removePrefix("V").substringBefore('+')
+            if (cleanRemote.isBlank() || cleanCurrent.isBlank()) return false
             if (cleanRemote.equals(cleanCurrent, ignoreCase = true)) return false
 
-            val remoteParts = cleanRemote.split('.', '-', '_')
-                .mapNotNull { it.toLongOrNull() }
-            val currentParts = cleanCurrent.split('.', '-', '_')
-                .mapNotNull { it.toLongOrNull() }
+            val remoteCoreStr = cleanRemote.substringBefore('-')
+            val remoteSuffix = cleanRemote.substringAfter('-', "")
+            val currentCoreStr = cleanCurrent.substringBefore('-')
+            val currentSuffix = cleanCurrent.substringAfter('-', "")
 
-            val maxLen = maxOf(remoteParts.size, currentParts.size)
-            for (i in 0 until maxLen) {
-                val r = remoteParts.getOrElse(i) { 0L }
-                val c = currentParts.getOrElse(i) { 0L }
+            val remoteCore = remoteCoreStr.split('.').map { it.toLongOrNull() ?: 0L }
+            val currentCore = currentCoreStr.split('.').map { it.toLongOrNull() ?: 0L }
+            val maxCoreLen = maxOf(remoteCore.size, currentCore.size)
+            for (i in 0 until maxCoreLen) {
+                val r = remoteCore.getOrElse(i) { 0L }
+                val c = currentCore.getOrElse(i) { 0L }
                 if (r != c) return r > c
             }
-            return cleanRemote != cleanCurrent
+
+            if (remoteSuffix.isEmpty() && currentSuffix.isEmpty()) return false
+            val remoteIsNumericBuild = remoteSuffix.isNotEmpty() && remoteSuffix.all { it.isDigit() && remoteSuffix.length >= 6 }
+            val currentIsNumericBuild = currentSuffix.isNotEmpty() && currentSuffix.all { it.isDigit() && currentSuffix.length >= 6 }
+
+            // 若后缀是纯日期时间戳（如 1.0.0-20261108），则高于无后缀同版本号；若包含字母（如 alpha/beta/rc/qa），则为预发布版，低于正式版
+            if (remoteSuffix.isEmpty() && currentSuffix.isNotEmpty()) {
+                return !currentIsNumericBuild
+            }
+            if (remoteSuffix.isNotEmpty() && currentSuffix.isEmpty()) {
+                return remoteIsNumericBuild
+            }
+
+            val rTokens = remoteSuffix.split('.', '-', '_')
+            val cTokens = currentSuffix.split('.', '-', '_')
+            val maxTok = maxOf(rTokens.size, cTokens.size)
+            for (i in 0 until maxTok) {
+                val rt = rTokens.getOrNull(i) ?: return false
+                val ct = cTokens.getOrNull(i) ?: return true
+                val rn = rt.toLongOrNull()
+                val cn = ct.toLongOrNull()
+                if (rn != null && cn != null) {
+                    if (rn != cn) return rn > cn
+                } else {
+                    val cmp = rt.compareTo(ct, ignoreCase = true)
+                    if (cmp != 0) return cmp > 0
+                }
+            }
+            return false
         }
     }
 }

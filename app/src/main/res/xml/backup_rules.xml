@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <exclude domain="database" path="moji_ai.db" />
+    <exclude domain="database" path="moji_ai.db-shm" />
+    <exclude domain="database" path="moji_ai.db-wal" />
+    <exclude domain="file" path="bill_screenshots" />
+    <exclude domain="sharedpref" path="moji_ai_config_prefs.xml" />
+    <exclude domain="sharedpref" path="moji_webdav_prefs.xml" />
+    <exclude domain="sharedpref" path="moji_app_update_prefs.xml" />
+    <exclude domain="sharedpref" path="moji_app_lock_prefs.xml" />
+</full-backup-content>
