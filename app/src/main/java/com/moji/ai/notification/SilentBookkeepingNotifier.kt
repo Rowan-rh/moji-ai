@@ -327,10 +327,12 @@ class SilentBookkeepingNotifier(private val context: Context) {
             .setContentIntent(openPending)
             .addExtras(fluidExtras)
             .addAction(0, "撤销入账", undoPending)
-            .addAction(0, "切换分类", cycleCatPending)
 
-        if (tx.type == TransactionType.EXPENSE && !tx.reimbursable) {
-            builder.addAction(0, "标为待报销", reimbursePending)
+        if (tx.type == TransactionType.EXPENSE) {
+            builder.addAction(0, "切换分类", cycleCatPending)
+            if (!tx.reimbursable) {
+                builder.addAction(0, "标为待报销", reimbursePending)
+            }
         }
 
         NotificationManagerCompat.from(context).notify(notifId, builder.build())
@@ -576,10 +578,16 @@ class TransactionActionReceiver : BroadcastReceiver() {
                     SilentBookkeepingNotifier.ACTION_CYCLE_CATEGORY -> {
                         if (txId <= 0L) return@launch
                         val existing = app.database.transactionDao().getTransactionById(txId) ?: return@launch
+                        if (existing.type != TransactionType.EXPENSE) return@launch
                         val cycleList = SilentBookkeepingNotifier.QUICK_CYCLE_CATEGORIES
                         val curIdx = cycleList.indexOf(existing.category)
                         val nextCat = cycleList[(curIdx + 1) % cycleList.size]
-                        val updated = existing.copy(category = nextCat)
+                        val updated = existing.copy(
+                            category = nextCat,
+                            updatedAtMillis = System.currentTimeMillis(),
+                            syncRevision = existing.syncRevision + 1,
+                            syncDirty = true
+                        )
                         app.repository.updateExistingTransaction(updated)
                         app.merchantMemoryManager.learnFromTransaction(updated)
                         val wallets = app.repository.getAllWallets()
@@ -589,13 +597,20 @@ class TransactionActionReceiver : BroadcastReceiver() {
                     SilentBookkeepingNotifier.ACTION_MARK_REIMBURSABLE -> {
                         if (txId <= 0L) return@launch
                         val existing = app.database.transactionDao().getTransactionById(txId) ?: return@launch
-                        val updated = existing.copy(reimbursable = true)
+                        if (existing.type != TransactionType.EXPENSE) return@launch
+                        val updated = existing.copy(
+                            reimbursable = true,
+                            updatedAtMillis = System.currentTimeMillis(),
+                            syncRevision = existing.syncRevision + 1,
+                            syncDirty = true
+                        )
                         app.repository.updateExistingTransaction(updated)
                         val wallets = app.repository.getAllWallets()
                         app.notifier.sendSilentRecordedNotification(updated, wallets)
                     }
 
                     SilentBookkeepingNotifier.ACTION_CLEAR_ALL_TRANSACTIONS -> {
+                        if (!BuildConfig.IS_QA_BUILD) return@launch
                         app.captureCoordinator.clearAllTransactionsAndResetState(context)
                         NotificationManagerCompat.from(context).cancelAll()
                     }

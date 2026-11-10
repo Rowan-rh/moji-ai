@@ -827,9 +827,10 @@ $recentDesc
         sourceAppPackage: String,
         wallets: List<WalletEntity>,
         recentExpenses: List<TransactionEntity>,
-        referenceMillis: Long = System.currentTimeMillis()
+        referenceMillis: Long = System.currentTimeMillis(),
+        captureMode: String = ""
     ): AiParsedTransactionResult? {
-        if (isNonTransactionNotificationOrPromo(rawText, sourceAppPackage)) {
+        if (isNonTransactionNotificationOrPromo(rawText, sourceAppPackage, captureMode)) {
             return null
         }
         // 1. 先截断拼多多/京东/淘宝底部推荐商品瀑布流，修复端侧 OCR 常见形近字，再合并拆分金额（如 "¥ | 29 | .90"、"¥29 | .90"、"¥ | 29. | 90" -> "¥29.90"）
@@ -953,11 +954,15 @@ $recentDesc
             labels = listOf("商户单号", "商家订单号", "商户订单号")
         )
         val orderKey = extractedTxNo.ifBlank { extractedMerchantOrderNo }
+        val allowReferenceTimeFallback = captureMode == "AI_NOTIFICATION" ||
+            captureMode == "AI_SANDBOX" ||
+            rawText.contains("[AI_NOTIFICATION") ||
+            rawText.contains("[AI_SANDBOX")
         val occurredAtMillis = extractOccurredTimeMillis(
             text = if (payTimeVal.isNotBlank()) "$payTimeVal | $strippedText" else strippedText,
             referenceMillis = referenceMillis,
             orderKey = orderKey
-        ) ?: return null
+        ) ?: referenceMillis.takeIf { allowReferenceTimeFallback } ?: return null
 
         // 1. 识别币种与【原价 / 优惠 / 实扣】三元组（iCost 模板规范）
         val currency = when {
@@ -1084,9 +1089,15 @@ $recentDesc
         if (isRefundEvent) {
             val receiveWallet = matchWalletForPayment(payMethodVal, strippedText, sourceAppPackage, wallets)
             val targetCents = (amount * 100).roundToLong()
-            val matchedExpense = recentExpenses.firstOrNull {
-                (orderKey.isNotBlank() && it.orderKey == orderKey) ||
-                    it.amountCnyCents == targetCents
+            val targetCurrency = CurrencyCode.fromCode(currency)
+            val targetCnyCents = (targetCents * CurrencyRateManager.getEffectiveRateToCny(targetCurrency)).roundToLong()
+            val matchedExpense = recentExpenses.firstOrNull { exp ->
+                (orderKey.isNotBlank() && exp.orderKey == orderKey) ||
+                    (exp.amountCnyCents == targetCnyCents &&
+                        exp.timestamp <= occurredAtMillis + 86_400_000L &&
+                        (extractedMerchant == "日常商户" ||
+                            exp.merchant.contains(extractedMerchant, ignoreCase = true) ||
+                            extractedMerchant.contains(exp.merchant, ignoreCase = true)))
             }
             val fallbackCategory = WeightedCategoryClassifier.classifyExpense(
                 "$extractedMerchant $goodsValue $billCategoryVal",
@@ -1762,7 +1773,7 @@ $recentDesc
 
     private fun defaultCategoryForType(type: TransactionType): String = when (type) {
         TransactionType.EXPENSE -> "餐饮"
-        TransactionType.INCOME -> "其他收入"
+        TransactionType.INCOME -> "其他"
         TransactionType.TRANSFER -> "内部转账"
         TransactionType.REPAYMENT -> "信用还款"
         TransactionType.REFUND_OFFSET -> "退款入账"

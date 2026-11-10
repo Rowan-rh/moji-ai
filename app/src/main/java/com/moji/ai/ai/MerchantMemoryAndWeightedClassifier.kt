@@ -42,6 +42,7 @@ class MerchantMemoryManager(context: Context) {
         return defaultSeedMemories()
     }
 
+    @Synchronized
     private fun saveEntries(list: List<MerchantMemoryEntry>) {
         val sorted = list.sortedWith(compareByDescending<MerchantMemoryEntry> { it.hitCount }.thenByDescending { it.updatedAtMillis })
             .take(300)
@@ -52,6 +53,7 @@ class MerchantMemoryManager(context: Context) {
     /**
      * 当用户保存或编辑交易时自动自学习商户偏好
      */
+    @Synchronized
     fun learnFromTransaction(tx: TransactionEntity) {
         if (tx.type != TransactionType.EXPENSE && tx.type != TransactionType.INCOME) return
         val normalized = normalizeMerchantKey(tx.merchant)
@@ -83,6 +85,7 @@ class MerchantMemoryManager(context: Context) {
         saveEntries(current)
     }
 
+    @Synchronized
     fun upsertMemory(keyword: String, category: String, preferredWalletId: Long? = null) {
         val normalized = normalizeMerchantKey(keyword)
         if (normalized.length < 2 || category.isBlank() || CategoryCatalog.isPendingTriage(category)) return
@@ -111,6 +114,7 @@ class MerchantMemoryManager(context: Context) {
         saveEntries(current)
     }
 
+    @Synchronized
     fun deleteMemory(keyword: String) {
         val updated = _memoriesFlow.value.filterNot { it.merchantKeyword.equals(keyword, ignoreCase = true) }
         saveEntries(updated)
@@ -119,6 +123,7 @@ class MerchantMemoryManager(context: Context) {
     /**
      * 当分类被重命名或删除迁移时，同步级联更新商户记忆库中的目标分类
      */
+    @Synchronized
     fun migrateCategoryCascade(
         oldCategory: String,
         newCategory: String,
@@ -151,16 +156,17 @@ class MerchantMemoryManager(context: Context) {
      */
     fun matchMemory(rawText: String, extractedMerchant: String = ""): MerchantMemoryEntry? {
         val entries = _memoriesFlow.value
+            .filter { it.merchantKeyword.length >= 2 }
+            .sortedByDescending { it.merchantKeyword.length }
         if (extractedMerchant.isNotBlank()) {
             val cleanMerchant = normalizeMerchantKey(extractedMerchant)
-            entries.firstOrNull {
-                cleanMerchant.contains(it.merchantKeyword, ignoreCase = true) ||
-                    it.merchantKeyword.contains(cleanMerchant, ignoreCase = true)
-            }?.let { return it }
+            if (cleanMerchant.length >= 2) {
+                entries.firstOrNull {
+                    cleanMerchant.contains(it.merchantKeyword, ignoreCase = true)
+                }?.let { return it }
+            }
         }
-        return entries
-            .sortedByDescending { it.merchantKeyword.length }
-            .firstOrNull { rawText.contains(it.merchantKeyword, ignoreCase = true) }
+        return entries.firstOrNull { rawText.contains(it.merchantKeyword, ignoreCase = true) }
     }
 
     private fun normalizeMerchantKey(raw: String): String {
@@ -190,20 +196,20 @@ class MerchantMemoryManager(context: Context) {
         )
 
         private fun defaultSeedMemories(): List<MerchantMemoryEntry> = listOf(
-            MerchantMemoryEntry("瑞幸咖啡", "餐饮-咖啡", 5L, 8),
-            MerchantMemoryEntry("星巴克", "餐饮-咖啡", 1L, 5),
-            MerchantMemoryEntry("Manner", "餐饮-咖啡", 5L, 4),
-            MerchantMemoryEntry("霸王茶姬", "餐饮-奶茶", 4L, 5),
-            MerchantMemoryEntry("喜茶", "餐饮-奶茶", 4L, 4),
-            MerchantMemoryEntry("蜜雪冰城", "餐饮-奶茶", 4L, 4),
-            MerchantMemoryEntry("唐久", "餐饮-零食", 5L, 6),
-            MerchantMemoryEntry("盒马", "餐饮-买菜", 5L, 7),
-            MerchantMemoryEntry("山姆会员商店", "购物-超市", 1L, 6),
-            MerchantMemoryEntry("叮咚买菜", "餐饮-买菜", 4L, 4),
-            MerchantMemoryEntry("滴滴出行", "交通-打车", 4L, 6),
-            MerchantMemoryEntry("12306", "交通-火车", 1L, 4),
-            MerchantMemoryEntry("GitHub", "应用软件", 1L, 3),
-            MerchantMemoryEntry("OpenAI", "应用软件", 1L, 3)
+            MerchantMemoryEntry("瑞幸咖啡", "餐饮-咖啡", null, 8),
+            MerchantMemoryEntry("星巴克", "餐饮-咖啡", null, 5),
+            MerchantMemoryEntry("Manner", "餐饮-咖啡", null, 4),
+            MerchantMemoryEntry("霸王茶姬", "餐饮-奶茶", null, 5),
+            MerchantMemoryEntry("喜茶", "餐饮-奶茶", null, 4),
+            MerchantMemoryEntry("蜜雪冰城", "餐饮-奶茶", null, 4),
+            MerchantMemoryEntry("唐久", "餐饮-零食", null, 6),
+            MerchantMemoryEntry("盒马", "餐饮-蔬菜", null, 7),
+            MerchantMemoryEntry("山姆会员商店", "购物-超市", null, 6),
+            MerchantMemoryEntry("叮咚买菜", "餐饮-蔬菜", null, 4),
+            MerchantMemoryEntry("滴滴出行", "交通-打车", null, 6),
+            MerchantMemoryEntry("12306", "交通-火车", null, 4),
+            MerchantMemoryEntry("GitHub", "应用软件", null, 3),
+            MerchantMemoryEntry("OpenAI", "应用软件", null, 3)
         )
     }
 }

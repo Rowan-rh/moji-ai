@@ -144,8 +144,12 @@ open class PaymentAccessibilityService : AccessibilityService() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val screenshotIoExecutor = Executors.newSingleThreadExecutor()
     private val scheduledProbes = mutableListOf<Runnable>()
+    @Volatile
+    private var ocrRecognizerInitialized = false
     private val chineseOcrRecognizer by lazy {
-        TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build())
+        TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build()).also {
+            ocrRecognizerInitialized = true
+        }
     }
 
     private var activePackage: String = ""
@@ -444,8 +448,9 @@ open class PaymentAccessibilityService : AccessibilityService() {
         }
 
         val hasAmount = containsLikelyBillAmount(fullPageText)
-        if (!hasAmount) {
-            if (allowAutoOcrFallback && shouldAttemptAutoOcr(pkg, fullPageText)) {
+        val hasOccurredTime = AiAccountingEngine.hasExplicitOccurredTime(fullPageText)
+        if (!hasAmount || (forceManual && !hasOccurredTime)) {
+            if (!forceManual && allowAutoOcrFallback && shouldAttemptAutoOcr(pkg, fullPageText)) {
                 captureScreenshotAndRunOcr(pkg, isManualTrigger = false, onResultMessage = null)
             }
             return false
@@ -455,7 +460,8 @@ open class PaymentAccessibilityService : AccessibilityService() {
         return dispatchCapturedText(
             fullPageText = fullPageText,
             pkg = pkg,
-            captureSource = "AI_ACCESSIBILITY"
+            captureSource = "AI_ACCESSIBILITY",
+            forceManual = forceManual
         )
     }
 
@@ -464,11 +470,12 @@ open class PaymentAccessibilityService : AccessibilityService() {
         pkg: String,
         captureSource: String,
         screenshotPath: String = "",
-        screenshotSha256: String = ""
+        screenshotSha256: String = "",
+        forceManual: Boolean = false
     ): Boolean {
         val now = System.currentTimeMillis()
         val pageIdentity = extractStablePageIdentity(pkg, fullPageText)
-        if (pageIdentity == lastDispatchedSignature && (now - lastDispatchedMillis) < 15_000L) {
+        if (!forceManual && pageIdentity == lastDispatchedSignature && (now - lastDispatchedMillis) < 15_000L) {
             return true
         }
         lastDispatchedSignature = pageIdentity
@@ -696,7 +703,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
             try {
                 takeScreenshot(
                     Display.DEFAULT_DISPLAY,
-                    mainExecutor,
+                    screenshotIoExecutor,
                     object : TakeScreenshotCallback {
                         override fun onSuccess(screenshotResult: ScreenshotResult) {
                             val hwBuffer = screenshotResult.hardwareBuffer
@@ -711,7 +718,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
                             }
 
                             if (rawBitmap == null) {
-                                onResultMessage?.invoke("截屏缓冲区转换失败")
+                                mainHandler.post { onResultMessage?.invoke("截屏缓冲区转换失败") }
                                 return
                             }
 
@@ -750,9 +757,10 @@ open class PaymentAccessibilityService : AccessibilityService() {
                                         pkg = pkg,
                                         captureSource = "AI_OCR",
                                         screenshotPath = savedScreenshot?.absolutePath.orEmpty(),
-                                        screenshotSha256 = savedScreenshot?.sha256.orEmpty()
+                                        screenshotSha256 = savedScreenshot?.sha256.orEmpty(),
+                                        forceManual = isManualTrigger
                                     )
-                                    if (isManualTrigger) {
+                                    if (isManualTrigger && onResultMessage == null) {
                                         Toast.makeText(
                                             this@PaymentAccessibilityService,
                                             "默记：已提取屏幕账单并保存截图",
@@ -769,12 +777,12 @@ open class PaymentAccessibilityService : AccessibilityService() {
                         }
 
                         override fun onFailure(errorCode: Int) {
-                            onResultMessage?.invoke("免 Root 截屏受限 (code=$errorCode)")
+                            mainHandler.post { onResultMessage?.invoke("免 Root 截屏受限 (code=$errorCode)") }
                         }
                     }
                 )
             } catch (e: Throwable) {
-                onResultMessage?.invoke("截屏调用异常：${e.localizedMessage}")
+                mainHandler.post { onResultMessage?.invoke("截屏调用异常：${e.localizedMessage}") }
             }
         }, 220L)
     }
@@ -1034,7 +1042,13 @@ open class PaymentAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         clearScheduledProbes()
+        mainHandler.removeCallbacksAndMessages(null)
         RecognitionBanner.dismissImmediate()
+        if (ocrRecognizerInitialized) {
+            runCatching { chineseOcrRecognizer.close() }
+            ocrRecognizerInitialized = false
+        }
+        runCatching { screenshotIoExecutor.shutdown() }
         if (instance === this) {
             instance = null
         }

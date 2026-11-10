@@ -55,6 +55,14 @@ class OcrTileService : TileService() {
             return
         }
 
-        service.triggerManualScreenCapture(collapseShadeFirst = true)
+        val appCtx = applicationContext
+        service.triggerManualScreenCapture(
+            collapseShadeFirst = true,
+            onResultMessage = { msg ->
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    Toast.makeText(appCtx, "默记：$msg", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
     }
 }

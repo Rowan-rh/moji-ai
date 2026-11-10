@@ -15,6 +15,7 @@ import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.DailyReminderScheduler
 import com.moji.ai.notification.SilentBookkeepingNotifier
+import com.moji.ai.service.BillScreenshotStorage
 import com.moji.ai.service.CapturePipelineCoordinator
 import com.moji.ai.update.AppUpdateManager
 import kotlinx.coroutines.CoroutineScope
@@ -61,6 +62,7 @@ class MoJiApp : Application() {
         AppLockManager.init(this)
         ReminderConfigManager.init(this)
         AppearanceConfigManager.init(this)
+        BillScreenshotStorage.init(this)
         database = AppDatabase.getInstance(this)
         repository = LedgerRepository(database)
         aiConfigManager = AiConfigManager(this)
