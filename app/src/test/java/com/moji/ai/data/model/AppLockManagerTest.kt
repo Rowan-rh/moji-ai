@@ -28,7 +28,7 @@ class AppLockManagerTest {
     }
 
     @Test
-    fun pinFormatAndSaltedSha256Hash_neverStoresPlaintext() {
+    fun pinFormatAndPbkdf2Hash_neverStoresPlaintextAndDiffersFromLegacySha256() {
         assertFalse(AppLockManager.isValidPinFormat(""))
         assertFalse(AppLockManager.isValidPinFormat("123"))
         assertFalse(AppLockManager.isValidPinFormat("12345"))
@@ -43,10 +43,35 @@ class AppLockManagerTest {
         assertEquals(64, hash.length)
         assertFalse(hash.contains("2580"))
         assertEquals(AppLockManager.hashPin("2580", salt), hash)
+        assertNotEquals(AppLockManager.legacySha256HashPin("2580", salt), hash)
 
         val secondSalt = AppLockManager.generateSaltHex()
         assertNotEquals(salt, secondSalt)
         assertNotEquals(hash, AppLockManager.hashPin("2580", secondSalt))
+    }
+
+    @Test
+    fun lockedSession_rejectsConfigAndHintMutationsUntilUnlocked() {
+        AppLockManager.enablePasswordProtection("2580", "2580", "初始提示")
+        AppLockManager.updateLockTimeout(60)
+        AppLockManager.updateHideRecentTaskPreview(true)
+        AppLockManager.lockNow()
+        assertTrue(AppLockManager.isSessionLockedFlow.value)
+
+        // 锁定状态下尝试修改超时档位、防截屏开关或提示语均应被拒绝
+        val ignoredTimeout = AppLockManager.updateLockTimeout(300)
+        assertEquals(60, ignoredTimeout.lockTimeoutSeconds)
+
+        val ignoredHide = AppLockManager.updateHideRecentTaskPreview(false)
+        assertTrue(ignoredHide.hideRecentTaskPreview)
+
+        val rejectedHint = AppLockManager.updatePinHint("新提示")
+        assertTrue(rejectedHint.isFailure)
+        assertEquals("初始提示", AppLockManager.configFlow.value.pinHint)
+
+        // 解锁后允许正常修改
+        assertEquals(PinVerifyResult.Success, AppLockManager.verifyPin("2580"))
+        assertEquals(300, AppLockManager.updateLockTimeout(300).lockTimeoutSeconds)
     }
 
     @Test
