@@ -164,7 +164,19 @@ class MerchantMemoryManager(context: Context) {
     }
 
     private fun normalizeMerchantKey(raw: String): String {
-        return raw.trim()
+        var cleaned = raw.trim()
+            .removePrefix("转账-转给")
+            .removePrefix("转账-来自")
+            .removePrefix("扫二维码付款-给")
+            .removePrefix("二维码收款-来自")
+            .removePrefix("二维码付款-给")
+            .removePrefix("付款-给")
+            .trim()
+        Regex("""^待(.+?)(?:确认收款|确认收钱|收款)$""").matchEntire(cleaned)?.let { m ->
+            val inner = m.groupValues[1].trim()
+            if (inner.isNotBlank()) cleaned = inner
+        }
+        return cleaned
             .replace(Regex("""\([^)]*\)|（[^）]*）"""), "")
             .replace(Regex("""(有限公司|股份有限公司|专营店|旗舰店|官方店|餐饮店|便利店)$"""), "")
             .trim()
@@ -172,8 +184,9 @@ class MerchantMemoryManager(context: Context) {
 
     companion object {
         private val GENERIC_MERCHANT_STOPWORDS = setOf(
-            "日常商户", "商户退款", "个人账户间流转", "信用账户还款", "收入入账",
-            "朋友AA/报销收款", "平账校准", "余额校准", "微信支付", "支付宝"
+            "日常商户", "商户退款", "个人账户间流转", "信用账户还款", "收入入账", "收款入账",
+            "朋友AA/报销收款", "平账校准", "余额校准", "微信支付", "支付宝", "抖音支付", "多多支付",
+            "京东支付", "主页", "联系", "主要消费项目包括", "主要消费项目包括：", "自动还款", "银联入账", "网联入账"
         )
 
         private fun defaultSeedMemories(): List<MerchantMemoryEntry> = listOf(

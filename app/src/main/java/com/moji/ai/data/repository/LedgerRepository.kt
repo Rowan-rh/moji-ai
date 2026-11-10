@@ -581,8 +581,8 @@ class LedgerRepository(private val db: AppDatabase) {
         val ruleDao = db.recurringRuleDao()
 
         val oldWallets = walletDao.getAllWallets()
-        // 若当前数据库已包含完整的 11 个及以上的现代账户且不存在旧版演示卡(8848)，直接跳过，避免重置用户真实实时余额或自定义账户
-        if (oldWallets.size >= 11 && oldWallets.none { it.cardLast4 == "8848" }) {
+        // 若当前数据库已包含有效账户且不存在旧版演示卡(8848)，直接跳过，避免重置用户真实实时余额或自定义账户
+        if (oldWallets.isNotEmpty() && oldWallets.none { it.cardLast4 == "8848" }) {
             return@withTransaction
         }
         val oldAlipayId = oldWallets.firstOrNull { it.brandCode == "ALIPAY" || it.name.contains("账户余额") }?.id ?: 4L

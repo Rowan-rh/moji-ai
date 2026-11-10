@@ -387,6 +387,17 @@ class CapturePipelineCoordinator(
             BillScreenshotStorage.deleteIfExists(screenshotPath)
             return
         }
+        if (AiAccountingEngine.isNonTransactionNotificationOrPromo(cleaned, packageName, captureSource)) {
+            BillScreenshotStorage.deleteIfExists(screenshotPath)
+            appendLog(
+                packageName = packageName,
+                captureSource = captureSource,
+                rawText = cleaned.take(120),
+                outcome = CaptureEventOutcome.NOISE_IGNORED,
+                detailSummary = "命中月度汇总账单或群发营销广告过滤规则"
+            )
+            return
+        }
         if (!financialKeywordRegex.containsMatchIn(cleaned) || !numberRegex.containsMatchIn(cleaned)) {
             BillScreenshotStorage.deleteIfExists(screenshotPath)
             if (cleaned.length >= 8 && (cleaned.contains("验证码") || cleaned.contains("物流") || cleaned.contains("快递"))) {
