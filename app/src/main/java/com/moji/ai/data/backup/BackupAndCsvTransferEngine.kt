@@ -28,6 +28,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.xmlpull.v1.XmlPullParser
 import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
@@ -105,6 +106,7 @@ data class BackupTransactionDto(
 @Serializable
 data class BackupRecurringRuleDto(
     val id: Long = 0L,
+    val syncUuid: String = "",
     val title: String = "",
     val type: String = "EXPENSE",
     val amountCents: Long = 0L,
@@ -115,7 +117,8 @@ data class BackupRecurringRuleDto(
     val frequency: String = "MONTHLY",
     val dayOfMonthOrWeek: Int = 1,
     val nextTriggerTimeMillis: Long = System.currentTimeMillis(),
-    val enabled: Boolean = true
+    val enabled: Boolean = true,
+    val updatedAtMillis: Long = 0L
 )
 
 @Serializable
@@ -164,6 +167,31 @@ data class CsvParsePreviewResult(
  * （对标 pennywiseai-tracker BackupSchemaGuard、Cashbook、huayoupu-ledger 与 double-entry-generator）
  */
 object BackupAndCsvTransferEngine {
+
+    private const val MAX_XLSX_SINGLE_ENTRY_BYTES = 32 * 1024 * 1024
+    private const val MAX_XLSX_TOTAL_UNCOMPRESSED_BYTES = 64 * 1024 * 1024
+    private const val MAX_XLSX_SHARED_STRINGS = 100_000
+    private const val MAX_XLSX_COLUMNS = 64
+
+    private val PAREN_OR_KEYWORD_LAST4_REGEX = Regex("""(?:[（(]\s*(?:尾号)?(\d{4})\s*[)）]|尾号\s*(\d{4}))""")
+    private val SUFFIX_LAST4_REGEX = Regex("""(?:\s+|(?<=[一-龥A-Za-z]))(\d{4})$""")
+    private val CLEAN_PAREN_LAST4_REGEX = Regex("""[（(]\s*(?:尾号)?\d{4}\s*[)）]""")
+    private val CLEAN_TAIL_KEYWORD_REGEX = Regex("""尾号\s*\d{4}""")
+    private val CLEAN_SUFFIX_LAST4_REGEX = Regex("""(?:\s+|(?<=[一-龥A-Za-z]))\d{4}$""")
+    private val CSV_TIMESTAMP_PATTERNS = listOf(
+        "yyyy-MM-dd HH:mm:ss",
+        "yyyy/MM/dd HH:mm:ss",
+        "yyyy.MM.dd HH:mm:ss",
+        "yyyy-MM-dd HH:mm",
+        "yyyy/MM/dd HH:mm",
+        "yyyy.MM.dd HH:mm",
+        "yyyy年MM月dd日 HH:mm:ss",
+        "yyyy年MM月dd日 HH:mm",
+        "yyyy-MM-dd",
+        "yyyy/MM/dd",
+        "yyyy.MM.dd",
+        "yyyy年MM月dd日"
+    )
 
     private val backupJson = Json {
         ignoreUnknownKeys = true
@@ -259,6 +287,7 @@ object BackupAndCsvTransferEngine {
             recurringRules = recurringRules.map { r ->
                 BackupRecurringRuleDto(
                     id = r.id,
+                    syncUuid = r.syncUuid,
                     title = r.title,
                     type = r.type.name,
                     amountCents = r.amountCents,
@@ -269,7 +298,8 @@ object BackupAndCsvTransferEngine {
                     frequency = r.frequency.name,
                     dayOfMonthOrWeek = r.dayOfMonthOrWeek,
                     nextTriggerTimeMillis = r.nextTriggerTimeMillis,
-                    enabled = r.enabled
+                    enabled = r.enabled,
+                    updatedAtMillis = r.updatedAtMillis
                 )
             },
             merchantMemories = merchantMemories,
@@ -323,7 +353,11 @@ object BackupAndCsvTransferEngine {
                 amountCents = dto.amountCents,
                 currency = dto.currency,
                 exchangeRateToCny = dto.exchangeRateToCny,
-                amountCnyCents = if (dto.amountCnyCents > 0L) dto.amountCnyCents else dto.amountCents,
+                amountCnyCents = if (dto.amountCnyCents > 0L) {
+                    dto.amountCnyCents
+                } else {
+                    (dto.amountCents * (dto.exchangeRateToCny.takeIf { it > 0.0 } ?: 1.0)).roundToLong()
+                },
                 discountCents = dto.discountCents,
                 feeCents = dto.feeCents,
                 itemQuantity = dto.itemQuantity.coerceAtLeast(1),
@@ -362,6 +396,7 @@ object BackupAndCsvTransferEngine {
         return dtos.map { dto ->
             RecurringRuleEntity(
                 id = dto.id,
+                syncUuid = dto.syncUuid.ifBlank { java.util.UUID.randomUUID().toString() },
                 title = dto.title,
                 type = runCatching { TransactionType.valueOf(dto.type) }.getOrDefault(TransactionType.EXPENSE),
                 amountCents = dto.amountCents,
@@ -372,7 +407,8 @@ object BackupAndCsvTransferEngine {
                 frequency = runCatching { RecurrenceFrequency.valueOf(dto.frequency) }.getOrDefault(RecurrenceFrequency.MONTHLY),
                 dayOfMonthOrWeek = dto.dayOfMonthOrWeek,
                 nextTriggerTimeMillis = dto.nextTriggerTimeMillis,
-                enabled = dto.enabled
+                enabled = dto.enabled,
+                updatedAtMillis = if (dto.updatedAtMillis > 0L) dto.updatedAtMillis else System.currentTimeMillis()
             )
         }
     }
@@ -456,7 +492,7 @@ object BackupAndCsvTransferEngine {
         merchantMemoryManager: MerchantMemoryManager?,
         existingLedgers: List<String> = listOf("默认账本")
     ): CsvParsePreviewResult {
-        val rawLines = rawCsv.lines().map { it.trim().removePrefix("﻿") }.filter { it.isNotEmpty() }
+        val rawLines = splitCsvRecords(rawCsv)
         if (rawLines.isEmpty()) return CsvParsePreviewResult("未知格式", emptyList(), 0)
 
         val existingLedgerSet = existingLedgers.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
@@ -829,16 +865,16 @@ object BackupAndCsvTransferEngine {
 
     private fun extractAccountNameAndLast4(rawAccountName: String, explicitLast4: String? = null): Pair<String, String?> {
         val trimmed = rawAccountName.trim()
-        val parenOrKeywordMatch = Regex("""(?:[（(]\s*(?:尾号)?(\d{4})\s*[)）]|尾号\s*(\d{4}))""").find(trimmed)
-        val suffixMatch = Regex("""(?:\s+|(?<=[一-龥A-Za-z]))(\d{4})$""").find(trimmed)
+        val parenOrKeywordMatch = PAREN_OR_KEYWORD_LAST4_REGEX.find(trimmed)
+        val suffixMatch = SUFFIX_LAST4_REGEX.find(trimmed)
         val extractedLast4 = explicitLast4
             ?: parenOrKeywordMatch?.groupValues?.drop(1)?.firstOrNull { it.isNotEmpty() }
             ?: suffixMatch?.groupValues?.getOrNull(1)?.takeIf { it.isNotEmpty() }
 
         val cleanName = trimmed
-            .replace(Regex("""[（(]\s*(?:尾号)?\d{4}\s*[)）]"""), "")
-            .replace(Regex("""尾号\s*\d{4}"""), "")
-            .replace(Regex("""(?:\s+|(?<=[一-龥A-Za-z]))\d{4}$"""), "")
+            .replace(CLEAN_PAREN_LAST4_REGEX, "")
+            .replace(CLEAN_TAIL_KEYWORD_REGEX, "")
+            .replace(CLEAN_SUFFIX_LAST4_REGEX, "")
             .trim()
             .ifBlank { trimmed }
         return cleanName to extractedLast4
@@ -1041,6 +1077,7 @@ object BackupAndCsvTransferEngine {
     private fun parseXlsxBytesToCsv(bytes: ByteArray): String? {
         return runCatching {
             val zipEntries = mutableMapOf<String, ByteArray>()
+            var totalUncompressedBytes = 0L
             ZipInputStream(ByteArrayInputStream(bytes)).use { zis ->
                 var entry = zis.nextEntry
                 while (entry != null) {
@@ -1049,7 +1086,21 @@ object BackupAndCsvTransferEngine {
                         if (name == "xl/sharedStrings.xml" ||
                             (name.startsWith("xl/worksheets/sheet") && name.endsWith(".xml"))
                         ) {
-                            zipEntries[name] = zis.readBytes()
+                            val bos = ByteArrayOutputStream()
+                            val buf = ByteArray(8192)
+                            var entryRead = 0
+                            var n: Int
+                            while (zis.read(buf).also { n = it } != -1) {
+                                entryRead += n
+                                totalUncompressedBytes += n
+                                if (entryRead > MAX_XLSX_SINGLE_ENTRY_BYTES ||
+                                    totalUncompressedBytes > MAX_XLSX_TOTAL_UNCOMPRESSED_BYTES
+                                ) {
+                                    throw IllegalArgumentException("XLSX 解压体积超出安全阈值")
+                                }
+                                bos.write(buf, 0, n)
+                            }
+                            zipEntries[name] = bos.toByteArray()
                         }
                     }
                     zis.closeEntry()
@@ -1078,7 +1129,9 @@ object BackupAndCsvTransferEngine {
                         XmlPullParser.END_TAG -> {
                             val tag = parser.name
                             if (tag == "si" || tag.endsWith(":si")) {
-                                sharedStrings.add(currentSi.toString())
+                                if (sharedStrings.size < MAX_XLSX_SHARED_STRINGS) {
+                                    sharedStrings.add(currentSi.toString())
+                                }
                                 inSi = false
                             }
                         }
@@ -1141,7 +1194,7 @@ object BackupAndCsvTransferEngine {
                                     } else {
                                         rawVal
                                     }
-                                    if (resolvedVal.isNotEmpty()) {
+                                    if (resolvedVal.isNotEmpty() && currentColIdx in 0 until MAX_XLSX_COLUMNS) {
                                         currentRowCells[currentColIdx] = resolvedVal
                                         if (currentColIdx > maxColIdx) maxColIdx = currentColIdx
                                     }
@@ -1149,9 +1202,10 @@ object BackupAndCsvTransferEngine {
                                     inCell = false
                                 }
                                 tag == "row" || tag.endsWith(":row") -> {
-                                    if (maxColIdx >= 0 && currentRowCells.values.any { it.isNotBlank() }) {
-                                        val lineCols = (0..maxColIdx).map { col ->
-                                            escapeCsvField(currentRowCells[col].orEmpty())
+                                    val safeMaxCol = maxColIdx.coerceAtMost(MAX_XLSX_COLUMNS - 1)
+                                    if (safeMaxCol >= 0 && currentRowCells.values.any { it.isNotBlank() }) {
+                                        val lineCols = (0..safeMaxCol).map { col ->
+                                            escapeCsvField(currentRowCells[col].orEmpty(), sanitizeFormula = false)
                                         }
                                         csvBuilder.appendLine(lineCols.joinToString(","))
                                     }
@@ -1208,36 +1262,79 @@ object BackupAndCsvTransferEngine {
 
     private fun parseFlexibleTimestamp(timeStr: String): Long {
         val cleaned = timeStr.trim()
-        val patterns = listOf(
-            "yyyy-MM-dd HH:mm:ss",
-            "yyyy/MM/dd HH:mm:ss",
-            "yyyy.MM.dd HH:mm:ss",
-            "yyyy-MM-dd HH:mm",
-            "yyyy/MM/dd HH:mm",
-            "yyyy.MM.dd HH:mm",
-            "yyyy年MM月dd日 HH:mm:ss",
-            "yyyy年MM月dd日 HH:mm",
-            "yyyy-MM-dd",
-            "yyyy/MM/dd",
-            "yyyy.MM.dd",
-            "yyyy年MM月dd日"
-        )
-        for (p in patterns) {
+        if (cleaned.isEmpty()) return System.currentTimeMillis()
+        for (p in CSV_TIMESTAMP_PATTERNS) {
             runCatching {
-                val sdf = SimpleDateFormat(p, Locale.CHINA)
+                val sdf = SimpleDateFormat(p, Locale.CHINA).apply { isLenient = false }
                 sdf.parse(cleaned)?.time?.let { return it }
             }
         }
         return System.currentTimeMillis()
     }
 
-    private fun escapeCsvField(value: String): String {
-        val cleaned = value.replace("\n", " ").replace("\r", " ")
+    private fun escapeCsvField(value: String, sanitizeFormula: Boolean = true): String {
+        val singleLine = value.replace("\n", " ").replace("\r", " ")
+        val firstChar = singleLine.firstOrNull()
+        val cleaned = if (sanitizeFormula && firstChar != null && (
+                firstChar == '=' ||
+                    firstChar == '@' ||
+                    firstChar == '\t' ||
+                    ((firstChar == '+' || firstChar == '-') && singleLine.getOrNull(1)?.isDigit() != true)
+                )
+        ) {
+            "'$singleLine"
+        } else {
+            singleLine
+        }
         return if (cleaned.contains(",") || cleaned.contains("\"")) {
             "\"${cleaned.replace("\"", "\"\"")}\""
         } else {
             cleaned
         }
+    }
+
+    /**
+     * 按 RFC 4180 引号状态机切分 CSV 逻辑行（防止双引号内的换行符把一条账单拆成多行）
+     */
+    private fun splitCsvRecords(rawCsv: String): List<String> {
+        if (rawCsv.isBlank()) return emptyList()
+        val records = mutableListOf<String>()
+        val current = StringBuilder()
+        var inQuotes = false
+        var i = 0
+        while (i < rawCsv.length) {
+            val c = rawCsv[i]
+            when {
+                c == '"' -> {
+                    current.append(c)
+                    if (inQuotes && i + 1 < rawCsv.length && rawCsv[i + 1] == '"') {
+                        current.append('"')
+                        i++
+                    } else {
+                        inQuotes = !inQuotes
+                    }
+                }
+                (c == '\n' || c == '\r') && !inQuotes -> {
+                    if (c == '\r' && i + 1 < rawCsv.length && rawCsv[i + 1] == '\n') {
+                        i++
+                    }
+                    val trimmed = current.toString().trim().removePrefix("\uFEFF")
+                    if (trimmed.isNotEmpty()) {
+                        records.add(trimmed)
+                    }
+                    current.clear()
+                }
+                else -> {
+                    current.append(if ((c == '\n' || c == '\r') && inQuotes) ' ' else c)
+                }
+            }
+            i++
+        }
+        val tail = current.toString().trim().removePrefix("\uFEFF")
+        if (tail.isNotEmpty()) {
+            records.add(tail)
+        }
+        return records
     }
 
     private fun splitCsvOrTsvLine(line: String): List<String> {
