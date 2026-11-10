@@ -27,19 +27,22 @@ class LedgerTypeConverters {
     fun fromWalletType(value: WalletType): String = value.name
 
     @TypeConverter
-    fun toWalletType(value: String): WalletType = WalletType.valueOf(value)
+    fun toWalletType(value: String): WalletType =
+        runCatching { WalletType.valueOf(value) }.getOrDefault(WalletType.DIGITAL_WALLET)
 
     @TypeConverter
     fun fromTransactionType(value: TransactionType): String = value.name
 
     @TypeConverter
-    fun toTransactionType(value: String): TransactionType = TransactionType.valueOf(value)
+    fun toTransactionType(value: String): TransactionType =
+        runCatching { TransactionType.valueOf(value) }.getOrDefault(TransactionType.EXPENSE)
 
     @TypeConverter
     fun fromRecurrenceFrequency(value: RecurrenceFrequency): String = value.name
 
     @TypeConverter
-    fun toRecurrenceFrequency(value: String): RecurrenceFrequency = RecurrenceFrequency.valueOf(value)
+    fun toRecurrenceFrequency(value: String): RecurrenceFrequency =
+        runCatching { RecurrenceFrequency.valueOf(value) }.getOrDefault(RecurrenceFrequency.MONTHLY)
 }
 
 @Dao
@@ -178,6 +181,9 @@ interface TransactionDao {
         """
     )
     suspend fun countNonAnchorTransactionsInRange(startMillis: Long, endMillis: Long): Int
+
+    @Query("SELECT tags FROM transactions WHERE deletedAtMillis IS NULL AND tags != ''")
+    suspend fun getAllNonEmptyTagStrings(): List<String>
 }
 
 @Dao
@@ -232,6 +238,9 @@ interface RecurringRuleDao {
 
     @Delete
     suspend fun deleteRule(rule: RecurringRuleEntity)
+
+    @Query("DELETE FROM recurring_rules")
+    suspend fun deleteAllRules()
 }
 
 @Database(
@@ -320,52 +329,54 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("ALTER TABLE transactions ADD COLUMN quantityDesc TEXT NOT NULL DEFAULT '1件'")
                 db.execSQL("ALTER TABLE transactions ADD COLUMN orderKey TEXT NOT NULL DEFAULT ''")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_transactions_orderKey ON transactions(orderKey)")
-
-                // 清理之前因列表页/收银台及同时间同金额未拦截而重复录入的脏数据，并补全保留账单的唯一订单 Key
-                db.execSQL("DELETE FROM transactions WHERE id IN (20, 21, 22, 23, 24, 25, 28, 29, 30, 32, 33, 34, 35, 36)")
-                db.execSQL(
-                    """
-                    UPDATE transactions
-                    SET transactionNo = '4200003210202611053385111851',
-                        merchantOrderNo = '261105130824764996',
-                        orderKey = '4200003210202611053385111851',
-                        paymentMethodRaw = '招商银行信用卡(3354)',
-                        timestamp = 1793874265000
-                    WHERE id = 17
-                    """.trimIndent()
-                )
-                db.execSQL("UPDATE transactions SET duplicateSuspected = 0, itemQuantity = 2, quantityDesc = '多件' WHERE id IN (27, 31)")
                 db.execSQL("UPDATE transactions SET orderKey = transactionNo WHERE orderKey = '' AND transactionNo != ''")
                 db.execSQL("UPDATE transactions SET orderKey = merchantOrderNo WHERE orderKey = '' AND merchantOrderNo != ''")
-
-                // 校准被重复账单污染的三个钱包余额（花呗归零、账户余额与招行信用卡恢复真实值）
-                db.execSQL("UPDATE wallets SET balanceCents = 0 WHERE id = 2")
-                db.execSQL("UPDATE wallets SET balanceCents = 345734 WHERE id = 4")
-                db.execSQL("UPDATE wallets SET balanceCents = 397467 WHERE id = 1")
             }
         }
 
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
-                val instance = Room.databaseBuilder(
-                    context.applicationContext,
+                val appContext = context.applicationContext
+                val builder = Room.databaseBuilder(
+                    appContext,
                     AppDatabase::class.java,
                     "moji_ai.db"
                 )
                     .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
-                    .fallbackToDestructiveMigration()
                     .addCallback(object : Callback() {
+                        override fun onCreate(db: SupportSQLiteDatabase) {
+                            super.onCreate(db)
+                            CoroutineScope(Dispatchers.IO).launch {
+                                val seedPrefs = appContext.getSharedPreferences("moji_db_seed_prefs", Context.MODE_PRIVATE)
+                                val database = getInstance(appContext)
+                                if (database.walletDao().getAllWallets().isEmpty()) {
+                                    database.walletDao().insertAll(defaultWallets())
+                                }
+                                seedPrefs.edit().putBoolean("initial_wallets_seeded_v1", true).apply()
+                            }
+                        }
+
                         override fun onOpen(db: SupportSQLiteDatabase) {
                             super.onOpen(db)
                             CoroutineScope(Dispatchers.IO).launch {
-                                val database = getInstance(context)
-                                if (database.walletDao().getAllWallets().isEmpty()) {
-                                    database.walletDao().insertAll(defaultWallets())
+                                val seedPrefs = appContext.getSharedPreferences("moji_db_seed_prefs", Context.MODE_PRIVATE)
+                                if (!seedPrefs.getBoolean("initial_wallets_seeded_v1", false)) {
+                                    val database = getInstance(appContext)
+                                    val existingWallets = database.walletDao().getAllWallets()
+                                    val existingTxs = database.transactionDao().getAllTransactions()
+                                    if (existingWallets.isEmpty() && existingTxs.isEmpty()) {
+                                        database.walletDao().insertAll(defaultWallets())
+                                    }
+                                    seedPrefs.edit().putBoolean("initial_wallets_seeded_v1", true).apply()
                                 }
                             }
                         }
                     })
-                    .build()
+                if (com.moji.ai.BuildConfig.IS_QA_BUILD) {
+                    @Suppress("DEPRECATION")
+                    builder.fallbackToDestructiveMigration()
+                }
+                val instance = builder.build()
                 INSTANCE = instance
                 instance
             }
