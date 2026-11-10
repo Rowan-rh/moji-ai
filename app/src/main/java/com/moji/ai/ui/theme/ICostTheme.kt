@@ -54,6 +54,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -318,7 +319,9 @@ fun ICostSmoothBottomSheet(
     // 仅在可见时注册（而不是常驻注册再切换 enabled），保证每次打开都排在最新、优先于其下方页面
     if (visible) {
         BackHandler(enabled = !isDismissing) {
-            triggerAnimatedDismiss(0f)
+            if (confirmDismiss?.invoke() != false) {
+                triggerAnimatedDismiss(0f)
+            }
         }
     }
 
@@ -537,7 +540,7 @@ fun Modifier.iCostPressScale(
 }
 
 /**
- * 核心大金额数字平滑滚动过渡组件（切换月份或新增账单时数字平滑增减）
+ * 核心大金额数字平滑滚动过渡组件（切换月份或新增账单时数字平滑增减，采用 64-bit Long 精确差值插值避免 Float 24-bit 尾数精度丢失）
  */
 @Composable
 fun AnimatedMoneyText(
@@ -549,13 +552,23 @@ fun AnimatedMoneyText(
     color: Color = ICostTextPrimary,
     modifier: Modifier = Modifier
 ) {
-    val animatedCents by animateFloatAsState(
-        targetValue = cents.toFloat(),
-        animationSpec = tween(durationMillis = 360, easing = FastOutSlowInEasing),
-        label = "AnimatedMoneyCents"
-    )
+    var displayedCents by remember { mutableLongStateOf(cents) }
+    val progress = remember { Animatable(1f) }
+    LaunchedEffect(cents) {
+        val startCents = displayedCents
+        if (startCents == cents) return@LaunchedEffect
+        progress.snapTo(0f)
+        progress.animateTo(
+            targetValue = 1f,
+            animationSpec = tween(durationMillis = 360, easing = FastOutSlowInEasing)
+        ) {
+            val delta = (cents - startCents).toDouble() * value.toDouble()
+            displayedCents = startCents + kotlin.math.round(delta).toLong()
+        }
+        displayedCents = cents
+    }
     Text(
-        text = formatMoneyCents(animatedCents.toLong(), currency, hideAmounts),
+        text = formatMoneyCents(displayedCents, currency, hideAmounts),
         fontFamily = ICDinFontFamily,
         fontSize = fontSize,
         fontWeight = fontWeight,

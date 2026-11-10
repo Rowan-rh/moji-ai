@@ -121,6 +121,29 @@ class MerchantMemoryManager(context: Context) {
     }
 
     /**
+     * 全量备份恢复时原子替换全部商户记忆，避免旧记忆残留叠加
+     */
+    @Synchronized
+    fun replaceAllMemories(entries: List<MerchantMemoryEntry>) {
+        val sanitized = entries
+            .mapNotNull { entry ->
+                val normalized = normalizeMerchantKey(entry.merchantKeyword)
+                val cat = entry.category.trim()
+                if (normalized.length < 2 || cat.isBlank() || CategoryCatalog.isPendingTriage(cat)) {
+                    null
+                } else {
+                    entry.copy(
+                        merchantKeyword = normalized,
+                        category = cat,
+                        hitCount = entry.hitCount.coerceAtLeast(1)
+                    )
+                }
+            }
+            .distinctBy { it.merchantKeyword.lowercase() }
+        saveEntries(sanitized)
+    }
+
+    /**
      * 当分类被重命名或删除迁移时，同步级联更新商户记忆库中的目标分类
      */
     @Synchronized

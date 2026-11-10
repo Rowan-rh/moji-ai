@@ -68,6 +68,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -87,6 +88,7 @@ import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.CurrencyRateManager
@@ -621,49 +623,51 @@ fun ICostAssetsScreen(
                             ) {
                                 Column(modifier = Modifier.fillMaxWidth()) {
                                     creditWallets.forEachIndexed { idx, w ->
-                                        val creditSwipeActions = listOf(
-                                            SwipeActionItem(
-                                                label = "还款",
-                                                iconAsset = "transfer_swift.webp",
-                                                backgroundColor = ICostBlueAccent,
-                                                onClick = {
-                                                    onQuickActionWithWallet(
-                                                        TransactionType.REPAYMENT,
-                                                        assetWallets.firstOrNull()?.id,
-                                                        w.id
-                                                    )
-                                                }
-                                            ),
-                                            SwipeActionItem(
-                                                label = "核对",
-                                                iconAsset = "asset_pen.webp",
-                                                backgroundColor = ICostGreenIncome,
-                                                onClick = { reconcilingWallet = w }
-                                            ),
-                                            SwipeActionItem(
-                                                label = "删除",
-                                                iconAsset = "detail_delete.webp",
-                                                backgroundColor = ICostCoralRed,
-                                                onClick = { pendingDeleteWallet = w }
+                                        key(w.id) {
+                                            val creditSwipeActions = listOf(
+                                                SwipeActionItem(
+                                                    label = "还款",
+                                                    iconAsset = "transfer_swift.webp",
+                                                    backgroundColor = ICostBlueAccent,
+                                                    onClick = {
+                                                        onQuickActionWithWallet(
+                                                            TransactionType.REPAYMENT,
+                                                            assetWallets.firstOrNull()?.id,
+                                                            w.id
+                                                        )
+                                                    }
+                                                ),
+                                                SwipeActionItem(
+                                                    label = "核对",
+                                                    iconAsset = "asset_pen.webp",
+                                                    backgroundColor = ICostGreenIncome,
+                                                    onClick = { reconcilingWallet = w }
+                                                ),
+                                                SwipeActionItem(
+                                                    label = "删除",
+                                                    iconAsset = "detail_delete.webp",
+                                                    backgroundColor = ICostCoralRed,
+                                                    onClick = { pendingDeleteWallet = w }
+                                                )
                                             )
-                                        )
-                                        ICostSwipeActionRow(
-                                            actions = creditSwipeActions,
-                                            actionWidth = 44.dp,
-                                            actionHeight = 42.dp
-                                        ) {
-                                            ICostAccountItemRow(
-                                                wallet = w,
-                                                hideAmounts = hideAmounts,
-                                                onClick = { inspectingWallet = w }
-                                            )
-                                        }
-                                        if (idx < creditWallets.lastIndex) {
-                                            HorizontalDivider(
-                                                modifier = Modifier.padding(start = 68.dp, end = 16.dp),
-                                                thickness = 0.5.dp,
-                                                color = ICostDivider
-                                            )
+                                            ICostSwipeActionRow(
+                                                actions = creditSwipeActions,
+                                                actionWidth = 44.dp,
+                                                actionHeight = 42.dp
+                                            ) {
+                                                ICostAccountItemRow(
+                                                    wallet = w,
+                                                    hideAmounts = hideAmounts,
+                                                    onClick = { inspectingWallet = w }
+                                                )
+                                            }
+                                            if (idx < creditWallets.lastIndex) {
+                                                HorizontalDivider(
+                                                    modifier = Modifier.padding(start = 68.dp, end = 16.dp),
+                                                    thickness = 0.5.dp,
+                                                    color = ICostDivider
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -702,49 +706,51 @@ fun ICostAssetsScreen(
                             ) {
                                 Column(modifier = Modifier.fillMaxWidth()) {
                                     assetWallets.forEachIndexed { idx, w ->
-                                        val assetSwipeActions = listOf(
-                                            SwipeActionItem(
-                                                label = "转账",
-                                                iconAsset = "transfer_swift.webp",
-                                                backgroundColor = ICostBlueAccent,
-                                                onClick = {
-                                                    onQuickActionWithWallet(
-                                                        TransactionType.TRANSFER,
-                                                        w.id,
-                                                        assetWallets.firstOrNull { it.id != w.id }?.id
-                                                    )
-                                                }
-                                            ),
-                                            SwipeActionItem(
-                                                label = "核对",
-                                                iconAsset = "asset_pen.webp",
-                                                backgroundColor = ICostGreenIncome,
-                                                onClick = { reconcilingWallet = w }
-                                            ),
-                                            SwipeActionItem(
-                                                label = "删除",
-                                                iconAsset = "detail_delete.webp",
-                                                backgroundColor = ICostCoralRed,
-                                                onClick = { pendingDeleteWallet = w }
+                                        key(w.id) {
+                                            val assetSwipeActions = listOf(
+                                                SwipeActionItem(
+                                                    label = "转账",
+                                                    iconAsset = "transfer_swift.webp",
+                                                    backgroundColor = ICostBlueAccent,
+                                                    onClick = {
+                                                        onQuickActionWithWallet(
+                                                            TransactionType.TRANSFER,
+                                                            w.id,
+                                                            assetWallets.firstOrNull { it.id != w.id }?.id
+                                                        )
+                                                    }
+                                                ),
+                                                SwipeActionItem(
+                                                    label = "核对",
+                                                    iconAsset = "asset_pen.webp",
+                                                    backgroundColor = ICostGreenIncome,
+                                                    onClick = { reconcilingWallet = w }
+                                                ),
+                                                SwipeActionItem(
+                                                    label = "删除",
+                                                    iconAsset = "detail_delete.webp",
+                                                    backgroundColor = ICostCoralRed,
+                                                    onClick = { pendingDeleteWallet = w }
+                                                )
                                             )
-                                        )
-                                        ICostSwipeActionRow(
-                                            actions = assetSwipeActions,
-                                            actionWidth = 44.dp,
-                                            actionHeight = 42.dp
-                                        ) {
-                                            ICostAccountItemRow(
-                                                wallet = w,
-                                                hideAmounts = hideAmounts,
-                                                onClick = { inspectingWallet = w }
-                                            )
-                                        }
-                                        if (idx < assetWallets.lastIndex) {
-                                            HorizontalDivider(
-                                                modifier = Modifier.padding(start = 68.dp, end = 16.dp),
-                                                thickness = 0.5.dp,
-                                                color = ICostDivider
-                                            )
+                                            ICostSwipeActionRow(
+                                                actions = assetSwipeActions,
+                                                actionWidth = 44.dp,
+                                                actionHeight = 42.dp
+                                            ) {
+                                                ICostAccountItemRow(
+                                                    wallet = w,
+                                                    hideAmounts = hideAmounts,
+                                                    onClick = { inspectingWallet = w }
+                                                )
+                                            }
+                                            if (idx < assetWallets.lastIndex) {
+                                                HorizontalDivider(
+                                                    modifier = Modifier.padding(start = 68.dp, end = 16.dp),
+                                                    thickness = 0.5.dp,
+                                                    color = ICostDivider
+                                                )
+                                            }
                                         }
                                     }
                                 }
@@ -800,92 +806,94 @@ fun ICostAssetsScreen(
                                     )
                                 }
                                 savingPlans.forEach { plan ->
-                                    val pct = if (plan.targetCents > 0L) {
-                                        (plan.savedCents.toFloat() / plan.targetCents.toFloat()).coerceIn(0f, 1f)
-                                    } else 0f
-                                    ICostSwipeActionRow(
-                                        actions = listOf(
-                                            SwipeActionItem(
-                                                label = "存入",
-                                                iconAsset = "tab_save_money.webp",
-                                                backgroundColor = ICostGreenIncome,
-                                                onClick = { depositingPlan = plan }
+                                    key(plan.id) {
+                                        val pct = if (plan.targetCents > 0L) {
+                                            (plan.savedCents.toFloat() / plan.targetCents.toFloat()).coerceIn(0f, 1f)
+                                        } else 0f
+                                        ICostSwipeActionRow(
+                                            actions = listOf(
+                                                SwipeActionItem(
+                                                    label = "存入",
+                                                    iconAsset = "tab_save_money.webp",
+                                                    backgroundColor = ICostGreenIncome,
+                                                    onClick = { depositingPlan = plan }
+                                                ),
+                                                SwipeActionItem(
+                                                    label = "删除",
+                                                    iconAsset = "detail_delete.webp",
+                                                    backgroundColor = ICostCoralRed,
+                                                    onClick = { pendingDeleteSavingPlan = plan }
+                                                )
                                             ),
-                                            SwipeActionItem(
-                                                label = "删除",
-                                                iconAsset = "detail_delete.webp",
-                                                backgroundColor = ICostCoralRed,
-                                                onClick = { pendingDeleteSavingPlan = plan }
-                                            )
-                                        ),
-                                        actionWidth = 52.dp,
-                                        actionHeight = 44.dp
-                                    ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .background(ICostCardWhite)
-                                                .padding(vertical = 8.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
+                                            actionWidth = 52.dp,
+                                            actionHeight = 44.dp
                                         ) {
-                                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                                                Text(
-                                                    plan.title,
-                                                    fontSize = 14.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = ICostTextPrimary,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                                Text(
-                                                    "已存 ${formatMoneyCents(plan.savedCents, "CNY", hideAmounts)} / 目标 ${formatMoneyCents(plan.targetCents, "CNY", hideAmounts)}",
-                                                    fontSize = 12.sp,
-                                                    color = ICostTextSecondary,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                                Spacer(modifier = Modifier.height(5.dp))
-                                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .weight(1f)
-                                                            .height(4.dp)
-                                                            .clip(RoundedCornerShape(2.dp))
-                                                            .background(ICostCellGray)
-                                                    ) {
-                                                        if (pct > 0f) {
-                                                            Box(
-                                                                modifier = Modifier
-                                                                    .fillMaxWidth(pct.coerceIn(0.02f, 1f))
-                                                                    .height(4.dp)
-                                                                    .clip(RoundedCornerShape(2.dp))
-                                                                    .background(ICostAmberGold)
-                                                            )
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .background(ICostCardWhite)
+                                                    .padding(vertical = 8.dp),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                                    Text(
+                                                        plan.title,
+                                                        fontSize = 14.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = ICostTextPrimary,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Text(
+                                                        "已存 ${formatMoneyCents(plan.savedCents, "CNY", hideAmounts)} / 目标 ${formatMoneyCents(plan.targetCents, "CNY", hideAmounts)}",
+                                                        fontSize = 12.sp,
+                                                        color = ICostTextSecondary,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Spacer(modifier = Modifier.height(5.dp))
+                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .weight(1f)
+                                                                .height(4.dp)
+                                                                .clip(RoundedCornerShape(2.dp))
+                                                                .background(ICostCellGray)
+                                                        ) {
+                                                            if (pct > 0f) {
+                                                                Box(
+                                                                    modifier = Modifier
+                                                                        .fillMaxWidth(pct.coerceIn(0.02f, 1f))
+                                                                        .height(4.dp)
+                                                                        .clip(RoundedCornerShape(2.dp))
+                                                                        .background(ICostAmberGold)
+                                                                )
+                                                            }
                                                         }
+                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                        Text(
+                                                            text = "${(pct * 100).toInt()}%",
+                                                            fontSize = 11.sp,
+                                                            color = ICostTextSecondary
+                                                        )
                                                     }
-                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                    Text(
-                                                        text = "${(pct * 100).toInt()}%",
-                                                        fontSize = 11.sp,
-                                                        color = ICostTextSecondary
-                                                    )
+                                                    if (plan.deadlineLabel.isNotBlank()) {
+                                                        Text(
+                                                            text = "截止 ${plan.deadlineLabel}",
+                                                            fontSize = 11.sp,
+                                                            color = ICostTextMuted
+                                                        )
+                                                    }
                                                 }
-                                                if (plan.deadlineLabel.isNotBlank()) {
-                                                    Text(
-                                                        text = "截止 ${plan.deadlineLabel}",
-                                                        fontSize = 11.sp,
-                                                        color = ICostTextMuted
-                                                    )
-                                                }
+                                                PlanActionChip(
+                                                    label = "存入",
+                                                    enabled = true,
+                                                    activeBackground = if (AppearanceConfigManager.isDarkThemeActive) ICostGreenIncome.copy(alpha = 0.22f) else Color(0xFFE6F7EF),
+                                                    activeColor = ICostGreenIncome,
+                                                    onClick = { depositingPlan = plan }
+                                                )
                                             }
-                                            PlanActionChip(
-                                                label = "存入",
-                                                enabled = true,
-                                                activeBackground = Color(0xFFE6F7EF),
-                                                activeColor = ICostGreenIncome,
-                                                onClick = { depositingPlan = plan }
-                                            )
                                         }
                                     }
                                 }
@@ -911,53 +919,58 @@ fun ICostAssetsScreen(
                                     )
                                 }
                                 installmentPlans.forEach { inst ->
-                                    val perPeriodCents = inst.totalCents / inst.totalPeriods.coerceAtLeast(1) + inst.feePerPeriodCents
-                                    val settled = inst.paidPeriods >= inst.totalPeriods
-                                    val walletName = wallets.firstOrNull { it.id == inst.walletId }?.name
-                                    val instActions = buildList {
-                                        if (!settled) {
+                                    key(inst.id) {
+                                        val periods = inst.totalPeriods.coerceAtLeast(1)
+                                        val nextPeriodNum = inst.paidPeriods + 1
+                                        val perPeriodCents = inst.totalCents / periods +
+                                            (if (nextPeriodNum == periods) inst.totalCents % periods else 0L) +
+                                            inst.feePerPeriodCents
+                                        val settled = inst.paidPeriods >= inst.totalPeriods
+                                        val walletName = wallets.firstOrNull { it.id == inst.walletId }?.name
+                                        val instActions = buildList {
+                                            if (!settled) {
+                                                add(
+                                                    SwipeActionItem(
+                                                        label = "还一期",
+                                                        iconAsset = "detail_installment.webp",
+                                                        backgroundColor = ICostBlueAccent,
+                                                        onClick = { onPayInstallmentPeriod(inst) }
+                                                    )
+                                                )
+                                            }
                                             add(
                                                 SwipeActionItem(
-                                                    label = "还一期",
-                                                    iconAsset = "detail_installment.webp",
-                                                    backgroundColor = ICostBlueAccent,
-                                                    onClick = { onPayInstallmentPeriod(inst) }
+                                                    label = "删除",
+                                                    iconAsset = "detail_delete.webp",
+                                                    backgroundColor = ICostCoralRed,
+                                                    onClick = { pendingDeleteInstallment = inst }
                                                 )
                                             )
                                         }
-                                        add(
-                                            SwipeActionItem(
-                                                label = "删除",
-                                                iconAsset = "detail_delete.webp",
-                                                backgroundColor = ICostCoralRed,
-                                                onClick = { pendingDeleteInstallment = inst }
-                                            )
-                                        )
-                                    }
-                                    ICostSwipeActionRow(
-                                        actions = instActions,
-                                        actionWidth = 56.dp,
-                                        actionHeight = 44.dp
-                                    ) {
-                                        Row(
-                                            modifier = Modifier
-                                                .fillMaxWidth()
-                                                .background(ICostCardWhite)
-                                                .padding(vertical = 8.dp),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
+                                        ICostSwipeActionRow(
+                                            actions = instActions,
+                                            actionWidth = 56.dp,
+                                            actionHeight = 44.dp
                                         ) {
-                                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                                                Text(
-                                                    inst.title,
-                                                    fontSize = 14.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = ICostTextPrimary,
-                                                    maxLines = 1,
-                                                    overflow = TextOverflow.Ellipsis
-                                                )
-                                                Text(
-                                                    "已还 ${inst.paidPeriods}/${inst.totalPeriods} 期 · 每期 ${formatMoneyCents(perPeriodCents, "CNY", hideAmounts)}",
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .background(ICostCardWhite)
+                                                    .padding(vertical = 8.dp),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                                    Text(
+                                                        inst.title,
+                                                        fontSize = 14.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = ICostTextPrimary,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                    Text(
+                                                        "已还 ${inst.paidPeriods}/${inst.totalPeriods} 期 · 每期 ${formatMoneyCents(perPeriodCents, "CNY", hideAmounts)}",
                                                     fontSize = 12.sp,
                                                     color = ICostTextSecondary,
                                                     maxLines = 1,
@@ -976,10 +989,11 @@ fun ICostAssetsScreen(
                                             PlanActionChip(
                                                 label = if (settled) "已结清" else "还一期",
                                                 enabled = !settled,
-                                                activeBackground = Color(0xFFFDECE9),
+                                                activeBackground = if (AppearanceConfigManager.isDarkThemeActive) ICostCoralRed.copy(alpha = 0.22f) else Color(0xFFFDECE9),
                                                 activeColor = ICostCoralRed,
                                                 onClick = { onPayInstallmentPeriod(inst) }
                                             )
+                                        }
                                         }
                                     }
                                 }
@@ -2770,32 +2784,33 @@ private fun WalletEditorSheet(
     onConfirm: (WalletEntity) -> Unit
 ) {
     val customRates by CurrencyRateManager.customRatesFlow.collectAsState()
-    var name by remember { mutableStateOf(existing?.name ?: preset?.label?.substringBefore(" / ") ?: "") }
-    var isCreditAccount by remember {
+    val stateKey = existing?.id ?: (preset?.code ?: "NEW")
+    var name by remember(stateKey) { mutableStateOf(existing?.name ?: preset?.label?.substringBefore(" / ") ?: "") }
+    var isCreditAccount by remember(stateKey) {
         mutableStateOf((existing?.type ?: preset?.defaultType ?: WalletType.DEBIT_BANK).isLiability)
     }
-    var subTypeLabel by remember { mutableStateOf(existing?.subTypeLabel ?: preset?.subTypeLabel ?: "储蓄卡") }
+    var subTypeLabel by remember(stateKey) { mutableStateOf(existing?.subTypeLabel ?: preset?.subTypeLabel ?: "储蓄卡") }
     val brandCode = existing?.brandCode ?: preset?.code ?: "ALIPAY"
-    var currency by remember { mutableStateOf(CurrencyCode.fromCode(existing?.currency).name) }
-    var balanceStr by remember {
+    var currency by remember(stateKey) { mutableStateOf(CurrencyCode.fromCode(existing?.currency).name) }
+    var balanceStr by remember(stateKey) {
         mutableStateOf(existing?.let { String.format(Locale.US, "%.2f", it.balanceCents / 100.0) } ?: "0.00")
     }
-    var limitStr by remember {
+    var limitStr by remember(stateKey) {
         mutableStateOf(existing?.creditLimitCents?.let { String.format(Locale.US, "%.2f", it / 100.0) } ?: "20000")
     }
-    var repaymentDayStr by remember { mutableStateOf((existing?.repaymentDay ?: 15).toString()) }
-    var last4 by remember { mutableStateOf(existing?.cardLast4 ?: "") }
-    var aliases by remember { mutableStateOf(existing?.aliases ?: "") }
-    var includeInNetWorth by remember { mutableStateOf(existing?.includeInNetWorth ?: true) }
+    var repaymentDayStr by remember(stateKey) { mutableStateOf((existing?.repaymentDay ?: 15).toString()) }
+    var last4 by remember(stateKey) { mutableStateOf(existing?.cardLast4 ?: "") }
+    var aliases by remember(stateKey) { mutableStateOf(existing?.aliases ?: "") }
+    var includeInNetWorth by remember(stateKey) { mutableStateOf(existing?.includeInNetWorth ?: true) }
 
-    // 输入校验：不合法时给出提示并禁用保存，不再静默按 0 处理
+    // 输入校验：资金账户不支持负余额，信用账户支持负数以表达溢缴款（多还款）
     val balanceValue = parseYuanInput(balanceStr)
     val limitValue = parseYuanInput(limitStr)
     val repaymentDay = repaymentDayStr.toIntOrNull()
     val nameError = if (name.isBlank()) "请输入账户名称" else null
     val balanceError = when {
         balanceValue == null -> "请输入有效金额"
-        isCreditAccount && balanceValue < 0.0 -> "欠款不能小于 0"
+        !isCreditAccount && balanceValue < 0.0 -> "资金账户余额不能小于 0"
         else -> null
     }
     val limitError = if (isCreditAccount && (limitValue == null || limitValue < 0.0)) "请输入有效额度" else null
@@ -2860,8 +2875,8 @@ private fun WalletEditorSheet(
                             )
                             ICostFormField(
                                 value = balanceStr,
-                                onValueChange = { balanceStr = sanitizeAmountInput(it, allowNegative = !isCreditAccount) },
-                                label = if (isCreditAccount) "当前欠款（元）" else "当前余额（元）",
+                                onValueChange = { balanceStr = sanitizeAmountInput(it, allowNegative = isCreditAccount) },
+                                label = if (isCreditAccount) "当前欠款（元，负数代表溢缴款）" else "当前余额（元）",
                                 placeholder = "0.00",
                                 isError = balanceError != null,
                                 supportingText = balanceError,
@@ -3045,11 +3060,11 @@ private fun WalletBalanceReconcileSheet(
     var recordAdjustmentTx by remember { mutableStateOf(true) }
     var customNote by remember { mutableStateOf("") }
 
-    // 账务引擎只接受不小于 0 的余额，这里提前提示，而不是静默改成 0
+    // 资金账户余额不能小于 0；信用账户支持负数表达溢缴款
     val parsedActualYuan = parseYuanInput(actualInput)
     val inputError = when {
         parsedActualYuan == null -> "请输入有效金额"
-        parsedActualYuan < 0.0 -> "金额不能小于 0"
+        !wallet.type.isLiability && parsedActualYuan < 0.0 -> "金额不能小于 0"
         else -> null
     }
     val actualCents = parsedActualYuan?.let { (it * 100.0).roundToLong() } ?: wallet.balanceCents
@@ -3095,8 +3110,8 @@ private fun WalletBalanceReconcileSheet(
                 ICostFormCard {
                     ICostFormField(
                         value = actualInput,
-                        onValueChange = { actualInput = sanitizeAmountInput(it) },
-                        label = if (wallet.type.isLiability) "实际欠款（元）" else "实际余额（元）",
+                        onValueChange = { actualInput = sanitizeAmountInput(it, allowNegative = wallet.type.isLiability) },
+                        label = if (wallet.type.isLiability) "实际欠款（元，负数代表溢缴款）" else "实际余额（元）",
                         placeholder = "0.00",
                         isError = inputError != null,
                         supportingText = inputError,
@@ -3107,7 +3122,13 @@ private fun WalletBalanceReconcileSheet(
 
                     Surface(
                         shape = RoundedCornerShape(14.dp),
-                        color = if (diffCents == 0L) ICostBgGray else Color(0xFFEEF4FF),
+                        color = if (diffCents == 0L) {
+                            ICostBgGray
+                        } else if (AppearanceConfigManager.isDarkThemeActive) {
+                            ICostBlueAccent.copy(alpha = 0.20f)
+                        } else {
+                            Color(0xFFEEF4FF)
+                        },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(

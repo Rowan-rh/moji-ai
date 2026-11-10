@@ -58,6 +58,7 @@ import com.moji.ai.ai.ProposedCategoryItem
 import com.moji.ai.ai.ProposedMemoryItem
 import com.moji.ai.ai.ProposedRuleItem
 import com.moji.ai.ai.TriageBillItem
+import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.ui.theme.ICDinFontFamily
@@ -351,13 +352,25 @@ fun AgentTriageBottomSheet(
                             .filter { it.id in selectedCategoryIds }
                             .map { it.fullCategoryPath }
                             .toSet()
+                        val rejectedNewCatPaths = newCats
+                            .map { it.fullCategoryPath }
+                            .filter { it !in selectedNewCatPaths }
+                            .toSet()
+                        val isDark = AppearanceConfigManager.isDarkThemeActive
                         bills.forEachIndexed { idx, item ->
                             val checked = item.transactionId in selectedBillIds
+                            val isExpenseBill = item.type != TransactionType.INCOME
                             val isNewCatApproved = !item.isNewCategoryProposal || item.suggestedCategory in selectedNewCatPaths
-                            val effectiveSuggestedCat = if (isNewCatApproved) {
-                                item.suggestedCategory
-                            } else {
-                                item.suggestedCategory.substringBefore('-').ifBlank { item.suggestedCategory }
+                            val fallbackParent = item.suggestedCategory.substringBefore('-').trim()
+                            val canFallbackToParent = !isNewCatApproved &&
+                                item.suggestedCategory.contains('-') &&
+                                fallbackParent.isNotEmpty() &&
+                                fallbackParent !in rejectedNewCatPaths &&
+                                CategoryCatalog.hasCategoryPath(fallbackParent, isExpenseBill)
+                            val effectiveSuggestedCat = when {
+                                isNewCatApproved -> item.suggestedCategory
+                                canFallbackToParent -> fallbackParent
+                                else -> item.currentCategory
                             }
                             val displayAmountCents = if (item.amountCents != 0L) item.amountCents else item.amountCnyCents
                             Row(
@@ -398,13 +411,21 @@ fun AgentTriageBottomSheet(
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Surface(
                                             shape = RoundedCornerShape(6.dp),
-                                            color = if (CategoryCatalog.isPendingTriage(item.currentCategory)) Color(0xFFEDE9FE) else ICostBgGray
+                                            color = if (CategoryCatalog.isPendingTriage(item.currentCategory)) {
+                                                if (isDark) Color(0xFF8B5CF6).copy(alpha = 0.24f) else Color(0xFFEDE9FE)
+                                            } else {
+                                                ICostBgGray
+                                            }
                                         ) {
                                             Text(
                                                 text = item.currentCategory,
                                                 fontSize = 10.sp,
                                                 fontWeight = FontWeight.Bold,
-                                                color = if (CategoryCatalog.isPendingTriage(item.currentCategory)) Color(0xFF6D28D9) else ICostTextSecondary,
+                                                color = if (CategoryCatalog.isPendingTriage(item.currentCategory)) {
+                                                    if (isDark) Color(0xFFC4B5FD) else Color(0xFF6D28D9)
+                                                } else {
+                                                    ICostTextSecondary
+                                                },
                                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                             )
                                         }
@@ -416,12 +437,13 @@ fun AgentTriageBottomSheet(
                                         )
                                         Surface(
                                             shape = RoundedCornerShape(6.dp),
-                                            color = Color(0xFFEAF2FF)
+                                            color = if (isDark) ICostBlueAccent.copy(alpha = 0.22f) else Color(0xFFEAF2FF)
                                         ) {
                                             Text(
                                                 text = effectiveSuggestedCat + when {
                                                     item.isNewCategoryProposal && isNewCatApproved -> " [新]"
-                                                    item.isNewCategoryProposal && !isNewCatApproved -> " [归入一级]"
+                                                    canFallbackToParent -> " [归入一级]"
+                                                    item.isNewCategoryProposal && !isNewCatApproved -> " [保持原分类]"
                                                     else -> ""
                                                 },
                                                 fontSize = 10.sp,

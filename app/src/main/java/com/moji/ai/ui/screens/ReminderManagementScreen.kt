@@ -8,6 +8,8 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -25,6 +27,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
@@ -47,6 +50,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -68,6 +72,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.ReminderConfigManager
 import com.moji.ai.data.model.ReminderSettingsConfig
 import com.moji.ai.data.model.ReminderSlotItem
@@ -76,6 +81,7 @@ import com.moji.ai.ui.theme.ICostAssetImage
 import com.moji.ai.ui.theme.ICostBgGray
 import com.moji.ai.ui.theme.ICostBlueAccent
 import com.moji.ai.ui.theme.ICostCardWhite
+import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
@@ -140,6 +146,11 @@ fun ReminderManagementScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
     val hasNotificationPermission = remember(resumeTick) { isPostNotificationGranted(context) }
+    val notificationPermLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) {
+        resumeTick++
+    }
 
     var showSlotEditor by rememberSaveable { mutableStateOf(false) }
     var editingSlotId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -172,7 +183,12 @@ fun ReminderManagementScreen(
                 showSlotEditor = true
             },
             onOpenNotificationSettings = { openAppNotificationSettings(context) },
-            onSetMasterEnabled = onSetMasterEnabled,
+            onSetMasterEnabled = { enabled ->
+                onSetMasterEnabled(enabled)
+                if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !isPostNotificationGranted(context)) {
+                    notificationPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+            },
             onSetSkipIfRecordedToday = onSetSkipIfRecordedToday,
             onToggleSlotEnabled = onToggleSlotEnabled,
             onSendTestReminder = onSendTestReminder
@@ -222,6 +238,8 @@ private fun ReminderMainContent(
     Column(
         modifier = Modifier
             .fillMaxSize()
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .padding(horizontal = 16.dp)
     ) {
         Spacer(modifier = Modifier.height(8.dp))
@@ -289,9 +307,10 @@ private fun ReminderMainContent(
         ) {
             if (!hasNotificationPermission) {
                 item {
+                    val isDark = AppearanceConfigManager.isDarkThemeActive
                     Surface(
                         shape = RoundedCornerShape(18.dp),
-                        color = Color(0xFFFFF4E5),
+                        color = if (isDark) Color(0xFF332614) else Color(0xFFFFF4E5),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
@@ -312,12 +331,12 @@ private fun ReminderMainContent(
                                     text = "系统通知权限未开启，定时提醒可能无法送达",
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
-                                    color = Color(0xFF92400E)
+                                    color = if (isDark) Color(0xFFFBBF24) else Color(0xFF92400E)
                                 )
                                 Text(
                                     text = "请开启默记的系统通知权限以确保按时收到记账提醒",
                                     fontSize = 12.sp,
-                                    color = Color(0xFFB45309)
+                                    color = if (isDark) ICostTextSecondary else Color(0xFFB45309)
                                 )
                             }
                             Spacer(modifier = Modifier.width(8.dp))
@@ -382,9 +401,9 @@ private fun ReminderMasterCard(
                 Surface(
                     shape = RoundedCornerShape(14.dp),
                     color = if (config.masterEnabled) {
-                        ICostBlueAccent.copy(alpha = 0.12f)
+                        ICostBlueAccent.copy(alpha = 0.14f)
                     } else {
-                        Color(0xFFF2F3F7)
+                        ICostCellGray
                     },
                     modifier = Modifier.size(44.dp)
                 ) {
@@ -514,63 +533,65 @@ private fun ReminderSlotsCard(
             } else {
                 Column(modifier = Modifier.padding(vertical = 4.dp)) {
                     config.items.forEachIndexed { idx, slot ->
-                        val timeText = ReminderConfigManager.formatTimeHm(slot.hour, slot.minute)
-                        val repeatLabel = ReminderConfigManager.formatRepeatDaysLabel(slot.daysOfWeek)
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onOpenEditSlot(slot) }
-                                .padding(horizontal = 16.dp, vertical = 14.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = timeText,
-                                        fontFamily = ICDinFontFamily,
-                                        fontSize = 26.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (slot.enabled && config.masterEnabled) ICostTextPrimary else ICostTextMuted
-                                    )
-                                    Spacer(modifier = Modifier.width(10.dp))
-                                    Surface(
-                                        shape = RoundedCornerShape(8.dp),
-                                        color = if (slot.enabled) ICostBlueAccent.copy(alpha = 0.10f) else Color(0xFFF2F3F7)
-                                    ) {
+                        key(slot.id) {
+                            val timeText = ReminderConfigManager.formatTimeHm(slot.hour, slot.minute)
+                            val repeatLabel = ReminderConfigManager.formatRepeatDaysLabel(slot.daysOfWeek)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { onOpenEditSlot(slot) }
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
                                         Text(
-                                            text = "${slot.title} · $repeatLabel",
-                                            fontSize = 12.sp,
+                                            text = timeText,
+                                            fontFamily = ICDinFontFamily,
+                                            fontSize = 26.sp,
                                             fontWeight = FontWeight.Bold,
-                                            color = if (slot.enabled) ICostBlueAccent else ICostTextSecondary,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                            color = if (slot.enabled && config.masterEnabled) ICostTextPrimary else ICostTextMuted
                                         )
+                                        Spacer(modifier = Modifier.width(10.dp))
+                                        Surface(
+                                            shape = RoundedCornerShape(8.dp),
+                                            color = if (slot.enabled) ICostBlueAccent.copy(alpha = 0.14f) else ICostCellGray
+                                        ) {
+                                            Text(
+                                                text = "${slot.title} · $repeatLabel",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (slot.enabled) ICostBlueAccent else ICostTextSecondary,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                            )
+                                        }
                                     }
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        text = slot.message,
+                                        fontSize = 12.sp,
+                                        color = ICostTextSecondary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
                                 }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = slot.message,
-                                    fontSize = 12.sp,
-                                    color = ICostTextSecondary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Switch(
+                                    checked = slot.enabled,
+                                    onCheckedChange = { enabled -> onToggleSlotEnabled(slot.id, enabled) },
+                                    colors = iCostUnifiedSwitchColors(),
+                                    modifier = Modifier.semantics { contentDescription = "${slot.title}开关" }
                                 )
                             }
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Switch(
-                                checked = slot.enabled,
-                                onCheckedChange = { enabled -> onToggleSlotEnabled(slot.id, enabled) },
-                                colors = iCostUnifiedSwitchColors(),
-                                modifier = Modifier.semantics { contentDescription = "${slot.title}开关" }
-                            )
-                        }
-                        if (idx < config.items.lastIndex) {
-                            HorizontalDivider(
-                                color = ICostDivider,
-                                thickness = 0.6.dp,
-                                modifier = Modifier.padding(horizontal = 16.dp)
-                            )
+                            if (idx < config.items.lastIndex) {
+                                HorizontalDivider(
+                                    color = ICostDivider,
+                                    thickness = 0.6.dp,
+                                    modifier = Modifier.padding(horizontal = 16.dp)
+                                )
+                            }
                         }
                     }
                 }

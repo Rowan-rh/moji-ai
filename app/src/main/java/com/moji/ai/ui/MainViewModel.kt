@@ -46,6 +46,7 @@ import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.update.AppUpdateConfig
 import com.moji.ai.update.ReleaseUpdateInfo
 import com.moji.ai.update.UpdateCheckState
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -55,6 +56,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -935,8 +937,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 repository.updateExistingTransaction(tx.copy(reimbursable = true))
                 postMessage("已标记为待报销")
             } else if (!tx.reimbursed) {
-                repository.settleReimbursement(tx.id, tx.sourceWalletId)
-                postMessage("报销已入账")
+                if (repository.settleReimbursement(tx.id, tx.sourceWalletId)) {
+                    postMessage("报销已入账")
+                } else {
+                    postMessage("请选择有效的报销入账账户")
+                }
             }
         }
     }
@@ -1058,19 +1063,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         return if (parsed.isEmpty()) listOf("默认账本") else parsed
     }
 
+    private fun sanitizeLedgerName(raw: String): String =
+        raw.replace("|", " ").replace("\r", " ").replace("\n", " ").trim()
+
     fun selectLedger(name: String) {
-        _currentLedger.value = name
-        uiPrefs.edit().putString("current_ledger", name).apply()
+        val sanitized = sanitizeLedgerName(name)
+        if (sanitized.isEmpty()) return
+        _currentLedger.value = sanitized
+        uiPrefs.edit().putString("current_ledger", sanitized).apply()
     }
 
-    fun createLedger(name: String) {
-        val trimmed = name.trim()
+    fun createLedger(name: String, switchToLedger: Boolean = true) {
+        val trimmed = sanitizeLedgerName(name)
         if (trimmed.isNotEmpty() && trimmed !in _ledgers.value) {
             val updated = _ledgers.value + trimmed
             _ledgers.value = updated
             uiPrefs.edit().putString("saved_ledgers", updated.joinToString("||")).apply()
         }
-        if (trimmed.isNotEmpty()) {
+        if (trimmed.isNotEmpty() && switchToLedger) {
             selectLedger(trimmed)
         }
     }
@@ -1150,7 +1160,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         customNote: String = ""
     ) {
         viewModelScope.launch {
-            val actualCents = (actualBalanceYuan * 100.0).roundToLong().coerceAtLeast(0L)
+            val actualCents = (actualBalanceYuan * 100.0).roundToLong()
             repository.reconcileWalletBalance(
                 walletId = walletId,
                 actualBalanceCents = actualCents,
@@ -1159,6 +1169,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 customNote = customNote
             )
         }
+    }
+
+    suspend fun buildFullBackupJson(): String = withContext(Dispatchers.IO) {
+        val freshWallets = repository.getAllWallets()
+        val freshTxs = repository.getAllTransactions()
+        val freshRules = repository.getAllRecurringRules()
+        BackupAndCsvTransferEngine.exportFullBackupJson(
+            ledgers = _ledgers.value,
+            monthlyBudgetCents = _monthlyBudgetCents.value,
+            wallets = freshWallets,
+            transactions = freshTxs,
+            recurringRules = freshRules,
+            merchantMemories = merchantMemories.value,
+            customExpenseCategories = CategoryCatalog.expenseCategories,
+            customIncomeCategories = CategoryCatalog.incomeCategories,
+            customTags = TagCatalog.tags,
+            quickTemplates = _templates.value,
+            smartRules = smartRules.value,
+            savingPlans = _savingPlans.value,
+            installmentPlans = _installmentPlans.value,
+            customCurrencyRates = CurrencyRateManager.customRates,
+            reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
+            appearanceSettingsJson = AppearanceConfigManager.exportConfigJson()
+        )
     }
 
     fun generateFullBackupJson(): String {
@@ -1182,10 +1216,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    suspend fun buildCsvExportString(): String = withContext(Dispatchers.IO) {
+        BackupAndCsvTransferEngine.exportTransactionsToCsv(
+            transactions = repository.getAllTransactions(),
+            wallets = repository.getAllWallets()
+        )
+    }
+
     fun generateCsvExportString(): String {
         return BackupAndCsvTransferEngine.exportTransactionsToCsv(
             transactions = transactions.value,
             wallets = wallets.value
+        )
+    }
+
+    suspend fun previewCsvImportAsync(rawCsv: String): CsvParsePreviewResult = withContext(Dispatchers.IO) {
+        BackupAndCsvTransferEngine.parseExternalCsv(
+            rawCsv = rawCsv,
+            defaultLedger = _currentLedger.value,
+            wallets = repository.getAllWallets(),
+            merchantMemoryManager = app.merchantMemoryManager,
+            existingLedgers = _ledgers.value
         )
     }
 
@@ -1205,7 +1256,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         onResult: (String) -> Unit
     ) {
         viewModelScope.launch {
-            val preview = previewCsvImport(rawCsv)
+            val preview = previewCsvImportAsync(rawCsv)
             if (preview.parsedTransactions.isEmpty() &&
                 preview.newWalletsToCreate.isEmpty() &&
                 preview.existingWalletsToUpdate.isEmpty()
@@ -1213,11 +1264,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 onResult("没有识别到可导入的账本、资产或账单（格式：${preview.detectedSourceFormat}）")
                 return@launch
             }
-            preview.discoveredLedgers.forEach { createLedger(it) }
-            val summary = repository.importExternalBatch(
-                preview = preview,
-                applyToWalletBalance = applyToWalletBalance
-            )
+            preview.discoveredLedgers.forEach { createLedger(it, switchToLedger = false) }
+            val summary = withContext(Dispatchers.IO) {
+                repository.importExternalBatch(
+                    preview = preview,
+                    applyToWalletBalance = applyToWalletBalance
+                )
+            }
             TagCatalog.syncDiscoveredTagsFromHistory(preview.parsedTransactions.map { it.tags })
             val parts = mutableListOf<String>()
             if (preview.newLedgers.isNotEmpty()) {
@@ -1244,14 +1297,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         onResult: (String) -> Unit
     ) {
         viewModelScope.launch {
-            val parsed = BackupAndCsvTransferEngine.parseFullBackupJson(rawJson)
+            val parsed = withContext(Dispatchers.IO) {
+                BackupAndCsvTransferEngine.parseFullBackupJson(rawJson)
+            }
             if (parsed == null) {
                 onResult("备份内容无效或已损坏，无法恢复")
                 return@launch
             }
             val (backupWallets, backupTxs, snapshot) = parsed
             val backupRules = BackupAndCsvTransferEngine.toRecurringRuleEntities(snapshot.recurringRules)
-            val txCount = repository.restoreFullSnapshot(backupWallets, backupTxs, backupRules)
+            val txCount = withContext(Dispatchers.IO) {
+                repository.restoreFullSnapshot(backupWallets, backupTxs, backupRules)
+            }
             if (snapshot.customExpenseCategories.isNotEmpty() || snapshot.customIncomeCategories.isNotEmpty()) {
                 CategoryCatalog.replaceAllCategories(
                     expenseList = snapshot.customExpenseCategories,
@@ -1261,36 +1318,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (snapshot.customTags.isNotEmpty()) {
                 TagCatalog.replaceAllTags(snapshot.customTags)
             }
-            if (snapshot.quickTemplates.isNotEmpty()) {
-                persistTemplates(snapshot.quickTemplates)
-            }
-            if (snapshot.smartRules.isNotEmpty()) {
-                app.smartRuleEngine.replaceAllRules(snapshot.smartRules)
-            }
-            if (snapshot.savingPlans.isNotEmpty()) {
-                _savingPlans.value = snapshot.savingPlans
-                uiPrefs.edit().putString("saved_saving_plans_json", jsonCodec.encodeToString(snapshot.savingPlans)).apply()
-            }
-            if (snapshot.installmentPlans.isNotEmpty()) {
-                _installmentPlans.value = snapshot.installmentPlans
-                uiPrefs.edit().putString("saved_installments_json", jsonCodec.encodeToString(snapshot.installmentPlans)).apply()
-            }
-            if (snapshot.customCurrencyRates.isNotEmpty()) {
-                CurrencyRateManager.replaceAllCustomRates(snapshot.customCurrencyRates)
-            }
+            persistTemplates(snapshot.quickTemplates)
+            app.smartRuleEngine.replaceAllRules(snapshot.smartRules)
+            _savingPlans.value = snapshot.savingPlans
+            uiPrefs.edit().putString("saved_saving_plans_json", jsonCodec.encodeToString(snapshot.savingPlans)).apply()
+            _installmentPlans.value = snapshot.installmentPlans
+            uiPrefs.edit().putString("saved_installments_json", jsonCodec.encodeToString(snapshot.installmentPlans)).apply()
+            CurrencyRateManager.replaceAllCustomRates(snapshot.customCurrencyRates)
             TagCatalog.syncDiscoveredTagsFromHistory(
                 backupTxs.map { it.tags } +
                     snapshot.quickTemplates.map { it.tags } +
                     snapshot.smartRules.map { it.appendTag }
             )
-            snapshot.merchantMemories.forEach { m ->
-                app.merchantMemoryManager.upsertMemory(m.merchantKeyword, m.category, m.preferredWalletId)
+            app.merchantMemoryManager.replaceAllMemories(snapshot.merchantMemories)
+            val restoredLedgers = (snapshot.ledgers + backupTxs.map { it.ledgerName })
+                .map { sanitizeLedgerName(it) }
+                .filter { it.isNotEmpty() }
+                .distinct()
+                .ifEmpty { listOf("默认账本") }
+            _ledgers.value = restoredLedgers
+            uiPrefs.edit().putString("saved_ledgers", restoredLedgers.joinToString("||")).apply()
+            if (_currentLedger.value !in restoredLedgers) {
+                selectLedger(restoredLedgers.first())
             }
-            snapshot.ledgers.forEach { createLedger(it) }
-            if (snapshot.monthlyBudgetCents > 0L) {
-                _monthlyBudgetCents.value = snapshot.monthlyBudgetCents
-                uiPrefs.edit().putLong("monthly_budget_cents", snapshot.monthlyBudgetCents).apply()
-            }
+            val restoredBudget = snapshot.monthlyBudgetCents.coerceAtLeast(0L)
+            _monthlyBudgetCents.value = restoredBudget
+            uiPrefs.edit().putLong("monthly_budget_cents", restoredBudget).apply()
             if (snapshot.reminderSettingsJson.isNotBlank()) {
                 if (ReminderConfigManager.restoreFromBackupJson(snapshot.reminderSettingsJson)) {
                     DailyReminderScheduler.rescheduleAll(app)
@@ -1330,8 +1383,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun settleReimbursement(expenseId: Long, receiveWalletId: Long?) {
         viewModelScope.launch {
-            repository.settleReimbursement(expenseId, receiveWalletId)
-            postMessage("报销已入账")
+            if (repository.settleReimbursement(expenseId, receiveWalletId)) {
+                postMessage("报销已入账")
+            } else {
+                postMessage("请选择有效的报销入账账户")
+            }
         }
     }
 
@@ -1389,7 +1445,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         updateWebDavConfig(config)
         viewModelScope.launch {
-            val backupJson = generateFullBackupJson()
+            val backupJson = buildFullBackupJson()
             val res = WebDavSyncClient.uploadSnapshot(config, backupJson)
             res.fold(
                 onSuccess = { msg ->
@@ -2103,7 +2159,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return targetCategory
         }
         val parentName = targetCategory.substringBefore('-').trim()
-        return if (parentName.isNotEmpty() && CategoryCatalog.hasCategoryPath(parentName, isExpense)) {
+        if (parentName.isEmpty() || parentName in rejectedNewPaths) return null
+        return if (CategoryCatalog.hasCategoryPath(parentName, isExpense)) {
             parentName
         } else {
             null
