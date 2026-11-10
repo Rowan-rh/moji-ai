@@ -1,6 +1,7 @@
 package com.moji.ai
 
 import android.app.Application
+import android.util.Log
 import com.moji.ai.ai.AiAccountingEngine
 import com.moji.ai.ai.AiConfigManager
 import com.moji.ai.ai.MerchantMemoryManager
@@ -15,8 +16,10 @@ import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.DailyReminderScheduler
 import com.moji.ai.notification.SilentBookkeepingNotifier
+import com.moji.ai.service.BillScreenshotStorage
 import com.moji.ai.service.CapturePipelineCoordinator
 import com.moji.ai.update.AppUpdateManager
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -24,7 +27,11 @@ import kotlinx.coroutines.launch
 
 class MoJiApp : Application() {
 
-    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val appExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        Log.e("MoJiApp", "Unhandled appScope exception", throwable)
+    }
+
+    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + appExceptionHandler)
 
     lateinit var database: AppDatabase
         private set
@@ -61,6 +68,7 @@ class MoJiApp : Application() {
         AppLockManager.init(this)
         ReminderConfigManager.init(this)
         AppearanceConfigManager.init(this)
+        BillScreenshotStorage.init(this)
         database = AppDatabase.getInstance(this)
         repository = LedgerRepository(database)
         aiConfigManager = AiConfigManager(this)
@@ -85,7 +93,7 @@ class MoJiApp : Application() {
                 captureCoordinator.repairLegacyEcommerceRecordsIfNeeded()
                 prefs.edit().putBoolean("repaired_legacy_ecommerce_v20261108_3", true).apply()
             }
-            val existingTagStrings = repository.getAllTransactions().map { it.tags } +
+            val existingTagStrings = repository.getAllNonEmptyTagStrings() +
                 smartRuleEngine.rules.value.map { it.appendTag }
             TagCatalog.syncDiscoveredTagsFromHistory(existingTagStrings)
 

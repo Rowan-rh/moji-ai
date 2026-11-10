@@ -212,6 +212,7 @@ private fun CurrencyManagementContent(
         modifier = Modifier
             .fillMaxSize()
             .background(ICostBgGray)
+            .navigationBarsPadding()
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,

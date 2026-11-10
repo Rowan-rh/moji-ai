@@ -111,23 +111,20 @@ object RomKeepAliveGuideHelper {
 
     fun checkNotificationListenerEnabled(context: Context): Boolean {
         val flat = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners") ?: return false
-        return flat.contains(context.packageName)
+        return flat.split(':').any { token ->
+            ComponentName.unflattenFromString(token.trim())?.packageName == context.packageName
+        }
     }
 
     fun checkAccessibilityServiceEnabled(context: Context): Boolean {
         if (PaymentAccessibilityService.instance != null) return true
-        val selectToSpeak = ComponentName(
-            context.packageName,
-            "com.google.android.accessibility.selecttospeak.SelectToSpeakService"
-        ).flattenToString()
-        val legacy = ComponentName(context, PaymentAccessibilityService::class.java).flattenToString()
         val flat = Settings.Secure.getString(
             context.contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
-        return flat.contains(selectToSpeak, ignoreCase = true) ||
-            flat.contains(legacy, ignoreCase = true) ||
-            flat.contains("${context.packageName}/", ignoreCase = true)
+        return flat.split(':').any { token ->
+            ComponentName.unflattenFromString(token.trim())?.packageName?.equals(context.packageName, ignoreCase = true) == true
+        }
     }
 
     fun checkBatteryOptimizationIgnored(context: Context): Boolean {

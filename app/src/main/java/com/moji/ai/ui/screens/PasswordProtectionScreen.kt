@@ -215,7 +215,7 @@ fun PasswordProtectionScreen(
                                 color = ICostTextPrimary
                             )
                             Text(
-                                text = "• 密码采用 SHA-256 随机盐摘要存储于本机，不保存任何明文密码。\n• 连续输错 5 次将自动触发 30 秒防暴力破解冷却保护。\n• 应用锁凭据仅作用于当前设备，不随 .mojibackup 备份文件导出或恢复覆盖。",
+                                text = "• 密码采用 PBKDF2-HMAC-SHA256（12 万轮迭代 + 随机盐）存储于本机，不保存任何明文密码。\n• 连续输错 5 次将自动触发 30 秒防暴力破解冷却保护。\n• 应用锁凭据仅作用于当前设备，不随 .mojibackup 备份文件或系统云备份导出覆盖。",
                                 fontSize = 12.sp,
                                 color = ICostTextSecondary,
                                 lineHeight = 18.sp

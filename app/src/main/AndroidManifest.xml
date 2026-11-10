@@ -26,6 +26,8 @@
     <application
         android:name=".MoJiApp"
         android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -95,6 +97,8 @@
                 <action android:name="com.moji.ai.ACTION_UNDO_TRANSACTION" />
                 <action android:name="com.moji.ai.ACTION_CYCLE_CATEGORY" />
                 <action android:name="com.moji.ai.ACTION_MARK_REIMBURSABLE" />
+                <action android:name="com.moji.ai.ACTION_FORCE_RECORD_DUPLICATE" />
+                <action android:name="com.moji.ai.ACTION_DISMISS_DUPLICATE" />
             </intent-filter>
         </receiver>
 

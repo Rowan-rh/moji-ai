@@ -56,7 +56,7 @@ data class AiParsedTransactionResult(
  * 2. 支付账号匹配：银行卡按后 4 位 (`cardLast4`) 匹配，花呗/白条/零钱/账户余额按汉字匹配。
  */
 class AiAccountingEngine(
-    private val configManager: AiConfigManager,
+    private val configManager: AiConfigManager? = null,
     private val merchantMemoryManager: MerchantMemoryManager? = null
 ) {
     private val httpClient = OkHttpClient.Builder()
@@ -72,14 +72,14 @@ class AiAccountingEngine(
 
     companion object {
         private val KNOWN_FIELD_LABELS = setOf(
-            "返回", "关闭", "更多", "完成", "账单详情", "交易详情", "服务详情", "订单详情",
+            "返回", "关闭", "更多", "完成", "主页", "联系", "账单详情", "交易详情", "服务详情", "订单详情",
             "当前状态", "交易状态", "支付成功", "付款成功", "交易成功", "拼单成功", "待发货", "待收货", "已签收",
             "对方已收钱", "已收钱", "已存入零钱", "已转账", "退款成功", "已全额退款",
             "商品", "商品说明", "转账说明", "收款方备注", "留言", "备注",
             "商户名称", "商户全称", "收款方", "收款方全称", "对方账户", "收单机构",
             "支付方式", "付款方式", "收款方式", "扣款方式", "退款方式", "退回方式", "转入账户", "配送方式", "配送服务",
             "发票类型", "发票信息", "不开发票", "电子普通发票", "交易快照", "商品快照", "收起",
-            "支付时间", "转账时间", "收款时间", "创建时间", "到账时间", "退款时间", "付款时间", "下单时间", "拼单时间", "成交时间", "发货时间",
+            "支付时间", "付款时间", "转账时间", "收款时间", "创建时间", "到账时间", "退款时间", "下单时间", "拼单时间", "成交时间", "发货时间",
             "交易单号", "商户单号", "转账单号", "订单号", "商家订单号", "流水号", "订单编号", "支付宝交易号", "快递单号",
             "商品总价", "商品总额", "商品金额", "订单总价", "订单金额", "原价", "总价",
             "实付", "实付款", "实付金额", "实扣", "实际支付", "应付总额", "合计实付",
@@ -88,20 +88,21 @@ class AiAccountingEngine(
             "申请退款", "再来一单", "查看往来记录", "投诉", "常见问题", "全部账单", "复制",
             "添加", "请选择", "开关", "计入收支", "标签", "账单分类", "账单管理",
             "我的消费图鉴", "进入小程序", "联系商家", "联系客服", "拨打电话", "AA收款", "申请电子回单", "申请电子凭证",
-            "支付奖励", "立即领取", "查看详情", "为您推荐"
+            "支付奖励", "立即领取", "查看详情", "为您推荐", "查看订单", "去商城逛逛"
         )
 
         private val GENERIC_MERCHANT_BLACKLIST = setOf(
             "微信支付", "微信", "支付宝", "云闪付", "招商银行", "工商银行", "建设银行",
-            "中国银行", "农业银行", "交通银行", "账单详情", "交易详情", "订单详情", "支付成功",
+            "中国银行", "农业银行", "交通银行", "邮储银行", "账单详情", "交易详情", "订单详情", "支付成功",
             "付款成功", "交易成功", "转账成功", "收款成功", "还款成功", "提现已发起", "拼单成功",
             "待发货", "待收货", "已签收", "已完成", "买家已付款", "卖家已发货",
             "退款成功", "已全额退款", "扣款成功", "代付成功", "当前状态", "交易状态",
-            "返回", "完成", "更多", "回首页", "个人", "商户", "消费", "支出", "收入",
+            "返回", "完成", "更多", "回首页", "主页", "联系", "留言", "个人", "商户", "消费", "支出", "收入",
             "二维码收款", "扫二维码付款", "浮窗", "退出星标", "搜索", "设置", "复制",
             "消息盒子", "最近消息", "全部账单", "服务详情", "账单管理", "账单分类",
             "商品总价", "商品总额", "实付款", "实付", "店铺优惠", "平台优惠", "百亿补贴", "运费",
-            "我的消费图鉴", "添加", "请选择", "开关", "联系商家", "联系客服", "申请售后", "加入购物车"
+            "我的消费图鉴", "添加", "请选择", "开关", "联系商家", "联系客服", "申请售后", "加入购物车",
+            "查看订单", "去商城逛逛", "主要消费项目包括", "主要消费项目包括："
         )
 
         private val txNoRegex = Regex(
@@ -134,8 +135,88 @@ class AiAccountingEngine(
             "立即评价 | 再次拼单",
             "确认收货 | 查看物流 | 再次拼单",
             "再次拼单 | 查看物流 | 更多",
-            "再次拼单 | 更多"
+            "再次拼单 | 更多",
+            "去商城逛逛",
+            "订单报销",
+            "你有订单可报销",
+            "月月可抢立减券",
+            "| 新人价",
+            "新人价 |",
+            "| 店铺销量",
+            "| 直播中，"
         )
+
+        private val MONTHLY_STATEMENT_SUMMARY_REGEX = Regex(
+            """\d{1,2}月\d{1,2}日\s*[-至~—]\s*\d{1,2}月\d{1,2}日\s*(?:共消费|累计消费|合计消费|总消费)"""
+        )
+
+        private val WECHAT_GENUINE_PAYMENT_SIGNALS = listOf(
+            "微信支付", "微信收款", "服务通知", "已支付", "付款金额", "收款到账",
+            "二维码收款", "扫二维码付款", "[转账]", "向你转账", "请你确认收款",
+            "已收钱", "对方已收钱", "已存入零钱", "零钱提现", "提现", "退款", "交易单号",
+            "转账单号", "商户单号", "当前状态", "交易详情", "账单详情",
+            "支付成功", "付款成功", "扣款成功", "转账成功", "收款成功"
+        )
+
+        private val WATERFALL_PRICE_BADGE_REGEX = Regex(
+            """(?:\|\s*)?(?:¥|￥)\s*(?:\|\s*)?\d{1,6}(?:\s*\|\s*\.\d{1,2}|\.\s*\|\s*\d{1,2}|\.\d{1,2})?\s*\|\s*(?:新人价|券后价|秒杀价|限时价|尝鲜价|折后价|已售\d|店铺销量)"""
+        )
+
+        /**
+         * 识别非实时交易通知（如运营商月结话费汇总短信、微信群/好友营销促销文案等）：
+         * 命中时直接拦截，严禁误记为消费流水。
+         */
+        fun isNonTransactionNotificationOrPromo(
+            rawText: String,
+            sourceAppPackage: String = "",
+            captureMode: String = ""
+        ): Boolean {
+            val text = rawText.trim()
+            if (text.isEmpty()) return true
+
+            // 1. 运营商/信用卡月度汇总账单通知（如 10086「【话费账单】...您10月01日-10月31日共消费11.00元。主要消费项目包括：...」）
+            if (text.contains("【话费账单】") ||
+                text.contains("【月度账单】") ||
+                text.contains("【电子账单】") ||
+                text.contains("主要消费项目包括") ||
+                text.contains("套餐及固定费") ||
+                text.contains("月度账单汇总") ||
+                text.contains("最低还款额") ||
+                MONTHLY_STATEMENT_SUMMARY_REGEX.containsMatchIn(text)
+            ) {
+                return true
+            }
+
+            // 2. 微信群/好友促销广告文案（如「双十一限定福利来袭...名额有限，只限20个名额，已转账为准」）
+            val hasExplicitOrderOrTxNo = text.contains("交易单号") ||
+                text.contains("转账单号") ||
+                text.contains("订单编号") ||
+                text.contains("商户单号")
+            if (!hasExplicitOrderOrTxNo && (
+                    text.contains("已转账为准") ||
+                        text.contains("以转账为准") ||
+                        text.contains("名额有限") ||
+                        text.contains("限定福利来袭") ||
+                        (text.contains("免费送") && text.contains("[表情]"))
+                    )
+            ) {
+                return true
+            }
+
+            // 3. 微信通知栏普通好友/群聊消息（非「微信支付 / 微信收款助手 / 服务通知」且无任何标准动账锚点）
+            val isNotificationChannel = captureMode == "AI_NOTIFICATION" ||
+                text.contains("[AI_NOTIFICATION")
+            val isWechatNotification = (sourceAppPackage == "com.tencent.mm" || text.contains("com.tencent.mm")) &&
+                isNotificationChannel
+            if (isWechatNotification &&
+                !hasExplicitOrderOrTxNo &&
+                WECHAT_GENUINE_PAYMENT_SIGNALS.none { text.contains(it) }
+            ) {
+                return true
+            }
+
+            return false
+        }
 
         /**
          * 截断电商订单详情页底部的「精选好货 / 猜你喜欢 / 相似推荐」商品瀑布流，
@@ -150,18 +231,25 @@ class AiAccountingEngine(
         }
 
         private fun stripEcommerceRecommendationFooterSingle(rawText: String): String {
+            // 先排除抖音支付完成页“你有订单可报销...订单实付¥69.9”里的伪“实付”干扰计算 minCutIndex
+            val sanitizedForCut = rawText.replace("订单实付", "报销参考价")
             val minCutIndex = listOf(
-                rawText.indexOf("订单编号"),
-                rawText.indexOf("交易单号"),
-                rawText.indexOf("实付款"),
-                rawText.indexOf("实付"),
-                rawText.indexOf("应付款"),
-                rawText.indexOf("应付金额"),
-                rawText.indexOf("商品总额"),
-                rawText.indexOf("下单时间")
+                sanitizedForCut.indexOf("订单编号"),
+                sanitizedForCut.indexOf("交易单号"),
+                sanitizedForCut.indexOf("实付款"),
+                sanitizedForCut.indexOf("实付"),
+                sanitizedForCut.indexOf("应付款"),
+                sanitizedForCut.indexOf("应付金额"),
+                sanitizedForCut.indexOf("商品总额"),
+                sanitizedForCut.indexOf("下单时间")
             ).filter { it >= 0 }.maxOrNull() ?: 0
 
             var cutPos = rawText.length
+            WATERFALL_PRICE_BADGE_REGEX.find(rawText, startIndex = minCutIndex)?.let { m ->
+                if (m.range.first in 1 until cutPos) {
+                    cutPos = m.range.first
+                }
+            }
             for (marker in ecommerceFooterMarkers) {
                 val idx = rawText.indexOf(marker, startIndex = minCutIndex)
                 if (idx in 1 until cutPos) {
@@ -172,7 +260,7 @@ class AiAccountingEngine(
         }
 
         /**
-         * 判断采集文本中是否包含明确的支付/交易/下单时间（如 `2026-11-08 14:54:50`、`2026年11月08日 14:54:50`、`昨天 21:18`、`11-05 20:23`）。
+         * 判断采集文本中是否包含明确的支付/交易/下单时间（如 `2026-11-08 14:54:50`、`2026年11月08日 14:54:50`、`26年11月08日20:12`、`昨天 21:18`、`11-05 20:23`）。
          * 没有任何时间的页面（如仅显示“支付成功 + 商户 + 金额 + 完成”的过渡页）一律不予入账。
          */
         fun hasExplicitOccurredTime(
@@ -184,6 +272,7 @@ class AiAccountingEngine(
         private val CN_TIME_UNIT_REGEX = Regex("""(\d{1,2})时(\d{1,2})分(?:(\d{1,2})秒)?""")
         private val TRAILING_COLON_REGEX = Regex(""":(?=\s|$)""")
         private val SPLIT_DATE_PIPE_TIME_REGEX = Regex("""(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?)\s*\|\s*(\d{1,2}:\d{2}(?::\d{2})?)""")
+        private val SHORT_YEAR_CN_DATE_TIME_REGEX = Regex("""(?<!\d)(2\d)年(\d{1,2}月\d{1,2}日)\s*(\d{1,2}:\d{2}(?::\d{2})?)""")
         private val COMPACT_CN_DATE_TIME_REGEX = Regex("""(20\d{2}年\d{1,2}月\d{1,2}日)(\d{1,2}:\d{2}(?::\d{2})?)""")
         private val FULL_DATE_TIME_REGEX = Regex("""(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?\s+\d{1,2}:\d{2}(?::\d{2})?)""")
         private val RELATIVE_DAY_TIME_REGEX = Regex("""(今天|昨天|前天)\s*(\d{1,2}):(\d{2})(?::(\d{2}))?""")
@@ -191,7 +280,7 @@ class AiAccountingEngine(
 
         /**
          * 从账单文本提取「实际购物/交易发生时间（毫秒）」：
-         * 支持 `2026-11-06 21:18:53`、`2026年11月5日 18:24:25`、`2026年11月01日 15时56分23秒`、`昨天 21:18`、`11-05 20:23` 等格式。
+         * 支持 `2026-11-06 21:18:53`、`2026年11月5日 18:24:25`、`26年11月08日20:12`、`2026年11月01日 15时56分23秒`、`昨天 21:18`、`11-05 20:23` 等格式。
          * 注意：
          * 1. 自动剔除「物流轨迹：... 时间：...」中的快递签收时间，防止把快递签收时间误当成下单时间；
          * 2. 严禁使用当前截图时间或订单号前缀伪造时间，无明确时间时返回 `null`。
@@ -203,9 +292,15 @@ class AiAccountingEngine(
         ): Long? {
             val textWithoutLogistics = text.replace(LOGISTICS_TRACE_REGEX, " ")
             val normalized = textWithoutLogistics
-                .replace(CN_TIME_UNIT_REGEX, "$1:$2:$3")
+                .replace(CN_TIME_UNIT_REGEX) { m ->
+                    val hh = m.groupValues[1]
+                    val mm = m.groupValues[2]
+                    val ss = m.groupValues[3].ifEmpty { "00" }
+                    "$hh:$mm:$ss"
+                }
                 .replace(":|", "00|")
                 .replace(TRAILING_COLON_REGEX, ":00")
+                .replace(SHORT_YEAR_CN_DATE_TIME_REGEX, "20$1年$2 $3")
                 .replace(SPLIT_DATE_PIPE_TIME_REGEX, "$1 $2")
                 .replace(COMPACT_CN_DATE_TIME_REGEX, "$1 $2")
             FULL_DATE_TIME_REGEX.find(normalized)?.groupValues?.getOrNull(1)?.trim()?.let { rawDate ->
@@ -244,17 +339,27 @@ class AiAccountingEngine(
                 val hour = m.groupValues[5].toIntOrNull() ?: return@let
                 val minute = m.groupValues[6].toIntOrNull() ?: return@let
                 val second = m.groupValues[7].toIntOrNull() ?: 0
-                if (month in 0..11 && day in 1..31 && hour in 0..23 && minute in 0..59) {
-                    val cal = Calendar.getInstance().apply {
-                        timeInMillis = referenceMillis
-                        set(Calendar.MONTH, month)
-                        set(Calendar.DAY_OF_MONTH, day)
-                        set(Calendar.HOUR_OF_DAY, hour)
-                        set(Calendar.MINUTE, minute)
-                        set(Calendar.SECOND, second)
-                        set(Calendar.MILLISECOND, 0)
-                    }
-                    return cal.timeInMillis
+                if (month in 0..11 && day in 1..31 && hour in 0..23 && minute in 0..59 && second in 0..59) {
+                    val parsedMillis = runCatching {
+                        val cal = Calendar.getInstance().apply {
+                            timeInMillis = referenceMillis
+                            isLenient = false
+                            set(Calendar.MONTH, month)
+                            set(Calendar.DAY_OF_MONTH, day)
+                            set(Calendar.HOUR_OF_DAY, hour)
+                            set(Calendar.MINUTE, minute)
+                            set(Calendar.SECOND, second)
+                            set(Calendar.MILLISECOND, 0)
+                        }
+                        var millis = cal.timeInMillis
+                        if (millis > referenceMillis + 86_400_000L) {
+                            cal.isLenient = true
+                            cal.add(Calendar.YEAR, -1)
+                            millis = cal.timeInMillis
+                        }
+                        millis
+                    }.getOrNull()
+                    if (parsedMillis != null) return parsedMillis
                 }
             }
 
@@ -270,9 +375,27 @@ class AiAccountingEngine(
         recentExpenses: List<TransactionEntity>,
         capturedAtMillis: Long = System.currentTimeMillis()
     ): TransactionEntity? = withContext(Dispatchers.IO) {
-        val config = configManager.getConfig()
+        if (isNonTransactionNotificationOrPromo(rawText, sourceAppPackage, captureMode)) {
+            return@withContext null
+        }
+        val config = configManager?.getConfig() ?: AiConfig(
+            provider = AiProviderType.OPENAI_COMPATIBLE,
+            baseUrl = "",
+            apiKey = "",
+            modelName = "",
+            enableAccessibilityCapture = true,
+            enableNotificationCapture = true,
+            enableHeuristicFallback = true
+        )
 
-        val localFallback = localSmartFallbackParse(rawText, sourceAppPackage, wallets, recentExpenses, capturedAtMillis)
+        val localFallback = localSmartFallbackParse(
+            rawText = rawText,
+            sourceAppPackage = sourceAppPackage,
+            wallets = wallets,
+            recentExpenses = recentExpenses,
+            referenceMillis = capturedAtMillis,
+            captureMode = captureMode
+        )
 
         // 对于无障碍/OCR 结构化账单详情页，若本地高智商解析器已高置信度提取出金额与字段，直接 0 延迟返回，避免网络请求拖慢流体云弹出速度
         val shouldSkipNetworkForFastScreenCapture = localFallback != null &&
@@ -304,7 +427,12 @@ class AiAccountingEngine(
             null
         }
 
-        if (finalResult == null || !finalResult.isValidTransaction || finalResult.amount <= 0.0) {
+        if (finalResult == null ||
+            !finalResult.isValidTransaction ||
+            !finalResult.amount.isFinite() ||
+            finalResult.amount <= 0.0 ||
+            finalResult.amount > 10_000_000.0
+        ) {
             return@withContext null
         }
 
@@ -341,8 +469,14 @@ class AiAccountingEngine(
             localFallback?.quantityDesc ?: "1件"
         }
 
-        val resolvedSourceWalletId = finalResult.sourceWalletId ?: localFallback?.sourceWalletId
-        val resolvedTargetWalletId = finalResult.targetWalletId ?: localFallback?.targetWalletId
+        val validWalletIds = wallets.mapTo(hashSetOf()) { it.id }
+        val validExpenseIds = recentExpenses.mapTo(hashSetOf()) { it.id }
+        val resolvedSourceWalletId = (finalResult.sourceWalletId?.takeIf { it in validWalletIds })
+            ?: (localFallback?.sourceWalletId?.takeIf { it in validWalletIds })
+        val resolvedTargetWalletId = (finalResult.targetWalletId?.takeIf { it in validWalletIds })
+            ?: (localFallback?.targetWalletId?.takeIf { it in validWalletIds })
+        val resolvedRelatedExpenseId = finalResult.relatedExpenseId?.takeIf { it in validExpenseIds }
+            ?: localFallback?.relatedExpenseId?.takeIf { it in validExpenseIds }
         val resolvedDiscountCents = maxOf(finalResult.discountCents, localFallback?.discountCents ?: 0L)
 
         val dedupKey = when {
@@ -364,7 +498,7 @@ class AiAccountingEngine(
             note = finalResult.note,
             sourceWalletId = resolvedSourceWalletId,
             targetWalletId = resolvedTargetWalletId,
-            relatedTransactionId = finalResult.relatedExpenseId,
+            relatedTransactionId = resolvedRelatedExpenseId,
             timestamp = resolvedOccurredAt,
             capturedAtMillis = capturedAtMillis,
             orderKey = resolvedOrderKey,
@@ -391,12 +525,15 @@ class AiAccountingEngine(
         wallets: List<WalletEntity>,
         preferCredit: Boolean? = null
     ): WalletEntity? {
-        val explicitCardLast4Pattern = Regex("""(?:[(（]|尾号|后4位|后四位|卡号)\s*(\d{4})\s*[)）]?""")
+        val explicitCardLast4Pattern = Regex(
+            """(?:[(（]\s*(?:[^\d)）]{1,12}\s*)?(\d{4})\s*[)）]|(?:尾号|后4位|后四位|卡号|(?:储蓄卡|借记卡|信用卡)\s*)\s*(\d{4})(?!\d))"""
+        )
         val prioritizedScopes = listOf(payMethodRaw, fullText).filter { it.isNotBlank() }
 
         for (scopeText in prioritizedScopes) {
             val extractedLast4List = explicitCardLast4Pattern.findAll(scopeText)
-                .map { it.groupValues[1] }
+                .map { it.groupValues[1].ifEmpty { it.groupValues[2] } }
+                .filter { it.isNotEmpty() }
                 .distinct()
                 .toList()
 
@@ -624,8 +761,9 @@ $recentDesc
         wallets: List<WalletEntity>,
         recentExpenses: List<TransactionEntity>
     ): AiParsedTransactionResult? {
-        val base = config.baseUrl.trimEnd('/')
-        val endpoint = "$base/models/${config.modelName}:generateContent?key=${config.apiKey}"
+        val base = config.baseUrl.trimEnd('/').ifBlank { "https://generativelanguage.googleapis.com/v1beta" }
+        val safeModelName = java.net.URLEncoder.encode(config.modelName.trim(), "UTF-8")
+        val endpoint = "$base/models/$safeModelName:generateContent"
 
         val requestJson = buildJsonObject {
             put("systemInstruction", buildJsonObject {
@@ -651,6 +789,11 @@ $recentDesc
 
         val request = Request.Builder()
             .url(endpoint)
+            .apply {
+                if (config.apiKey.isNotBlank()) {
+                    addHeader("x-goog-api-key", config.apiKey)
+                }
+            }
             .post(requestJson.toString().toRequestBody("application/json; charset=utf-8".toMediaType()))
             .build()
 
@@ -684,8 +827,12 @@ $recentDesc
         sourceAppPackage: String,
         wallets: List<WalletEntity>,
         recentExpenses: List<TransactionEntity>,
-        referenceMillis: Long = System.currentTimeMillis()
+        referenceMillis: Long = System.currentTimeMillis(),
+        captureMode: String = ""
     ): AiParsedTransactionResult? {
+        if (isNonTransactionNotificationOrPromo(rawText, sourceAppPackage, captureMode)) {
+            return null
+        }
         // 1. 先截断拼多多/京东/淘宝底部推荐商品瀑布流，修复端侧 OCR 常见形近字，再合并拆分金额（如 "¥ | 29 | .90"、"¥29 | .90"、"¥ | 29. | 90" -> "¥29.90"）
         val strippedText = stripEcommerceRecommendationFooter(rawText)
             .replace(Regex("""\[AI_[A-Z_]+\s*\|\s*[^\]]+\]:\s*"""), "")
@@ -761,10 +908,21 @@ $recentDesc
                     }
                 }
             }
+            val inlineBankCardMatch = Regex("""([A-Za-z一-龥]{2,8}银行(?:信用卡|储蓄卡|借记卡))\s*[(（]?\s*(\d{4})\s*[)）]?""")
+                .find(strippedText)
+            val smsBankTailMatch = Regex("""【([^】]{2,8}银行)】.*?尾号(\d{4})(?:信用卡|储蓄卡|借记卡|账户|卡)?""")
+                .find(strippedText)
             found.ifBlank {
                 findValueAfterLabel("支付方式", "付款方式", "收款方式", "扣款方式", "退款方式", "退回方式", "转入账户").orEmpty()
             }.ifBlank {
                 when {
+                    inlineBankCardMatch != null -> "${inlineBankCardMatch.groupValues[1]}(${inlineBankCardMatch.groupValues[2]})"
+                    smsBankTailMatch != null -> {
+                        val bankName = smsBankTailMatch.groupValues[1]
+                        val tail4 = smsBankTailMatch.groupValues[2]
+                        val cardKind = if (strippedText.contains("信用卡")) "信用卡" else "储蓄卡"
+                        "$bankName$cardKind($tail4)"
+                    }
                     strippedText.contains("多多支付") -> "多多支付"
                     strippedText.contains("抖音月付") -> "抖音月付"
                     strippedText.contains("抖音支付") -> "抖音支付"
@@ -796,11 +954,15 @@ $recentDesc
             labels = listOf("商户单号", "商家订单号", "商户订单号")
         )
         val orderKey = extractedTxNo.ifBlank { extractedMerchantOrderNo }
+        val allowReferenceTimeFallback = captureMode == "AI_NOTIFICATION" ||
+            captureMode == "AI_SANDBOX" ||
+            rawText.contains("[AI_NOTIFICATION") ||
+            rawText.contains("[AI_SANDBOX")
         val occurredAtMillis = extractOccurredTimeMillis(
             text = if (payTimeVal.isNotBlank()) "$payTimeVal | $strippedText" else strippedText,
             referenceMillis = referenceMillis,
             orderKey = orderKey
-        ) ?: return null
+        ) ?: referenceMillis.takeIf { allowReferenceTimeFallback } ?: return null
 
         // 1. 识别币种与【原价 / 优惠 / 实扣】三元组（iCost 模板规范）
         val currency = when {
@@ -840,8 +1002,8 @@ $recentDesc
         )
 
         // 4. 信用卡/花呗还款
-        if (strippedText.contains("还款成功") || strippedText.contains("还花呗") || strippedText.contains("还信用卡") ||
-            statusValue.contains("还款") || extractedMerchant.contains("信用卡还款") || extractedMerchant.contains("花呗还款")
+        if (strippedText.contains("还款成功") || strippedText.contains("自动还款") || strippedText.contains("还花呗") || strippedText.contains("还信用卡") ||
+            statusValue.contains("还款") || extractedMerchant.contains("信用卡还款") || extractedMerchant.contains("花呗还款") || extractedMerchant.contains("自动还款")
         ) {
             val creditWallet = matchWalletForPayment(payMethodVal, strippedText, sourceAppPackage, wallets, preferCredit = true)
                 ?: wallets.firstOrNull { it.type.isLiability }
@@ -856,7 +1018,7 @@ $recentDesc
                 itemQuantity = itemQuantity,
                 quantityDesc = quantityDesc,
                 category = "信用还款",
-                merchant = creditWallet?.name ?: "信用账户还款",
+                merchant = creditWallet?.name ?: extractedMerchant.takeIf { it.contains("还款") } ?: "信用账户还款",
                 note = cleanNote.ifBlank { "信用账户自动还款" },
                 sourceWalletId = debitWallet?.id,
                 targetWalletId = creditWallet?.id,
@@ -927,9 +1089,15 @@ $recentDesc
         if (isRefundEvent) {
             val receiveWallet = matchWalletForPayment(payMethodVal, strippedText, sourceAppPackage, wallets)
             val targetCents = (amount * 100).roundToLong()
-            val matchedExpense = recentExpenses.firstOrNull {
-                (orderKey.isNotBlank() && it.orderKey == orderKey) ||
-                    it.amountCnyCents == targetCents
+            val targetCurrency = CurrencyCode.fromCode(currency)
+            val targetCnyCents = (targetCents * CurrencyRateManager.getEffectiveRateToCny(targetCurrency)).roundToLong()
+            val matchedExpense = recentExpenses.firstOrNull { exp ->
+                (orderKey.isNotBlank() && exp.orderKey == orderKey) ||
+                    (exp.amountCnyCents == targetCnyCents &&
+                        exp.timestamp <= occurredAtMillis + 86_400_000L &&
+                        (extractedMerchant == "日常商户" ||
+                            exp.merchant.contains(extractedMerchant, ignoreCase = true) ||
+                            extractedMerchant.contains(exp.merchant, ignoreCase = true)))
             }
             val fallbackCategory = WeightedCategoryClassifier.classifyExpense(
                 "$extractedMerchant $goodsValue $billCategoryVal",
@@ -957,7 +1125,7 @@ $recentDesc
             )
         }
 
-        // 7. 日常收入（仅当金额显式为 + 或状态明确为收款/存入零钱，且不含付款成功/支付成功/支出标记）
+        // 7. 日常收入（仅当金额显式为 + 或状态明确为收款/存入零钱/银行入账，且不含付款成功/支付成功/支出标记）
         val hasExpenseIndicator = priceBreakdown.sign == '-' ||
             strippedText.contains("付款成功") ||
             strippedText.contains("支付成功") ||
@@ -966,8 +1134,14 @@ $recentDesc
             strippedText.contains("实付") ||
             strippedText.contains("支出") ||
             strippedText.contains("扣款")
+        val isBankTransferIncome = strippedText.contains("银联入账") ||
+            strippedText.contains("网联入账") ||
+            strippedText.contains("跨行转入") ||
+            strippedText.contains("本行转入") ||
+            strippedText.contains("收入金额")
         val isExplicitIncome = !hasExpenseIndicator && (
             priceBreakdown.sign == '+' ||
+                isBankTransferIncome ||
                 statusValue.contains("已存入零钱") ||
                 statusValue.contains("已收钱") ||
                 statusValue.contains("收款成功") ||
@@ -979,6 +1153,12 @@ $recentDesc
 
         if (isExplicitIncome) {
             val targetWallet = matchWalletForPayment(payMethodVal, strippedText, sourceAppPackage, wallets, preferCredit = false)
+            val incomeCategory = when {
+                goodsValue.contains("工资") || goodsValue.contains("薪") || strippedText.contains("代发工资") || strippedText.contains("工资入账") -> "工资"
+                strippedText.contains("收到红包") || strippedText.contains("红包") -> "红包"
+                isBankTransferIncome -> "其他"
+                else -> "红包"
+            }
             return AiParsedTransactionResult(
                 isValidTransaction = true,
                 type = TransactionType.INCOME.name,
@@ -986,7 +1166,7 @@ $recentDesc
                 currency = currency,
                 itemQuantity = itemQuantity,
                 quantityDesc = quantityDesc,
-                category = if (goodsValue.contains("工资") || goodsValue.contains("薪")) "薪资-工资" else "人情-红包收款",
+                category = incomeCategory,
                 merchant = if (extractedMerchant != "日常商户") extractedMerchant else "收款入账",
                 note = cleanNote.ifBlank { "自动识别收款入账" },
                 targetWalletId = targetWallet?.id,
@@ -1249,11 +1429,13 @@ $recentDesc
         strippedText: String,
         tokens: List<String>
     ): ExtractedAmountInfo? {
-        val tokenAmountRegex = Regex("""^(?:(支出|付款|消费|收入|收款)\s*)?([-+−])?\s*(?:¥|￥|RMB|CNY|USD|HKD|EUR|JPY|\$)?\s*([0-9]{1,7}(?:\.[0-9]{1,2})?)\s*(?:元)?$""")
-        val signOrCurrencyTokens = setOf("-", "+", "−", "¥", "￥", "支出", "收入", "付款", "收款")
+        val tokenAmountRegex = Regex("""^(?:(支出金额|收入金额|支出|付款|消费|收入|收款)\s*)?([-+−])?\s*(?:¥|￥|RMB|CNY|USD|HKD|EUR|JPY|\$)?\s*([0-9]{1,7}(?:\.[0-9]{1,2})?)\s*(?:元)?$""")
+        val signOrCurrencyTokens = setOf("-", "+", "−", "¥", "￥", "支出", "收入", "付款", "收款", "支出金额", "收入金额")
+        val waterfallNextLabels = setOf("新人价", "券后价", "秒杀价", "限时价", "尝鲜价", "折后价")
         for (i in tokens.indices) {
             val rawTk = tokens[i].replace(",", "").trim()
             val prevTk = tokens.getOrNull(i - 1)?.trim().orEmpty()
+            val nextTk = tokens.getOrNull(i + 1)?.trim().orEmpty()
             val tk = if (prevTk in signOrCurrencyTokens && rawTk.firstOrNull()?.isDigit() == true) {
                 "$prevTk$rawTk"
             } else {
@@ -1266,7 +1448,9 @@ $recentDesc
             if (!hasExplicitMarker) continue
 
             if (prevTk.contains("优惠") || prevTk.contains("立减") || prevTk.contains("抵扣") ||
-                prevTk.contains("减免") || prevTk.contains("本月支出") || prevTk.contains("累计")
+                prevTk.contains("减免") || prevTk.contains("本月支出") || prevTk.contains("累计") ||
+                prevTk.contains("余额") || prevTk in waterfallNextLabels ||
+                nextTk in waterfallNextLabels || nextTk.startsWith("已售") || nextTk.startsWith("店铺销量")
             ) {
                 continue
             }
@@ -1274,8 +1458,8 @@ $recentDesc
             val prefixWord = m.groupValues[1]
             val explicitSign = m.groupValues[2].firstOrNull()?.let { if (it == '−') '-' else it }
             val inferredSign = explicitSign ?: when (prefixWord) {
-                "支出", "付款", "消费" -> '-'
-                "收入", "收款" -> '+'
+                "支出", "支出金额", "付款", "消费" -> '-'
+                "收入", "收入金额", "收款" -> '+'
                 else -> null
             }
             val num = m.groupValues[3].toDoubleOrNull() ?: continue
@@ -1288,16 +1472,30 @@ $recentDesc
             }
         }
 
-        val inlineAmountRegex = Regex(
-            """(?<!本月)(?:¥|￥|RMB|CNY|USD|HKD|EUR|JPY|HK\$|\$|€|金额[:：]?|付款[:：]?|已支付|支出|消费|转出|到账|还款|退款|收款)\s*([-+−])?\s*([0-9]+(?:\.[0-9]{1,2})?)|([-+−])?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:元|美元|港币|欧元|日元)|(?:^|\||\s)([-+−])\s*([0-9]{1,7}\.[0-9]{1,2})(?=\s|\||$)"""
+        // 先剥离银行短信尾部的「余额1257.79元 / 可用余额xxx元」，防止把卡内余额误识别为交易金额
+        val textWithoutBalanceClause = strippedText.replace(
+            Regex("""(?:可用余额|账户余额|当前余额|余额)\s*[:：]?\s*(?:¥|￥|RMB|CNY)?\s*[0-9,]+(?:\.[0-9]{1,2})?\s*元?"""),
+            " "
         )
-        for (m in inlineAmountRegex.findAll(strippedText)) {
+        val inlineAmountRegex = Regex(
+            """(?<!本月)(?:¥|￥|RMB|CNY|USD|HKD|EUR|JPY|HK\$|\$|€|支出金额[:：]?|收入金额[:：]?|付款金额[:：]?|收款金额[:：]?|金额[:：]?|付款[:：]?|已支付|支出|消费|转出|银联入账|网联入账|入账|到账|自动还款|还款|退款|收入|收款)\s*([-+−])?\s*([0-9]+(?:\.[0-9]{1,2})?)|([-+−])?\s*([0-9]+(?:\.[0-9]{1,2})?)\s*(?:元|美元|港币|欧元|日元)|(?:^|\||\s)([-+−])\s*([0-9]{1,7}\.[0-9]{1,2})(?=\s|\||$)"""
+        )
+        for (m in inlineAmountRegex.findAll(textWithoutBalanceClause)) {
+            val matchedText = m.value
             val signStr = m.groupValues[1].ifEmpty { m.groupValues[3] }.ifEmpty { m.groupValues[5] }
-            val sign = signStr.firstOrNull()?.let { if (it == '−') '-' else it }
+            val explicitSign = signStr.firstOrNull()?.let { if (it == '−') '-' else it }
+            val inferredSign = explicitSign ?: when {
+                matchedText.contains("收入") || matchedText.contains("收款") ||
+                    matchedText.contains("入账") || matchedText.contains("到账") -> '+'
+                matchedText.contains("支出") || matchedText.contains("消费") ||
+                    matchedText.contains("付款") || matchedText.contains("已支付") ||
+                    matchedText.contains("转出") -> '-'
+                else -> null
+            }
             val numStr = m.groupValues[2].ifEmpty { m.groupValues[4] }.ifEmpty { m.groupValues[6] }
             val num = numStr.toDoubleOrNull() ?: continue
             if (num > 0.0) {
-                return ExtractedAmountInfo(amount = num, sign = sign, tokenIndex = -1)
+                return ExtractedAmountInfo(amount = num, sign = inferredSign, tokenIndex = -1)
             }
         }
 
@@ -1405,6 +1603,22 @@ $recentDesc
         else -> "日常商户"
     }
 
+    private fun unwrapCounterpartyToken(raw: String): String {
+        var s = raw.trim()
+            .removePrefix("转账-转给")
+            .removePrefix("转账-来自")
+            .removePrefix("扫二维码付款-给")
+            .removePrefix("二维码收款-来自")
+            .removePrefix("二维码付款-给")
+            .removePrefix("付款-给")
+            .trim()
+        Regex("""^待(.+?)(?:确认收款|确认收钱|收款)$""").matchEntire(s)?.let { m ->
+            val inner = m.groupValues[1].trim()
+            if (inner.isNotBlank()) s = inner
+        }
+        return s
+    }
+
     private fun extractStructuredMerchant(
         strippedText: String,
         tokens: List<String>,
@@ -1414,19 +1628,54 @@ $recentDesc
         sourceAppPackage: String?,
         fallback: String
     ): String {
-        if (isCleanMerchantCandidate(merchantFieldVal)) {
-            return merchantFieldVal
+        val unwrappedFieldVal = unwrapCounterpartyToken(merchantFieldVal)
+        if (isCleanMerchantCandidate(unwrappedFieldVal)) {
+            return unwrappedFieldVal
+        }
+
+        // 1. 优先识别微信转账/扫码收付款详情页显式带有「扫二维码付款-给XXX」「转账-转给XXX」「待XXX确认收款」的真实交易对手节点
+        val explicitCounterpartyPrefixes = listOf(
+            "扫二维码付款-给",
+            "二维码收款-来自",
+            "二维码付款-给",
+            "转账-转给",
+            "转账-来自"
+        )
+        for (tk in tokens) {
+            val trimmed = tk.trim()
+            if (explicitCounterpartyPrefixes.any { trimmed.startsWith(it) } ||
+                (trimmed.startsWith("待") && (trimmed.endsWith("确认收款") || trimmed.endsWith("确认收钱")))
+            ) {
+                val candidate = unwrapCounterpartyToken(trimmed)
+                if (isCleanMerchantCandidate(candidate)) {
+                    return candidate
+                }
+            }
+        }
+
+        // 2. 识别银行扣款/入账短信中的动账摘要与商户（如「您尾号3870账户快捷支付-抖音支付，支出金额...」「您尾号3870账户银联入账，收入金额...」「您尾号3870账户自动还款，支出金额...」）
+        Regex("""尾号\d{4}(?:账户|信用卡|储蓄卡|借记卡|卡)?([^\s|,，。；;\n]{2,24})""").find(strippedText)?.let { m ->
+            val rawAction = m.groupValues[1].trim()
+            val cleanedAction = rawAction
+                .removePrefix("快捷支付-")
+                .removePrefix("快捷支付—")
+                .removePrefix("快捷消费-")
+                .removePrefix("财付通-")
+                .removePrefix("支付宝-")
+                .removePrefix("微信支付-")
+                .removePrefix("银联消费-")
+                .removePrefix("POS消费-")
+                .removePrefix("消费-")
+                .trim()
+            if (isCleanMerchantCandidate(cleanedAction)) {
+                return cleanedAction
+            }
         }
 
         var titleBeforeAmount: String? = null
         if (amountTokenIndex > 0) {
-            for (idx in (amountTokenIndex - 1) downTo maxOf(0, amountTokenIndex - 3)) {
-                val candidate = tokens[idx]
-                    .removePrefix("转账-转给")
-                    .removePrefix("转账-来自")
-                    .removePrefix("扫二维码付款-给")
-                    .removePrefix("二维码收款-来自")
-                    .trim()
+            for (idx in (amountTokenIndex - 1) downTo maxOf(0, amountTokenIndex - 4)) {
+                val candidate = unwrapCounterpartyToken(tokens[idx])
                 if (isCleanMerchantCandidate(candidate)) {
                     titleBeforeAmount = candidate
                     break
@@ -1444,7 +1693,7 @@ $recentDesc
         )
         for (p in patterns) {
             for (m in p.findAll(strippedText)) {
-                val candidate = m.groupValues[1].trim()
+                val candidate = unwrapCounterpartyToken(m.groupValues[1])
                 if (isCleanMerchantCandidate(candidate)) {
                     return candidate
                 }
@@ -1453,7 +1702,7 @@ $recentDesc
 
         merchantMemoryManager?.memoriesFlow?.value?.firstOrNull {
             strippedText.contains(it.merchantKeyword, ignoreCase = true)
-        }?.let { return it.merchantKeyword }
+        }?.let { return unwrapCounterpartyToken(it.merchantKeyword) }
 
         val knownMerchants = listOf(
             "瑞幸咖啡", "星巴克", "Manner", "霸王茶姬", "喜茶", "奈雪", "蜜雪冰城", "古茗", "茶百道",
@@ -1464,8 +1713,9 @@ $recentDesc
         )
         knownMerchants.firstOrNull { strippedText.contains(it, ignoreCase = true) }?.let { return it }
 
-        if (isCleanMerchantCandidate(goodsValue)) {
-            return goodsValue.take(16)
+        val unwrappedGoods = unwrapCounterpartyToken(goodsValue)
+        if (isCleanMerchantCandidate(unwrappedGoods)) {
+            return unwrappedGoods.take(16)
         }
 
         return fallback
@@ -1523,7 +1773,7 @@ $recentDesc
 
     private fun defaultCategoryForType(type: TransactionType): String = when (type) {
         TransactionType.EXPENSE -> "餐饮"
-        TransactionType.INCOME -> "其他收入"
+        TransactionType.INCOME -> "其他"
         TransactionType.TRANSFER -> "内部转账"
         TransactionType.REPAYMENT -> "信用还款"
         TransactionType.REFUND_OFFSET -> "退款入账"

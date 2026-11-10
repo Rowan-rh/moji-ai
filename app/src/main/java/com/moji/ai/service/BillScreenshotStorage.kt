@@ -22,6 +22,38 @@ object BillScreenshotStorage {
 
     private const val SCREENSHOT_DIR_NAME = "bill_screenshots"
 
+    @Volatile
+    private var screenshotDirCanonicalPrefix: String? = null
+
+    fun init(context: Context) {
+        runCatching {
+            val dir = File(context.applicationContext.filesDir, SCREENSHOT_DIR_NAME)
+            if (!dir.exists()) {
+                dir.mkdirs()
+            }
+            screenshotDirCanonicalPrefix = dir.canonicalPath.replace('\\', '/').trimEnd('/') + "/"
+        }
+    }
+
+    fun isSafeScreenshotFile(file: File, context: Context? = null): Boolean {
+        if (!file.exists() || !file.isFile || !file.extension.equals("webp", ignoreCase = true)) {
+            return false
+        }
+        return runCatching {
+            val canonical = file.canonicalPath.replace('\\', '/')
+            val expectedPrefix = context?.let {
+                File(it.applicationContext.filesDir, SCREENSHOT_DIR_NAME)
+                    .canonicalPath.replace('\\', '/').trimEnd('/') + "/"
+            } ?: screenshotDirCanonicalPrefix
+            if (expectedPrefix != null) {
+                canonical.startsWith(expectedPrefix) &&
+                    !canonical.removePrefix(expectedPrefix).contains('/')
+            } else {
+                Regex(""".*/files/bill_screenshots/[^/]+\.webp$""", RegexOption.IGNORE_CASE).matches(canonical)
+            }
+        }.getOrDefault(false)
+    }
+
     fun saveBitmap(
         context: Context,
         bitmap: Bitmap,
@@ -31,6 +63,9 @@ object BillScreenshotStorage {
             val dir = File(context.filesDir, SCREENSHOT_DIR_NAME)
             if (!dir.exists()) {
                 dir.mkdirs()
+            }
+            if (screenshotDirCanonicalPrefix == null) {
+                screenshotDirCanonicalPrefix = dir.canonicalPath.replace('\\', '/').trimEnd('/') + "/"
             }
 
             val bos = ByteArrayOutputStream()
@@ -64,7 +99,7 @@ object BillScreenshotStorage {
         if (path.isNullOrBlank()) return
         runCatching {
             val f = File(path)
-            if (f.exists() && f.isFile) {
+            if (isSafeScreenshotFile(f)) {
                 f.delete()
             }
         }

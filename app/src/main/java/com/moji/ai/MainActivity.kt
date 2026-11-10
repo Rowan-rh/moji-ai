@@ -19,6 +19,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.graphics.Color
@@ -83,14 +84,22 @@ class MainActivity : ComponentActivity() {
                 android.graphics.Color.TRANSPARENT
             )
         )
+        val initialLockConfig = AppLockManager.configFlow.value
+        if (initialLockConfig.enabled && initialLockConfig.hideRecentTaskPreview) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        }
         requestPostNotificationPermissionIfNeeded()
-        handleLaunchIntent(intent)
+        if (savedInstanceState == null) {
+            handleLaunchIntent(intent)
+        }
 
         setContent {
             val appLockConfig by viewModel.passwordProtectionConfig.collectAsState()
             val appearanceConfig by viewModel.appearanceSettingsConfig.collectAsState()
             val systemDark = isSystemInDarkTheme()
-            AppearanceConfigManager.updateSystemDarkState(systemDark)
+            SideEffect {
+                AppearanceConfigManager.updateSystemDarkState(systemDark)
+            }
             val isDark = AppearanceConfigManager.resolveIsDarkTheme(appearanceConfig, systemDark)
 
             LaunchedEffect(appLockConfig.enabled, appLockConfig.hideRecentTaskPreview) {
@@ -156,7 +165,6 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        AppLockManager.onAppForegrounded()
         enableHighRefreshRateMode()
     }
 

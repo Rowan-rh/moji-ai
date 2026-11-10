@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -247,6 +248,8 @@ fun TagManagementScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(ICostBgGray)
+            .statusBarsPadding()
+            .navigationBarsPadding()
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
@@ -459,7 +462,7 @@ fun TagManagementScreen(
                 itemsIndexed(
                     items = filteredTagsWithGlobalIndex,
                     key = { _, pair -> pair.second.name }
-                ) { _, (globalIndex, tag) ->
+                ) { filteredIdx, (globalIndex, tag) ->
                     val summary = statsByTag[tag.name]
                     val txCount = summary?.transactions?.size ?: 0
                     val netExpenseCents = summary?.netExpenseCents ?: 0L
@@ -566,19 +569,29 @@ fun TagManagementScreen(
                                     verticalAlignment = Alignment.CenterVertically,
                                     horizontalArrangement = Arrangement.spacedBy(2.dp)
                                 ) {
-                                    // 上移
+                                    // 上移（在当前筛选分组内与上一个可见标签互换）
                                     TagSmallActionBtn(
                                         icon = Icons.Default.KeyboardArrowUp,
                                         contentDescription = "上移${tag.name}",
-                                        enabled = globalIndex > 0,
-                                        onClick = { onMoveTag(globalIndex, -1) }
+                                        enabled = filteredIdx > 0,
+                                        onClick = {
+                                            if (filteredIdx > 0) {
+                                                val prevGlobalIndex = filteredTagsWithGlobalIndex[filteredIdx - 1].first
+                                                onMoveTag(globalIndex, prevGlobalIndex - globalIndex)
+                                            }
+                                        }
                                     )
-                                    // 下移
+                                    // 下移（在当前筛选分组内与下一个可见标签互换）
                                     TagSmallActionBtn(
                                         icon = Icons.Default.KeyboardArrowDown,
                                         contentDescription = "下移${tag.name}",
-                                        enabled = globalIndex < tags.lastIndex,
-                                        onClick = { onMoveTag(globalIndex, 1) }
+                                        enabled = filteredIdx < filteredTagsWithGlobalIndex.lastIndex,
+                                        onClick = {
+                                            if (filteredIdx < filteredTagsWithGlobalIndex.lastIndex) {
+                                                val nextGlobalIndex = filteredTagsWithGlobalIndex[filteredIdx + 1].first
+                                                onMoveTag(globalIndex, nextGlobalIndex - globalIndex)
+                                            }
+                                        }
                                     )
                                     // 合并标签
                                     TagSmallActionBtn(

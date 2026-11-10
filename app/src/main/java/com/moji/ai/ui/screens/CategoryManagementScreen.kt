@@ -151,6 +151,7 @@ fun CategoryManagementScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(ICostBgGray)
+            .navigationBarsPadding()
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,

@@ -19,7 +19,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -80,19 +80,19 @@ fun AppearanceManagementScreen(
     listState: LazyListState = rememberLazyListState()
 ) {
     BackHandler(onBack = onBack)
-    val topInset = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(ICostBgGray)
+            .statusBarsPadding()
             .navigationBarsPadding()
     ) {
         // 顶部导航栏
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = topInset + 10.dp, bottom = 10.dp, start = 16.dp, end = 16.dp),
+                .padding(top = 10.dp, bottom = 10.dp, start = 16.dp, end = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {

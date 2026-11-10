@@ -123,6 +123,7 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToLong
 
 /**
  * @param onOpenAiSandbox 已不再使用：首页不再展示识账测试入口（已移至「智能记账」页）。保留参数以兼容旧调用。
@@ -1067,7 +1068,7 @@ fun ICostLedgerHomeScreen(
             groupedByDay.forEach { (dayKey, dayList) ->
                 val dayHeader = dayHeaderFmt.format(Date(dayList.first().timestamp))
                 val dayNetExpenseCents = dayList
-                    .filter { it.type == TransactionType.EXPENSE }
+                    .filter { it.type == TransactionType.EXPENSE && !it.isSystemBalanceAnchor() }
                     .sumOf { (it.amountCnyCents - it.refundedAmountCents).coerceAtLeast(0L) }
                 val isCollapsed = dayKey in collapsedDayKeys
 
@@ -1331,7 +1332,11 @@ fun ICostLedgerHomeScreen(
                                     showLedgerSwitcher = false
                                 },
                                 shape = RoundedCornerShape(12.dp),
-                                color = if (name == currentLedger) Color(0xFFEAF2FF) else ICostCellGray,
+                                color = if (name == currentLedger) {
+                                    if (AppearanceConfigManager.isDarkThemeActive) ICostBlueAccent.copy(alpha = 0.22f) else Color(0xFFEAF2FF)
+                                } else {
+                                    ICostCellGray
+                                },
                                 modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
@@ -1512,6 +1517,14 @@ private fun ICostLedgerRow(
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (isRefundedExpense) {
+                        val netDisplayOrigCents = if (
+                            !tx.currency.equals("CNY", ignoreCase = true) &&
+                            tx.exchangeRateToCny > 0.0
+                        ) {
+                            (netExpenseCents / tx.exchangeRateToCny).roundToLong().coerceAtLeast(0L)
+                        } else {
+                            netExpenseCents
+                        }
                         Text(
                             text = "$sym${AppearanceConfigManager.formatDisplayAmount(tx.amountCents / 100.0)}",
                             fontSize = 12.sp,
@@ -1522,7 +1535,7 @@ private fun ICostLedgerRow(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "-¥${AppearanceConfigManager.formatDisplayAmount(netExpenseCents / 100.0)}",
+                            text = "-$sym${AppearanceConfigManager.formatDisplayAmount(netDisplayOrigCents / 100.0)}",
                             fontSize = 16.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = ICostExpenseColor,
@@ -1588,6 +1601,7 @@ private fun ICostLedgerRow(
             }
 
             if (hasTagsRow) {
+                val isDark = AppearanceConfigManager.isDarkThemeActive
                 Spacer(modifier = Modifier.height(5.dp))
                 @OptIn(ExperimentalLayoutApi::class)
                 FlowRow(
@@ -1599,10 +1613,10 @@ private fun ICostLedgerRow(
                         val origCents = tx.amountCents + tx.discountCents
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFFFFF4EC)
+                            color = if (isDark) Color(0xFF332418) else Color(0xFFFFF4EC)
                         ) {
                             Text(
-                                text = "原价${formatMoneyCents(origCents)} · 优惠${formatMoneyCents(tx.discountCents)}",
+                                text = "原价${formatMoneyCents(origCents, tx.currency)} · 优惠${formatMoneyCents(tx.discountCents, tx.currency)}",
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Medium,
                                 color = Color(0xFFD96B27),
@@ -1616,7 +1630,7 @@ private fun ICostLedgerRow(
                     if (tx.duplicateSuspected) {
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFFFFEFEA)
+                            color = if (isDark) ICostCoralRed.copy(alpha = 0.22f) else Color(0xFFFFEFEA)
                         ) {
                             Text(
                                 text = "⚠️ 疑似重复",
@@ -1632,7 +1646,7 @@ private fun ICostLedgerRow(
                     if (isRefundedExpense || isRefundOffset) {
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = Color(0xFFF0F0F0)
+                            color = ICostCellGray
                         ) {
                             Text(
                                 text = "已退",
@@ -1647,7 +1661,11 @@ private fun ICostLedgerRow(
                     if (tx.reimbursable) {
                         Surface(
                             shape = RoundedCornerShape(6.dp),
-                            color = if (tx.reimbursed) Color(0xFFE6F7EF) else Color(0xFFEAF2FF)
+                            color = if (tx.reimbursed) {
+                                if (isDark) ICostGreenIncome.copy(alpha = 0.22f) else Color(0xFFE6F7EF)
+                            } else {
+                                if (isDark) ICostBlueAccent.copy(alpha = 0.22f) else Color(0xFFEAF2FF)
+                            }
                         ) {
                             Text(
                                 text = if (tx.reimbursed) "已报销" else "待报销",

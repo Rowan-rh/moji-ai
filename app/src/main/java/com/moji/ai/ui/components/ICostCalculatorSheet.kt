@@ -93,6 +93,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
@@ -220,12 +221,26 @@ fun ICostCalculatorSheet(
     val customCurrencyRates by CurrencyRateManager.customRatesFlow.collectAsState()
     var quickAddSubParent by remember { mutableStateOf<Pair<Boolean, CategoryDef>?>(null) }
     var showQuickAddTagSheet by remember { mutableStateOf(false) }
-    // 1:1 iCost 顶部三态：支出 | 收入 | 转账（若外部传入 REPAYMENT 则归在转账 tab 并在保存时自动判断目标账户）
-    var txType by remember {
+    // 1:1 iCost 顶部三态：支出 | 收入 | 转账（REPAYMENT/LOAN_IN/LOAN_OUT/REFUND_OFFSET 自动归入对应 Tab，未切换 Tab 时保持原账务类型）
+    fun mapToCalculatorTab(raw: TransactionType): TransactionType = when (raw) {
+        TransactionType.REPAYMENT -> TransactionType.TRANSFER
+        TransactionType.LOAN_IN, TransactionType.REFUND_OFFSET -> TransactionType.INCOME
+        TransactionType.LOAN_OUT -> TransactionType.EXPENSE
+        else -> raw
+    }
+    var preservedSpecialType by remember {
         val raw = editingTransaction?.type ?: initialType
         mutableStateOf(
-            if (raw == TransactionType.REPAYMENT) TransactionType.TRANSFER else raw
+            raw.takeIf {
+                it == TransactionType.LOAN_IN ||
+                    it == TransactionType.LOAN_OUT ||
+                    it == TransactionType.REFUND_OFFSET
+            }
         )
+    }
+    var txType by remember {
+        val raw = editingTransaction?.type ?: initialType
+        mutableStateOf(mapToCalculatorTab(raw))
     }
 
     // 解析初始主分类与子分类
@@ -290,7 +305,12 @@ fun ICostCalculatorSheet(
     var showDiscardConfirm by remember { mutableStateOf(false) }
 
     fun applyTemplateToDraft(tpl: QuickBookkeepingTemplate, resetZeroAmount: Boolean) {
+        if (editingTransaction?.type == TransactionType.REFUND_OFFSET && (editingTransaction.relatedTransactionId ?: 0L) > 0L) {
+            inlineError = "关联退款单不支持套用模板，请删除后重新退款"
+            return
+        }
         val resolvedType = tpl.resolvedType()
+        preservedSpecialType = null
         txType = resolvedType
         if (resolvedType == TransactionType.EXPENSE || resolvedType == TransactionType.INCOME) {
             val activeList = if (resolvedType == TransactionType.EXPENSE) {
@@ -331,10 +351,16 @@ fun ICostCalculatorSheet(
     LaunchedEffect(visible, editingTransaction, initialType, initialSourceWalletId, initialTargetWalletId) {
         if (visible) {
             val raw = editingTransaction?.type ?: initialType
-            txType = if (raw == TransactionType.REPAYMENT) TransactionType.TRANSFER else raw
+            preservedSpecialType = raw.takeIf {
+                it == TransactionType.LOAN_IN ||
+                    it == TransactionType.LOAN_OUT ||
+                    it == TransactionType.REFUND_OFFSET
+            }
+            txType = mapToCalculatorTab(raw)
             val fallbackExpName = CategoryCatalog.expenseCategories.firstOrNull()?.name ?: "餐饮"
-            val fullCat = editingTransaction?.category ?: if (raw == TransactionType.INCOME) {
-                CategoryCatalog.incomeCategories.first().name
+            val fallbackIncName = CategoryCatalog.incomeCategories.firstOrNull()?.name ?: "工资"
+            val fullCat = editingTransaction?.category ?: if (txType == TransactionType.INCOME) {
+                fallbackIncName
             } else {
                 fallbackExpName
             }
@@ -549,6 +575,14 @@ fun ICostCalculatorSheet(
             flashError("金额需大于 0")
             return
         }
+        if (
+            editingTransaction?.type == TransactionType.REFUND_OFFSET &&
+            (editingTransaction.relatedTransactionId ?: 0L) > 0L &&
+            (cents != editingTransaction.amountCents || !editingTransaction.currency.equals(currency, ignoreCase = true) || preservedSpecialType != TransactionType.REFUND_OFFSET)
+        ) {
+            flashError("关联退款单不支持直接改金额或类型，请删除该退款后在原账单重新退款")
+            return
+        }
         val rate = if (
             editingTransaction != null &&
             editingTransaction.currency.equals(currency, ignoreCase = true) &&
@@ -590,23 +624,21 @@ fun ICostCalculatorSheet(
         val resolvedSourceWallet = wallets.firstOrNull { it.id == resolvedSourceId }
         val resolvedTargetWallet = wallets.firstOrNull { it.id == resolvedTargetId }
 
-        // 当用户处在「转账」模式且由资产账户转入信用账户时，自动记录为 REPAYMENT
-        val actualType = if (
+        // 当用户未切换 Tab 时保留借入/借出/退款冲销原类型；处在「转账」模式且由资产转入信用账户时自动记录为 REPAYMENT
+        val actualType = when {
+            preservedSpecialType != null -> preservedSpecialType!!
             txType == TransactionType.TRANSFER &&
-            resolvedSourceWallet?.type?.isLiability == false &&
-            resolvedTargetWallet?.type?.isLiability == true
-        ) {
-            TransactionType.REPAYMENT
-        } else {
-            txType
+                resolvedSourceWallet?.type?.isLiability == false &&
+                resolvedTargetWallet?.type?.isLiability == true -> TransactionType.REPAYMENT
+            else -> txType
         }
 
         val finalCategory = when (actualType) {
             TransactionType.TRANSFER -> "内部转账"
             TransactionType.REPAYMENT -> "信用还款"
-            TransactionType.LOAN_IN -> "借入"
-            TransactionType.LOAN_OUT -> "借出"
-            TransactionType.REFUND_OFFSET -> "退款入账"
+            TransactionType.LOAN_IN -> editingTransaction?.category?.takeIf { it.isNotBlank() && editingTransaction.type == TransactionType.LOAN_IN } ?: "借入"
+            TransactionType.LOAN_OUT -> editingTransaction?.category?.takeIf { it.isNotBlank() && editingTransaction.type == TransactionType.LOAN_OUT } ?: "借出"
+            TransactionType.REFUND_OFFSET -> editingTransaction?.category?.takeIf { it.isNotBlank() && editingTransaction.type == TransactionType.REFUND_OFFSET } ?: "退款入账"
             else -> if (selectedSubCategory.isNotBlank()) "$selectedMainCategory-$selectedSubCategory" else selectedMainCategory
         }
 
@@ -785,13 +817,18 @@ fun ICostCalculatorSheet(
                                     .background(modeBgColor)
                                     .iCostPressScale(pressedScale = 0.92f) {
                                         if (txType == mode) return@iCostPressScale
+                                        if (editingTransaction?.type == TransactionType.REFUND_OFFSET && (editingTransaction.relatedTransactionId ?: 0L) > 0L) {
+                                            flashError("关联退款单不可切换收支类型")
+                                            return@iCostPressScale
+                                        }
+                                        preservedSpecialType = null
                                         txType = mode
                                         inlineError = null
                                         if (mode == TransactionType.INCOME) {
-                                            selectedMainCategory = CategoryCatalog.incomeCategories.first().name
+                                            selectedMainCategory = CategoryCatalog.incomeCategories.firstOrNull()?.name ?: "工资"
                                             selectedSubCategory = ""
                                         } else if (mode == TransactionType.EXPENSE) {
-                                            selectedMainCategory = CategoryCatalog.expenseCategories.first().name
+                                            selectedMainCategory = CategoryCatalog.expenseCategories.firstOrNull()?.name ?: "餐饮"
                                             selectedSubCategory = ""
                                         }
                                     }
@@ -2450,7 +2487,7 @@ private fun ICostOptionPill(
     assetFile: String,
     label: String,
     active: Boolean,
-    activeBg: Color = Color(0xFFEAF2FF),
+    activeBg: Color = if (AppearanceConfigManager.isDarkThemeActive) ICostBlueAccent.copy(alpha = 0.22f) else Color(0xFFEAF2FF),
     activeTextColor: Color = ICostTextPrimary,
     onClick: () -> Unit
 ) {
