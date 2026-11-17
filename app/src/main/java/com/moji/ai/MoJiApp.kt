@@ -28,6 +28,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 
 class MoJiApp : Application() {
@@ -126,22 +127,23 @@ class MoJiApp : Application() {
                 repository.transactionsFlow,
                 repository.recurringRulesFlow
             ) { wallets, txs, rules ->
-                Triple(wallets.size, txs.sumOf { it.updatedAtMillis xor it.id }, rules.size)
+                val walletHash = wallets.fold(wallets.size.toLong()) { acc, w ->
+                    acc * 31L + w.id + w.balanceCents + w.updatedAtMillis
+                }
+                val txHash = txs.fold(txs.size.toLong()) { acc, t ->
+                    acc * 31L + t.id + t.updatedAtMillis + t.syncRevision
+                }
+                val ruleHash = rules.fold(rules.size.toLong()) { acc, r ->
+                    acc * 31L + r.id + r.updatedAtMillis
+                }
+                Triple(walletHash, txHash, ruleHash)
             }
                 .drop(1)
+                .filter { !MoJiCloudSyncClient.shouldSuppressAutoSync() }
                 .debounce(6_000L)
                 .collect {
-                    if (MoJiCloudSyncClient.isRestoringSnapshot) return@collect
-                    val cfg = MoJiCloudSyncClient.configFlow.value
-                    if (!cfg.canAutoPushSafely) return@collect
-                    val (snapshotJson, freshTxs) = MoJiCloudSyncClient.buildSnapshotFromApp(this@MoJiApp)
-                    MoJiCloudSyncClient.uploadSnapshotAndScreenshots(
-                        context = this@MoJiApp,
-                        draftConfig = cfg,
-                        backupJson = snapshotJson,
-                        localTransactions = freshTxs,
-                        forceOverwrite = false
-                    ).onFailure { err ->
+                    if (MoJiCloudSyncClient.shouldSuppressAutoSync()) return@collect
+                    MoJiCloudSyncClient.autoPushFromBackground(this@MoJiApp).onFailure { err ->
                         Log.w("MoJiCloudSync", "后台静默云同步暂缓: ${err.message}")
                     }
                 }

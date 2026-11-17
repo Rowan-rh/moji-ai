@@ -51,6 +51,7 @@ import com.moji.ai.update.AppUpdateConfig
 import com.moji.ai.update.ReleaseUpdateInfo
 import com.moji.ai.update.UpdateCheckState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -1312,7 +1313,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             val (backupWallets, backupTxs, snapshot) = parsed
             val backupRules = BackupAndCsvTransferEngine.toRecurringRuleEntities(snapshot.recurringRules)
-            val txCount = applyRestoredSnapshotInternal(backupWallets, backupTxs, backupRules, snapshot)
+            val txCount = withContext(NonCancellable) {
+                val count = applyRestoredSnapshotInternal(backupWallets, backupTxs, backupRules, snapshot)
+                MoJiCloudSyncClient.markLocalSnapshotDivergedFromCloud(app)
+                count
+            }
             onResult("恢复完成：${backupWallets.size} 个账户、$txCount 笔账单")
         }
     }
@@ -1323,7 +1328,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         backupRules: List<RecurringRuleEntity>,
         snapshot: MoJiFullBackupSnapshot
     ): Int {
-        MoJiCloudSyncClient.isRestoringSnapshot = true
+        MoJiCloudSyncClient.beginRestoreSuppression()
         return try {
             val txCount = withContext(Dispatchers.IO) {
                 repository.restoreFullSnapshot(backupWallets, backupTxs, backupRules)
@@ -1373,7 +1378,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             txCount
         } finally {
-            MoJiCloudSyncClient.isRestoringSnapshot = false
+            MoJiCloudSyncClient.endRestoreSuppression()
         }
     }
 
@@ -1523,13 +1528,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         onResult: (String) -> Unit
     ) {
         viewModelScope.launch {
-            val freshTxs = withContext(Dispatchers.IO) { repository.getAllTransactions() }
-            val backupJson = buildFullBackupJson()
+            val (backupJson, enrichedTxs) = MoJiCloudSyncClient.buildSnapshotFromApp(app)
             val res = MoJiCloudSyncClient.uploadSnapshotAndScreenshots(
                 context = app,
                 draftConfig = draftConfig,
                 backupJson = backupJson,
-                localTransactions = freshTxs,
+                localTransactions = enrichedTxs,
                 forceOverwrite = forceOverwrite
             )
             res.fold(
@@ -1553,12 +1557,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val res = MoJiCloudSyncClient.downloadSnapshotAndScreenshots(app, draftConfig)
             res.fold(
                 onSuccess = { bundle ->
-                    val txCount = applyRestoredSnapshotInternal(
-                        backupWallets = bundle.wallets,
-                        backupTxs = bundle.transactions,
-                        backupRules = bundle.recurringRules,
-                        snapshot = bundle.snapshot
-                    )
+                    val txCount = withContext(NonCancellable) {
+                        val count = applyRestoredSnapshotInternal(
+                            backupWallets = bundle.wallets,
+                            backupTxs = bundle.transactions,
+                            backupRules = bundle.recurringRules,
+                            snapshot = bundle.snapshot
+                        )
+                        MoJiCloudSyncClient.commitPulledConfigAfterRestore(app, bundle.updatedConfig)
+                        count
+                    }
                     val ssText = if (bundle.syncedScreenshots > 0) "、拉回 ${bundle.syncedScreenshots} 张账单原图" else ""
                     onResult("✅ 已从默记云 v${bundle.revision} 恢复：${bundle.wallets.size} 个账户、$txCount 笔账单$ssText")
                 },

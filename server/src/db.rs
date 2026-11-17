@@ -1,6 +1,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,8 @@ use uuid::Uuid;
 
 use crate::auth::now_millis;
 use crate::error::AppError;
+
+const MAX_MISSING_CHECK_BATCH: usize = 20_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountSummary {
@@ -65,6 +68,7 @@ pub struct SnapshotHistoryItem {
     pub byte_size: usize,
     pub tx_count: usize,
     pub updated_by_device: String,
+    pub updated_by_member: String,
     pub created_at_ms: i64,
 }
 
@@ -183,6 +187,7 @@ impl CloudStore {
                 byte_size INTEGER NOT NULL,
                 tx_count INTEGER NOT NULL DEFAULT 0,
                 updated_by_device TEXT NOT NULL DEFAULT '',
+                updated_by_member TEXT NOT NULL DEFAULT '',
                 created_at_ms INTEGER NOT NULL,
                 UNIQUE(user_id, revision)
             );
@@ -198,6 +203,12 @@ impl CloudStore {
             "#,
         )
         .map_err(|e| format!("init sqlite schema: {e}"))?;
+
+        // 兼容开发期早期未带 updated_by_member 列的本地库文件
+        let _ = conn.execute(
+            "ALTER TABLE cloud_snapshot_history ADD COLUMN updated_by_member TEXT NOT NULL DEFAULT ''",
+            [],
+        );
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -258,8 +269,8 @@ impl CloudStore {
                 ));
             }
             tx.execute(
-                "UPDATE user_identities SET last_used_at_ms = ?1 WHERE provider = 'sync_key' AND identifier_hash = ?2",
-                params![now, identifier_hash],
+                "UPDATE user_identities SET last_used_at_ms = ?1, key_hint = ?2 WHERE provider = 'sync_key' AND identifier_hash = ?3",
+                params![now, key_hint, identifier_hash],
             )
             .map_err(|e| AppError::Internal(format!("update identity ts: {e}")))?;
 
@@ -404,7 +415,7 @@ impl CloudStore {
 
         let mut hist_stmt = conn
             .prepare(
-                "SELECT revision, snapshot_sha256, byte_size, tx_count, updated_by_device, created_at_ms FROM cloud_snapshot_history WHERE user_id = ?1 ORDER BY revision DESC LIMIT ?2",
+                "SELECT revision, snapshot_sha256, byte_size, tx_count, updated_by_device, updated_by_member, created_at_ms FROM cloud_snapshot_history WHERE user_id = ?1 ORDER BY revision DESC LIMIT ?2",
             )
             .map_err(|e| AppError::Internal(format!("prepare history: {e}")))?;
         let history = hist_stmt
@@ -415,7 +426,8 @@ impl CloudStore {
                     byte_size: r.get::<_, i64>(2)? as usize,
                     tx_count: r.get::<_, i64>(3)? as usize,
                     updated_by_device: r.get(4)?,
-                    created_at_ms: r.get(5)?,
+                    updated_by_member: r.get(5)?,
+                    created_at_ms: r.get(6)?,
                 })
             })
             .map_err(|e| AppError::Internal(format!("map history: {e}")))?
@@ -477,20 +489,24 @@ impl CloudStore {
         fs::create_dir_all(&history_dir)
             .map_err(|e| AppError::Internal(format!("create user history dir: {e}")))?;
 
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
-        let tx = conn
-            .transaction()
-            .map_err(|e| AppError::Internal(format!("begin snapshot tx: {e}")))?;
+        // 先在全局 SQLite 互斥锁外将新快照写入临时暂存文件并完成 fsync，避免慢盘 I/O 阻塞其他数据库请求
+        let staging_path = history_dir.join(format!(".staging_{}.json.tmp", Uuid::new_v4()));
+        write_staging_file(&staging_path, raw_bytes)?;
 
-        let current_summary = query_account_summary(&tx, user_id)?;
+        let tx_result: Result<(AccountSummary, Vec<i64>), AppError> = (|| {
+            let mut conn = self
+                .conn
+                .lock()
+                .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+            let tx = conn
+                .transaction()
+                .map_err(|e| AppError::Internal(format!("begin snapshot tx: {e}")))?;
 
-        // 1. 乐观并发控制：防止新设备在未拉取云端数据前误覆盖远端更新版本
-        if !force_overwrite && current_summary.latest_revision > 0 {
-            if let Some(exp_rev) = expected_revision {
-                if exp_rev != current_summary.latest_revision {
+            let current_summary = query_account_summary(&tx, user_id)?;
+
+            // 1. 乐观并发控制：远端已有快照且非强制覆盖时，必须显式提供且匹配当前最新 revision
+            if !force_overwrite && current_summary.latest_revision > 0 {
+                if expected_revision != Some(current_summary.latest_revision) {
                     return Err(AppError::Conflict {
                         code: "revision_conflict",
                         message: format!(
@@ -506,144 +522,158 @@ impl CloudStore {
                         account_summary: Some(current_summary),
                     });
                 }
+                // 2. 空账本防误抹除守卫：远端已有账单时，禁止非强制模式写入 0 笔账单快照
+                if current_summary.tx_count > 0 && tx_count == 0 {
+                    return Err(AppError::Conflict {
+                        code: "empty_snapshot_guard",
+                        message: format!(
+                            "云端当前存有 {} 笔账单，安全守卫已拦截空账本自动覆盖；如确需清空云端，请点击手动强制上传",
+                            current_summary.tx_count
+                        ),
+                        account_summary: Some(current_summary),
+                    });
+                }
             }
-            // 2. 空账本防误抹除守卫：远端已有账单时，禁止非强制模式写入 0 笔账单快照
-            if current_summary.tx_count > 0 && tx_count == 0 {
-                return Err(AppError::Conflict {
-                    code: "empty_snapshot_guard",
-                    message: format!(
-                        "云端当前存有 {} 笔账单，安全守卫已拦截空账本自动覆盖；如确需清空云端，请点击手动强制上传",
-                        current_summary.tx_count
-                    ),
-                    account_summary: Some(current_summary),
-                });
+
+            // 幂等短路：如果内容 SHA-256 与云端最新版本完全一致，无需重复递增版本号
+            if current_summary.latest_revision > 0
+                && current_summary.snapshot_sha256 == snapshot_sha256
+            {
+                if !clean_dev_id.is_empty() {
+                    let _ = tx.execute(
+                        "UPDATE user_devices SET last_sync_at_ms = ?1 WHERE user_id = ?2 AND device_id = ?3",
+                        params![now, user_id, clean_dev_id],
+                    );
+                }
+                tx.commit()
+                    .map_err(|e| AppError::Internal(format!("commit idempotent tx: {e}")))?;
+                return Ok((current_summary, Vec::new()));
             }
-        }
 
-        // 幂等短路：如果内容 SHA-256 与云端最新版本完全一致，无需重复递增版本号与落盘
-        if current_summary.latest_revision > 0 && current_summary.snapshot_sha256 == snapshot_sha256
-        {
-            if !clean_dev_id.is_empty() {
-                let _ = tx.execute(
-                    "UPDATE user_devices SET last_sync_at_ms = ?1 WHERE user_id = ?2 AND device_id = ?3",
-                    params![now, user_id, clean_dev_id],
-                );
-            }
-            tx.commit()
-                .map_err(|e| AppError::Internal(format!("commit idempotent tx: {e}")))?;
-            return Ok(current_summary);
-        }
+            let new_revision = current_summary.latest_revision + 1;
+            let history_path = history_dir.join(format!("rev_{new_revision}.json"));
 
-        let new_revision = current_summary.latest_revision + 1;
-        let latest_path = user_snap_dir.join("latest.json");
-        let history_path = history_dir.join(format!("rev_{new_revision}.json"));
+            fs::rename(&staging_path, &history_path).map_err(|e| {
+                AppError::Internal(format!("rename staging to {:?} failed: {e}", history_path))
+            })?;
 
-        write_file_atomically(&history_path, raw_bytes)?;
-        write_file_atomically(&latest_path, raw_bytes)?;
-
-        tx.execute(
-            r#"
-            INSERT INTO cloud_snapshots (
-                user_id, revision, snapshot_sha256, byte_size,
-                wallet_count, tx_count, ledger_count,
-                updated_by_device, updated_by_member, exported_at_ms, updated_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-            ON CONFLICT(user_id) DO UPDATE SET
-                revision = excluded.revision,
-                snapshot_sha256 = excluded.snapshot_sha256,
-                byte_size = excluded.byte_size,
-                wallet_count = excluded.wallet_count,
-                tx_count = excluded.tx_count,
-                ledger_count = excluded.ledger_count,
-                updated_by_device = excluded.updated_by_device,
-                updated_by_member = excluded.updated_by_member,
-                exported_at_ms = excluded.exported_at_ms,
-                updated_at_ms = excluded.updated_at_ms
-            "#,
-            params![
-                user_id,
-                new_revision,
-                snapshot_sha256,
-                raw_bytes.len() as i64,
-                wallet_count as i64,
-                tx_count as i64,
-                ledger_count as i64,
-                clean_dev_name,
-                clean_member,
-                exported_at,
-                now
-            ],
-        )
-        .map_err(|e| AppError::Internal(format!("upsert cloud_snapshots: {e}")))?;
-
-        tx.execute(
-            r#"
-            INSERT INTO cloud_snapshot_history (
-                user_id, revision, snapshot_sha256, byte_size, tx_count, updated_by_device, created_at_ms
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-            "#,
-            params![
-                user_id,
-                new_revision,
-                snapshot_sha256,
-                raw_bytes.len() as i64,
-                tx_count as i64,
-                if clean_member.is_empty() {
-                    &clean_dev_name
-                } else {
-                    &clean_member
-                },
-                now
-            ],
-        )
-        .map_err(|e| AppError::Internal(format!("insert snapshot history: {e}")))?;
-
-        if !clean_dev_id.is_empty() {
-            let _ = tx.execute(
-                r#"
-                INSERT INTO user_devices (device_id, user_id, device_name, member_label, app_version, last_sync_at_ms)
-                VALUES (?1, ?2, ?3, ?4, '', ?5)
-                ON CONFLICT(user_id, device_id) DO UPDATE SET
-                    device_name = CASE WHEN excluded.device_name != '' THEN excluded.device_name ELSE user_devices.device_name END,
-                    member_label = CASE WHEN excluded.member_label != '' THEN excluded.member_label ELSE user_devices.member_label END,
-                    last_sync_at_ms = excluded.last_sync_at_ms
-                "#,
-                params![clean_dev_id, user_id, clean_dev_name, clean_member, now],
-            );
-        }
-
-        // 清理超出上限的旧历史快照记录与文件
-        let stale_revs: Vec<i64> = {
-            let mut stmt = tx
-                .prepare(
+            let db_ops = (|| -> Result<(AccountSummary, Vec<i64>), AppError> {
+                tx.execute(
                     r#"
-                    SELECT revision FROM cloud_snapshot_history
-                    WHERE user_id = ?1
-                    ORDER BY revision DESC
-                    LIMIT -1 OFFSET ?2
+                    INSERT INTO cloud_snapshots (
+                        user_id, revision, snapshot_sha256, byte_size,
+                        wallet_count, tx_count, ledger_count,
+                        updated_by_device, updated_by_member, exported_at_ms, updated_at_ms
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        revision = excluded.revision,
+                        snapshot_sha256 = excluded.snapshot_sha256,
+                        byte_size = excluded.byte_size,
+                        wallet_count = excluded.wallet_count,
+                        tx_count = excluded.tx_count,
+                        ledger_count = excluded.ledger_count,
+                        updated_by_device = excluded.updated_by_device,
+                        updated_by_member = excluded.updated_by_member,
+                        exported_at_ms = excluded.exported_at_ms,
+                        updated_at_ms = excluded.updated_at_ms
                     "#,
+                    params![
+                        user_id,
+                        new_revision,
+                        snapshot_sha256,
+                        raw_bytes.len() as i64,
+                        wallet_count as i64,
+                        tx_count as i64,
+                        ledger_count as i64,
+                        clean_dev_name,
+                        clean_member,
+                        exported_at,
+                        now
+                    ],
                 )
-                .map_err(|e| AppError::Internal(format!("prepare prune history: {e}")))?;
-            let rows = stmt
-                .query_map(params![user_id, self.max_history_revisions as i64], |r| {
-                    r.get(0)
-                })
-                .map_err(|e| AppError::Internal(format!("map prune history: {e}")))?;
-            rows.collect::<Result<Vec<_>, _>>()
-                .map_err(|e| AppError::Internal(format!("collect prune history: {e}")))?
-        };
+                .map_err(|e| AppError::Internal(format!("upsert cloud_snapshots: {e}")))?;
 
-        for old_rev in &stale_revs {
-            let _ = tx.execute(
-                "DELETE FROM cloud_snapshot_history WHERE user_id = ?1 AND revision = ?2",
-                params![user_id, old_rev],
-            );
-        }
+                tx.execute(
+                    r#"
+                    INSERT INTO cloud_snapshot_history (
+                        user_id, revision, snapshot_sha256, byte_size, tx_count,
+                        updated_by_device, updated_by_member, created_at_ms
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                    "#,
+                    params![
+                        user_id,
+                        new_revision,
+                        snapshot_sha256,
+                        raw_bytes.len() as i64,
+                        tx_count as i64,
+                        clean_dev_name,
+                        clean_member,
+                        now
+                    ],
+                )
+                .map_err(|e| AppError::Internal(format!("insert snapshot history: {e}")))?;
 
-        let updated_summary = query_account_summary(&tx, user_id)?;
-        tx.commit()
-            .map_err(|e| AppError::Internal(format!("commit snapshot tx: {e}")))?;
+                if !clean_dev_id.is_empty() {
+                    tx.execute(
+                        r#"
+                        INSERT INTO user_devices (device_id, user_id, device_name, member_label, app_version, last_sync_at_ms)
+                        VALUES (?1, ?2, ?3, ?4, '', ?5)
+                        ON CONFLICT(user_id, device_id) DO UPDATE SET
+                            device_name = CASE WHEN excluded.device_name != '' THEN excluded.device_name ELSE user_devices.device_name END,
+                            member_label = CASE WHEN excluded.member_label != '' THEN excluded.member_label ELSE user_devices.member_label END,
+                            last_sync_at_ms = excluded.last_sync_at_ms
+                        "#,
+                        params![clean_device_id_or(&clean_dev_id), user_id, clean_dev_name, clean_member, now],
+                    )
+                    .map_err(|e| AppError::Internal(format!("upsert device in snapshot: {e}")))?;
+                }
 
+                // 清理超出上限的旧历史快照记录
+                let stale_revs: Vec<i64> = {
+                    let mut stmt = tx
+                        .prepare(
+                            r#"
+                            SELECT revision FROM cloud_snapshot_history
+                            WHERE user_id = ?1
+                            ORDER BY revision DESC
+                            LIMIT -1 OFFSET ?2
+                            "#,
+                        )
+                        .map_err(|e| AppError::Internal(format!("prepare prune history: {e}")))?;
+                    let rows = stmt
+                        .query_map(params![user_id, self.max_history_revisions as i64], |r| {
+                            r.get(0)
+                        })
+                        .map_err(|e| AppError::Internal(format!("map prune history: {e}")))?;
+                    rows.collect::<Result<Vec<_>, _>>()
+                        .map_err(|e| AppError::Internal(format!("collect prune history: {e}")))?
+                };
+
+                for old_rev in &stale_revs {
+                    tx.execute(
+                        "DELETE FROM cloud_snapshot_history WHERE user_id = ?1 AND revision = ?2",
+                        params![user_id, old_rev],
+                    )
+                    .map_err(|e| AppError::Internal(format!("delete stale history rev {old_rev}: {e}")))?;
+                }
+
+                let updated_summary = query_account_summary(&tx, user_id)?;
+                tx.commit()
+                    .map_err(|e| AppError::Internal(format!("commit snapshot tx: {e}")))?;
+                Ok((updated_summary, stale_revs))
+            })();
+
+            if db_ops.is_err() {
+                // SQLite 事务回滚时清理刚重命名的孤儿新版本文件，保证既有历史文件与 DB 100% 一致
+                let _ = fs::remove_file(&history_path);
+            }
+            db_ops
+        })();
+
+        // 确保任何提前返回（如 409 冲突或幂等短路）均清理暂存文件
+        let _ = fs::remove_file(&staging_path);
+
+        let (updated_summary, stale_revs) = tx_result?;
         for old_rev in stale_revs {
             let _ = fs::remove_file(history_dir.join(format!("rev_{old_rev}.json")));
         }
@@ -675,23 +705,23 @@ impl CloudStore {
                 .map_err(|e| AppError::Internal(format!("collect screenshots: {e}")))?;
 
             if let Some(rev) = requested_revision {
-                let row: Option<(i64, String, i64, String)> = conn
+                let row: Option<(i64, String, i64, String, String)> = conn
                     .query_row(
-                        "SELECT revision, snapshot_sha256, created_at_ms, updated_by_device FROM cloud_snapshot_history WHERE user_id = ?1 AND revision = ?2",
+                        "SELECT revision, snapshot_sha256, created_at_ms, updated_by_device, updated_by_member FROM cloud_snapshot_history WHERE user_id = ?1 AND revision = ?2",
                         params![user_id, rev],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                     )
                     .optional()
                     .map_err(|e| AppError::Internal(format!("query snapshot history: {e}")))?;
 
-                let Some((r, sha, ts, dev)) = row else {
+                let Some((r, sha, ts, dev, member)) = row else {
                     return Err(AppError::NotFound(
                         "revision_not_found",
                         format!("未找到历史快照版本 v{rev}"),
                     ));
                 };
                 let p = user_snap_dir.join("history").join(format!("rev_{r}.json"));
-                (r, sha, ts, dev.clone(), dev, available_screenshots, p)
+                (r, sha, ts, dev, member, available_screenshots, p)
             } else {
                 let row: Option<(i64, String, i64, String, String)> = conn
                     .query_row(
@@ -708,7 +738,12 @@ impl CloudStore {
                         "该密钥名下尚无云端备份快照，请先上传当前账本".to_string(),
                     ));
                 };
-                let p = user_snap_dir.join("latest.json");
+                let rev_path = user_snap_dir.join("history").join(format!("rev_{r}.json"));
+                let p = if rev_path.exists() {
+                    rev_path
+                } else {
+                    user_snap_dir.join("latest.json")
+                };
                 (r, sha, ts, dev, member, available_screenshots, p)
             }
         };
@@ -742,24 +777,41 @@ impl CloudStore {
         candidate_hashes: &[String],
     ) -> Result<Vec<String>, AppError> {
         validate_uuid(user_id)?;
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+        if candidate_hashes.len() > MAX_MISSING_CHECK_BATCH {
+            return Err(AppError::BadRequest(
+                "too_many_screenshot_hashes",
+                format!("单次检查原图数量超出上限（最多 {MAX_MISSING_CHECK_BATCH} 张）"),
+            ));
+        }
+
+        let normalized_candidates: Vec<String> = candidate_hashes
+            .iter()
+            .map(|h| normalize_sha256(h))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let linked_set: HashSet<String> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+            let mut stmt = conn
+                .prepare("SELECT sha256 FROM user_screenshots WHERE user_id = ?1")
+                .map_err(|e| AppError::Internal(format!("prepare user screenshots set: {e}")))?;
+            let rows = stmt
+                .query_map(params![user_id], |r| r.get::<_, String>(0))
+                .map_err(|e| AppError::Internal(format!("map user screenshots set: {e}")))?;
+            rows.collect::<Result<HashSet<_>, _>>()
+                .map_err(|e| AppError::Internal(format!("collect user screenshots set: {e}")))?
+        };
 
         let mut missing = Vec::new();
-        for raw_hash in candidate_hashes.iter().take(5000) {
-            let norm = normalize_sha256(raw_hash)?;
-            let linked: bool = conn
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM user_screenshots WHERE user_id = ?1 AND sha256 = ?2)",
-                    params![user_id, norm],
-                    |r| r.get(0),
-                )
-                .map_err(|e| AppError::Internal(format!("check screenshot row: {e}")))?;
-
+        let mut seen = HashSet::with_capacity(normalized_candidates.len());
+        for norm in normalized_candidates {
+            if !seen.insert(norm.clone()) {
+                continue;
+            }
             let blob_path = self.screenshot_blob_path(&norm)?;
-            if !linked || !blob_path.exists() {
+            if !linked_set.contains(&norm) || !blob_path.exists() {
                 missing.push(norm);
             }
         }
@@ -873,6 +925,10 @@ impl CloudStore {
     }
 }
 
+fn clean_device_id_or(s: &str) -> &str {
+    s
+}
+
 fn query_account_summary(conn: &Connection, user_id: &str) -> Result<AccountSummary, AppError> {
     let screenshot_count: i64 = conn
         .query_row(
@@ -948,6 +1004,23 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     hex::encode(hasher.finalize())
+}
+
+fn write_staging_file(staging_path: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    let write_res = (|| -> std::io::Result<()> {
+        let mut f = File::create(staging_path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(staging_path);
+        return Err(AppError::Internal(format!(
+            "write staging {:?} failed: {e}",
+            staging_path
+        )));
+    }
+    Ok(())
 }
 
 fn write_file_atomically(dest: &Path, bytes: &[u8]) -> Result<(), AppError> {

@@ -1,8 +1,8 @@
 package com.moji.ai.service
 
+import android.app.PendingIntent
 import android.content.Intent
 import android.os.Build
-import android.provider.Settings
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import android.widget.Toast
@@ -31,35 +31,28 @@ class OcrTileService : TileService() {
         super.onClick()
         val service = PaymentAccessibilityService.instance
         if (service == null) {
-            Toast.makeText(
-                this,
-                "请先开启「${getString(R.string.accessibility_service_label)}」无障碍服务",
-                Toast.LENGTH_SHORT
-            ).show()
-            val componentKey = android.content.ComponentName(
-                packageName,
-                com.google.android.accessibility.selecttospeak.SelectToSpeakService::class.java.name
-            ).flattenToString()
-            val bundle = android.os.Bundle().apply {
-                putString(":settings:fragment_args_key", componentKey)
-            }
-            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                putExtra(":settings:fragment_args_key", componentKey)
-                putExtra(":settings:show_fragment_args", bundle)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startActivityAndCollapse(
-                    android.app.PendingIntent.getActivity(
-                        this,
-                        0,
-                        intent,
-                        android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
-                    )
-                )
+            val health = RomKeepAliveGuideHelper.inspectAccessibilityHealth(this)
+            val tip = if (health == AccessibilityHealthState.INTERRUPTED_BY_SYSTEM) {
+                "无障碍服务已被系统中断，请将「${getString(R.string.accessibility_service_label)}」开关关闭后再重新打开"
             } else {
-                @Suppress("DEPRECATION")
-                startActivityAndCollapse(intent)
+                "请先开启「${getString(R.string.accessibility_service_label)}」无障碍服务"
+            }
+            Toast.makeText(this, tip, Toast.LENGTH_SHORT).show()
+
+            val highlightedIntent = RomKeepAliveGuideHelper.buildAccessibilitySettingsIntent(
+                this,
+                highlightService = true
+            )
+            try {
+                launchAndCollapseCompat(highlightedIntent)
+            } catch (_: Exception) {
+                runCatching {
+                    val fallbackIntent = RomKeepAliveGuideHelper.buildAccessibilitySettingsIntent(
+                        this,
+                        highlightService = false
+                    )
+                    launchAndCollapseCompat(fallbackIntent)
+                }
             }
             return
         }
@@ -73,5 +66,21 @@ class OcrTileService : TileService() {
                 }
             }
         )
+    }
+
+    private fun launchAndCollapseCompat(intent: Intent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startActivityAndCollapse(
+                PendingIntent.getActivity(
+                    this,
+                    0,
+                    intent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            startActivityAndCollapse(intent)
+        }
     }
 }

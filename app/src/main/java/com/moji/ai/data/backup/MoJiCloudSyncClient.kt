@@ -93,6 +93,8 @@ class CloudSyncConflictException(
     val remoteSummary: MoJiCloudSyncClient.AccountSummaryDto? = null
 ) : IllegalStateException(message)
 
+private class CloudUnauthorizedException(message: String) : IllegalStateException(message)
+
 data class CloudPulledRestoreBundle(
     val wallets: List<WalletEntity>,
     val transactions: List<TransactionEntity>,
@@ -128,16 +130,59 @@ object MoJiCloudSyncClient {
     val configFlow: StateFlow<MoJiCloudConfig> = _configFlow.asStateFlow()
 
     @Volatile
-    var isRestoringSnapshot: Boolean = false
+    private var isRestoringFlag: Boolean = false
+
+    @Volatile
+    private var suppressAutoSyncUntilNano: Long = 0L
 
     fun init(context: Context) {
         _configFlow.value = loadConfig(context)
+    }
+
+    fun beginRestoreSuppression() {
+        isRestoringFlag = true
+        suppressAutoSyncUntilNano = System.nanoTime() + TimeUnit.SECONDS.toNanos(15)
+    }
+
+    fun endRestoreSuppression(cooldownMs: Long = 2_500L) {
+        suppressAutoSyncUntilNano = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(cooldownMs)
+        isRestoringFlag = false
+    }
+
+    fun shouldSuppressAutoSync(): Boolean {
+        return isRestoringFlag || (System.nanoTime() - suppressAutoSyncUntilNano < 0L)
+    }
+
+    /**
+     * 当用户从外部 JSON 或 WebDAV 恢复全量备份时，将本地默记云修订号置为未对齐状态，
+     * 防止外部备份在未经确认的情况下自动静默覆盖默记云服务器数据。
+     */
+    fun markLocalSnapshotDivergedFromCloud(context: Context) {
+        val current = _configFlow.value
+        if (current.isTargetBound && current.remoteRevision > 0L && current.lastSyncedRevision != 0L) {
+            saveConfig(context, current.copy(lastSyncedRevision = 0L))
+        }
+    }
+
+    /**
+     * 在本地 Room 数据库原子恢复成功之后，正式提交云端拉取到的最新修订号配置。
+     */
+    fun commitPulledConfigAfterRestore(context: Context, pulledConfig: MoJiCloudConfig) {
+        val latest = _configFlow.value
+        val merged = if (latest.currentTargetSignature == pulledConfig.currentTargetSignature) {
+            pulledConfig.copy(autoSyncEnabled = latest.autoSyncEnabled)
+        } else {
+            pulledConfig
+        }
+        saveConfig(context, merged)
     }
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(12, TimeUnit.SECONDS)
         .readTimeout(25, TimeUnit.SECONDS)
         .writeTimeout(25, TimeUnit.SECONDS)
+        .followRedirects(false)
+        .followSslRedirects(false)
         .build()
 
     private val jsonCodec = Json {
@@ -280,7 +325,8 @@ object MoJiCloudSyncClient {
     }
 
     /**
-     * 从 Application 全局上下文构建完整备份快照（支持纯后台静默入账后无需打开 Activity 即可自动推送上云）
+     * 从 Application 全局上下文单次原子构建完整备份快照并补齐存量账单缺失的截图 SHA-256，
+     * 确保快照 JSON 内的 `screenshotSha256` 与上传至云端的原图哈希 100% 对应。
      */
     suspend fun buildSnapshotFromApp(app: MoJiApp): Pair<String, List<TransactionEntity>> =
         withContext(Dispatchers.IO) {
@@ -308,14 +354,26 @@ object MoJiCloudSyncClient {
             }.orEmpty()
 
             val freshWallets = app.repository.getAllWallets()
-            val freshTxs = app.repository.getAllTransactions()
+            val rawTxs = app.repository.getAllTransactions()
             val freshRules = app.repository.getAllRecurringRules()
+
+            val enrichedTxs = rawTxs.map { tx ->
+                val existingSha = tx.screenshotSha256.trim().lowercase(Locale.US)
+                if (existingSha.length == 64 && existingSha.all { it in '0'..'9' || it in 'a'..'f' }) {
+                    if (existingSha == tx.screenshotSha256) tx else tx.copy(screenshotSha256 = existingSha)
+                } else if (tx.screenshotPath.isNotBlank()) {
+                    val computed = BillScreenshotStorage.computeFileSha256IfSafe(File(tx.screenshotPath), app)
+                    if (computed != null) tx.copy(screenshotSha256 = computed) else tx
+                } else {
+                    tx
+                }
+            }
 
             val snapshotJson = BackupAndCsvTransferEngine.exportFullBackupJson(
                 ledgers = ledgers,
                 monthlyBudgetCents = monthlyBudgetCents,
                 wallets = freshWallets,
-                transactions = freshTxs,
+                transactions = enrichedTxs,
                 recurringRules = freshRules,
                 merchantMemories = app.merchantMemoryManager.memoriesFlow.value,
                 customExpenseCategories = CategoryCatalog.expenseCategories,
@@ -329,7 +387,7 @@ object MoJiCloudSyncClient {
                 reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
                 appearanceSettingsJson = AppearanceConfigManager.exportConfigJson()
             )
-            snapshotJson to freshTxs
+            snapshotJson to enrichedTxs
         }
 
     fun computeTargetSignature(serverUrl: String, syncKey: String): String {
@@ -407,13 +465,19 @@ object MoJiCloudSyncClient {
             return Result.failure(IllegalArgumentException(msg))
         }
         val groups = cleaned.removePrefix(expectedKeyPrefix).split('-')
-        if (groups.size !in 4..8 || groups.any { g -> g.length != 4 || !g.all { it.isLetterOrDigit() } }) {
+        val validAsciiGroups = groups.size in 4..8 && groups.all { g ->
+            g.length == 4 && g.all { c -> c in 'A'..'Z' || c in '0'..'9' }
+        }
+        if (!validAsciiGroups) {
             return Result.failure(
-                IllegalArgumentException("同步密钥格式无效，应为 4 组以上 4 位字母数字（如 ${expectedKeyPrefix}8F3K-92LP-7X4Q-2M9N）")
+                IllegalArgumentException("同步密钥格式无效，应为 4 组以上 4 位大写英文字母或数字（如 ${expectedKeyPrefix}8F3K-92LP-7X4Q-2M9N）")
             )
         }
         return Result.success(cleaned)
     }
+
+    fun validateServerUrl(rawUrl: String): Result<String> =
+        validateBaseUrl(rawUrl).map { it.toString().trimEnd('/') }
 
     private fun validateBaseUrl(rawUrl: String): Result<HttpUrl> {
         val trimmed = rawUrl.trim().trimEnd('/')
@@ -455,13 +519,30 @@ object MoJiCloudSyncClient {
         draftConfig: MoJiCloudConfig
     ): Result<Pair<MoJiCloudConfig, String>> = withContext(Dispatchers.IO) {
         syncMutex.withLock {
-            performKeyLoginInternal(context, draftConfig)
+            performKeyLoginInternal(context, draftConfig, persistImmediately = true)
         }
+    }
+
+    private fun mergeWithLatestPersistedState(draft: MoJiCloudConfig): MoJiCloudConfig {
+        val latest = _configFlow.value
+        if (latest.currentTargetSignature != draft.currentTargetSignature) return draft
+        val mergedLastRev = maxOf(draft.lastSyncedRevision, latest.lastSyncedRevision)
+        val useLatestToken = latest.accessToken.isNotBlank() &&
+            latest.tokenExpiresAtMillis > draft.tokenExpiresAtMillis
+        return draft.copy(
+            userId = latest.userId.ifBlank { draft.userId },
+            accessToken = if (useLatestToken) latest.accessToken else draft.accessToken,
+            tokenExpiresAtMillis = maxOf(draft.tokenExpiresAtMillis, latest.tokenExpiresAtMillis),
+            boundTargetSignature = latest.boundTargetSignature.ifBlank { draft.boundTargetSignature },
+            lastSyncedRevision = mergedLastRev,
+            remoteRevision = maxOf(draft.remoteRevision, latest.remoteRevision)
+        )
     }
 
     private fun performKeyLoginInternal(
         context: Context,
-        draftConfig: MoJiCloudConfig
+        draftConfig: MoJiCloudConfig,
+        persistImmediately: Boolean
     ): Result<Pair<MoJiCloudConfig, String>> {
         val baseUrl = validateBaseUrl(draftConfig.serverUrl).getOrElse { return Result.failure(it) }
         val normalizedKey = validateSyncKey(draftConfig.syncKey).getOrElse { return Result.failure(it) }
@@ -497,10 +578,11 @@ object MoJiCloudSyncClient {
                 val loginResp = jsonCodec.decodeFromString<KeyLoginRespDto>(respText)
                 val summary = loginResp.accountSummary
                 val targetSig = computeTargetSignature(baseUrl.toString(), normalizedKey)
-                val prevLastRev = if (draftConfig.boundTargetSignature == targetSig) {
-                    draftConfig.lastSyncedRevision
-                } else {
-                    0L
+                val latestStored = _configFlow.value
+                val prevLastRev = when {
+                    latestStored.boundTargetSignature == targetSig -> latestStored.lastSyncedRevision
+                    draftConfig.boundTargetSignature == targetSig -> draftConfig.lastSyncedRevision
+                    else -> 0L
                 }
                 val updatedByLabel = summary.updatedByMember.ifBlank { summary.updatedByDevice }
                 val updatedCfg = draftConfig.copy(
@@ -519,7 +601,9 @@ object MoJiCloudSyncClient {
                     remoteUpdatedBy = updatedByLabel,
                     remoteUpdatedAtMillis = summary.updatedAtMs
                 )
-                saveConfig(context, updatedCfg)
+                if (persistImmediately) {
+                    saveConfig(context, updatedCfg)
+                }
 
                 val tip = if (loginResp.isNewAccount || summary.latestRevision == 0L) {
                     "✅ 密钥绑定成功（云端尚无快照），点击「上传到云端」即可建立首次备份"
@@ -538,16 +622,46 @@ object MoJiCloudSyncClient {
 
     private fun ensureValidSessionInternal(
         context: Context,
-        draftConfig: MoJiCloudConfig
+        draftConfig: MoJiCloudConfig,
+        persistImmediately: Boolean
     ): Result<MoJiCloudConfig> {
+        val merged = mergeWithLatestPersistedState(draftConfig)
         val now = System.currentTimeMillis()
-        if (draftConfig.isTargetBound &&
-            draftConfig.accessToken.isNotBlank() &&
-            draftConfig.tokenExpiresAtMillis > now + 60_000L
+        if (merged.isTargetBound &&
+            merged.accessToken.isNotBlank() &&
+            merged.tokenExpiresAtMillis > now + 60_000L
         ) {
-            return Result.success(draftConfig)
+            return Result.success(merged)
         }
-        return performKeyLoginInternal(context, draftConfig).map { it.first }
+        return performKeyLoginInternal(context, merged, persistImmediately = persistImmediately).map { it.first }
+    }
+
+    /**
+     * 后台自动同步专用入口：在持有 `syncMutex` 后才读取最新 `_configFlow` 与构建数据库快照，
+     * 彻底避免与手动上传或密钥重置产生旧配置回写竞态。
+     */
+    suspend fun autoPushFromBackground(app: MoJiApp): Result<String> = withContext(Dispatchers.IO) {
+        if (shouldSuppressAutoSync()) {
+            return@withContext Result.success("suppressed")
+        }
+        syncMutex.withLock {
+            if (shouldSuppressAutoSync()) {
+                return@withContext Result.success("suppressed")
+            }
+            val latestCfg = _configFlow.value
+            if (!latestCfg.canAutoPushSafely) {
+                return@withContext Result.success("not_eligible")
+            }
+            val (snapshotJson, enrichedTxs) = buildSnapshotFromApp(app)
+            uploadInternalUnderLock(
+                context = app,
+                draftConfig = latestCfg,
+                backupJson = snapshotJson,
+                localTransactions = enrichedTxs,
+                forceOverwrite = false,
+                isBackgroundAutoSync = true
+            ).map { it.second }
+        }
     }
 
     suspend fun uploadSnapshotAndScreenshots(
@@ -558,84 +672,153 @@ object MoJiCloudSyncClient {
         forceOverwrite: Boolean = false
     ): Result<Pair<MoJiCloudConfig, String>> = withContext(Dispatchers.IO) {
         syncMutex.withLock {
-            var authedConfig = ensureValidSessionInternal(context, draftConfig)
-                .getOrElse { return@withContext Result.failure(it) }
-            val baseUrl = validateBaseUrl(authedConfig.serverUrl)
-                .getOrElse { return@withContext Result.failure(it) }
+            uploadInternalUnderLock(
+                context = context,
+                draftConfig = draftConfig,
+                backupJson = backupJson,
+                localTransactions = localTransactions,
+                forceOverwrite = forceOverwrite,
+                isBackgroundAutoSync = false
+            )
+        }
+    }
 
-            try {
-                // 1. 先增量上传所有尚未同步的识屏账单 WebP 原图（确保快照引用完整性）
-                val uploadedScreenshotCount = uploadMissingScreenshotsInternal(
-                    context = context,
-                    baseUrl = baseUrl,
-                    accessToken = authedConfig.accessToken,
-                    transactions = localTransactions
-                )
+    private fun uploadInternalUnderLock(
+        context: Context,
+        draftConfig: MoJiCloudConfig,
+        backupJson: String,
+        localTransactions: List<TransactionEntity>,
+        forceOverwrite: Boolean,
+        isBackgroundAutoSync: Boolean
+    ): Result<Pair<MoJiCloudConfig, String>> {
+        var authedConfig = ensureValidSessionInternal(context, draftConfig, persistImmediately = true)
+            .getOrElse { return Result.failure(it) }
+        val baseUrl = validateBaseUrl(authedConfig.serverUrl)
+            .getOrElse { return Result.failure(it) }
 
-                // 2. 上传全量账本快照（如遇到 Token 401 失效则自动重签重试一次）
-                val snapshotRes = putSnapshotOnceInternal(
+        return try {
+            val attemptResult = runUploadAttemptOnce(
+                context = context,
+                baseUrl = baseUrl,
+                config = authedConfig,
+                backupJson = backupJson,
+                localTransactions = localTransactions,
+                forceOverwrite = forceOverwrite
+            )
+
+            val (uploadedScreenshotCount, finalSummary) = if (attemptResult.isFailure &&
+                attemptResult.exceptionOrNull() is CloudUnauthorizedException
+            ) {
+                // Token 签名在服务端已轮换失效：刷新会话后完整重跑「缺失原图上传 + 快照上传」
+                authedConfig = performKeyLoginInternal(context, authedConfig, persistImmediately = true)
+                    .getOrElse { return Result.failure(it) }.first
+                runUploadAttemptOnce(
                     context = context,
                     baseUrl = baseUrl,
                     config = authedConfig,
                     backupJson = backupJson,
+                    localTransactions = localTransactions,
                     forceOverwrite = forceOverwrite
-                )
-                val finalSummary = if (snapshotRes.isFailure &&
-                    snapshotRes.exceptionOrNull()?.message?.contains("HTTP 401") == true
-                ) {
-                    authedConfig = performKeyLoginInternal(context, authedConfig)
-                        .getOrElse { return@withContext Result.failure(it) }.first
-                    putSnapshotOnceInternal(
-                        context = context,
-                        baseUrl = baseUrl,
-                        config = authedConfig,
-                        backupJson = backupJson,
-                        forceOverwrite = forceOverwrite
-                    ).getOrElse { return@withContext Result.failure(it) }
-                } else {
-                    snapshotRes.getOrElse { err ->
-                        if (err is CloudSyncConflictException && err.remoteSummary != null) {
-                            val s = err.remoteSummary
-                            val syncedMeta = authedConfig.copy(
-                                remoteRevision = s.latestRevision,
-                                remoteTxCount = s.txCount,
-                                remoteWalletCount = s.walletCount,
-                                remoteScreenshotCount = s.screenshotCount,
-                                remoteUpdatedBy = s.updatedByMember.ifBlank { s.updatedByDevice },
-                                remoteUpdatedAtMillis = s.updatedAtMs
-                            )
-                            saveConfig(context, syncedMeta)
-                        }
-                        return@withContext Result.failure(err)
-                    }
+                ).getOrElse { err ->
+                    handleConflictMetadataIfNeeded(context, authedConfig, err)
+                    return Result.failure(err)
                 }
-
-                val now = System.currentTimeMillis()
-                val updatedCfg = authedConfig.copy(
-                    lastSyncedRevision = finalSummary.latestRevision,
-                    lastSyncTimeMillis = now,
-                    remoteRevision = finalSummary.latestRevision,
-                    remoteTxCount = finalSummary.txCount,
-                    remoteWalletCount = finalSummary.walletCount,
-                    remoteScreenshotCount = finalSummary.screenshotCount,
-                    remoteUpdatedBy = finalSummary.updatedByMember.ifBlank { finalSummary.updatedByDevice },
-                    remoteUpdatedAtMillis = finalSummary.updatedAtMs
-                )
-                saveConfig(context, updatedCfg)
-
-                val kbStr = String.format(Locale.US, "%.1f", backupJson.toByteArray(Charsets.UTF_8).size / 1024.0)
-                val ssNote = if (uploadedScreenshotCount > 0) "，新增上传 $uploadedScreenshotCount 张账单原图" else ""
-                Result.success(
-                    updatedCfg to "✅ 云端同步成功：v${finalSummary.latestRevision}（${finalSummary.txCount} 笔账单 · $kbStr KB$ssNote）"
-                )
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: CloudSyncConflictException) {
-                Result.failure(e)
-            } catch (e: Exception) {
-                Result.failure(IllegalStateException("上传云端备份失败：${e.message ?: e.javaClass.simpleName}", e))
+            } else {
+                attemptResult.getOrElse { err ->
+                    handleConflictMetadataIfNeeded(context, authedConfig, err)
+                    return Result.failure(err)
+                }
             }
+
+            // 若在后台上传期间用户切换了别的密钥或关闭了自动同步，尊重最新开关且绝不覆盖新密钥
+            val currentStored = _configFlow.value
+            if (isBackgroundAutoSync && currentStored.currentTargetSignature != authedConfig.currentTargetSignature) {
+                return Result.failure(IllegalStateException("同步目标已变更，放弃写回旧会话状态"))
+            }
+            val effectiveAutoSync = if (isBackgroundAutoSync &&
+                currentStored.currentTargetSignature == authedConfig.currentTargetSignature
+            ) {
+                currentStored.autoSyncEnabled
+            } else {
+                authedConfig.autoSyncEnabled
+            }
+
+            val now = System.currentTimeMillis()
+            val updatedCfg = authedConfig.copy(
+                autoSyncEnabled = effectiveAutoSync,
+                lastSyncedRevision = finalSummary.latestRevision,
+                lastSyncTimeMillis = now,
+                remoteRevision = finalSummary.latestRevision,
+                remoteTxCount = finalSummary.txCount,
+                remoteWalletCount = finalSummary.walletCount,
+                remoteScreenshotCount = finalSummary.screenshotCount,
+                remoteUpdatedBy = finalSummary.updatedByMember.ifBlank { finalSummary.updatedByDevice },
+                remoteUpdatedAtMillis = finalSummary.updatedAtMs
+            )
+            saveConfig(context, updatedCfg)
+
+            val kbStr = String.format(Locale.US, "%.1f", backupJson.toByteArray(Charsets.UTF_8).size / 1024.0)
+            val ssNote = if (uploadedScreenshotCount > 0) "，新增上传 $uploadedScreenshotCount 张账单原图" else ""
+            Result.success(
+                updatedCfg to "✅ 云端同步成功：v${finalSummary.latestRevision}（${finalSummary.txCount} 笔账单 · $kbStr KB$ssNote）"
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: CloudSyncConflictException) {
+            Result.failure(e)
+        } catch (e: Exception) {
+            Result.failure(IllegalStateException("上传云端备份失败：${e.message ?: e.javaClass.simpleName}", e))
         }
+    }
+
+    private fun handleConflictMetadataIfNeeded(
+        context: Context,
+        authedConfig: MoJiCloudConfig,
+        err: Throwable
+    ) {
+        if (err is CloudSyncConflictException && err.remoteSummary != null) {
+            val currentStored = _configFlow.value
+            if (currentStored.currentTargetSignature != authedConfig.currentTargetSignature) return
+            val s = err.remoteSummary
+            val preservedLastRev = maxOf(currentStored.lastSyncedRevision, authedConfig.lastSyncedRevision)
+            val syncedMeta = authedConfig.copy(
+                autoSyncEnabled = currentStored.autoSyncEnabled,
+                lastSyncedRevision = preservedLastRev,
+                remoteRevision = s.latestRevision,
+                remoteTxCount = s.txCount,
+                remoteWalletCount = s.walletCount,
+                remoteScreenshotCount = s.screenshotCount,
+                remoteUpdatedBy = s.updatedByMember.ifBlank { s.updatedByDevice },
+                remoteUpdatedAtMillis = s.updatedAtMs
+            )
+            saveConfig(context, syncedMeta)
+        }
+    }
+
+    private fun runUploadAttemptOnce(
+        context: Context,
+        baseUrl: HttpUrl,
+        config: MoJiCloudConfig,
+        backupJson: String,
+        localTransactions: List<TransactionEntity>,
+        forceOverwrite: Boolean
+    ): Result<Pair<Int, AccountSummaryDto>> {
+        val uploadedScreenshots = uploadMissingScreenshotsInternal(
+            context = context,
+            baseUrl = baseUrl,
+            accessToken = config.accessToken,
+            transactions = localTransactions
+        ).getOrElse { return Result.failure(it) }
+
+        val summary = putSnapshotOnceInternal(
+            context = context,
+            baseUrl = baseUrl,
+            config = config,
+            backupJson = backupJson,
+            forceOverwrite = forceOverwrite
+        ).getOrElse { return Result.failure(it) }
+
+        return Result.success(uploadedScreenshots to summary)
     }
 
     private fun putSnapshotOnceInternal(
@@ -665,6 +848,9 @@ object MoJiCloudSyncClient {
 
         httpClient.newCall(req).execute().use { resp ->
             val respText = readCappedUtf8(resp.body?.byteStream(), 2 * 1024 * 1024)
+            if (resp.code == 401) {
+                return Result.failure(CloudUnauthorizedException("云端会话凭证已过期"))
+            }
             if (resp.code == 409) {
                 val errDto = runCatching { jsonCodec.decodeFromString<ErrorRespDto>(respText) }.getOrNull()
                 return Result.failure(
@@ -691,7 +877,7 @@ object MoJiCloudSyncClient {
         baseUrl: HttpUrl,
         accessToken: String,
         transactions: List<TransactionEntity>
-    ): Int {
+    ): Result<Int> {
         val localScreenshotMap = LinkedHashMap<String, File>()
         for (tx in transactions) {
             if (tx.screenshotPath.isBlank()) continue
@@ -702,7 +888,7 @@ object MoJiCloudSyncClient {
             } ?: BillScreenshotStorage.computeFileSha256IfSafe(file, context) ?: continue
             localScreenshotMap.putIfAbsent(sha, file)
         }
-        if (localScreenshotMap.isEmpty()) return 0
+        if (localScreenshotMap.isEmpty()) return Result.success(0)
 
         val checkUrl = baseUrl.newBuilder()
             .addPathSegments("api/v1/screenshots/missing")
@@ -717,7 +903,12 @@ object MoJiCloudSyncClient {
             .build()
 
         val missingHashes = httpClient.newCall(checkReq).execute().use { resp ->
-            if (!resp.isSuccessful) return 0
+            if (resp.code == 401) {
+                return Result.failure(CloudUnauthorizedException("检查原图时凭证已过期"))
+            }
+            if (!resp.isSuccessful) {
+                return Result.success(0)
+            }
             val txt = readCappedUtf8(resp.body?.byteStream(), 2 * 1024 * 1024)
             runCatching { jsonCodec.decodeFromString<MissingScreenshotsRespDto>(txt).missingSha256 }
                 .getOrDefault(emptyList())
@@ -726,6 +917,7 @@ object MoJiCloudSyncClient {
         var uploaded = 0
         for (sha in missingHashes) {
             val file = localScreenshotMap[sha] ?: continue
+            if (file.length() !in 1L..MAX_SCREENSHOT_BYTES.toLong()) continue
             val bytes = runCatching { file.readBytes() }.getOrNull() ?: continue
             if (bytes.isEmpty() || bytes.size > MAX_SCREENSHOT_BYTES) continue
             if (sha256Hex(bytes) != sha) continue
@@ -740,12 +932,15 @@ object MoJiCloudSyncClient {
                 .put(bytes.toRequestBody("image/webp".toMediaType()))
                 .build()
             httpClient.newCall(putReq).execute().use { putResp ->
+                if (putResp.code == 401) {
+                    return Result.failure(CloudUnauthorizedException("上传原图时凭证已过期"))
+                }
                 if (putResp.isSuccessful) {
                     uploaded++
                 }
             }
         }
-        return uploaded
+        return Result.success(uploaded)
     }
 
     suspend fun downloadSnapshotAndScreenshots(
@@ -753,30 +948,21 @@ object MoJiCloudSyncClient {
         draftConfig: MoJiCloudConfig
     ): Result<CloudPulledRestoreBundle> = withContext(Dispatchers.IO) {
         syncMutex.withLock {
-            val authedConfig = ensureValidSessionInternal(context, draftConfig)
+            // 注意：此处仅在重登时持久化新 accessToken（保留原 lastSyncedRevision），绝不在本地入库前提前推进 lastSyncedRevision！
+            var authedConfig = ensureValidSessionInternal(context, draftConfig, persistImmediately = true)
                 .getOrElse { return@withContext Result.failure(it) }
             val baseUrl = validateBaseUrl(authedConfig.serverUrl)
                 .getOrElse { return@withContext Result.failure(it) }
 
             try {
-                val getUrl = baseUrl.newBuilder()
-                    .addPathSegments("api/v1/sync/snapshot")
-                    .build()
-                val req = Request.Builder()
-                    .url(getUrl)
-                    .header("Authorization", "Bearer ${authedConfig.accessToken}")
-                    .get()
-                    .build()
-
-                val pulledDto = httpClient.newCall(req).execute().use { resp ->
-                    val respText = readCappedUtf8(resp.body?.byteStream(), MAX_SNAPSHOT_BYTES)
-                    if (!resp.isSuccessful) {
-                        val errDto = runCatching { jsonCodec.decodeFromString<ErrorRespDto>(respText) }.getOrNull()
-                        val msg = errDto?.message?.takeIf { it.isNotBlank() }
-                            ?: "下载云端快照失败（HTTP ${resp.code}）"
-                        return@withContext Result.failure(IllegalStateException(msg))
-                    }
-                    jsonCodec.decodeFromString<PulledSnapshotRespDto>(respText)
+                val firstPull = pullSnapshotDtoOnceInternal(baseUrl, authedConfig.accessToken)
+                val pulledDto = if (firstPull.isFailure && firstPull.exceptionOrNull() is CloudUnauthorizedException) {
+                    authedConfig = performKeyLoginInternal(context, authedConfig, persistImmediately = true)
+                        .getOrElse { return@withContext Result.failure(it) }.first
+                    pullSnapshotDtoOnceInternal(baseUrl, authedConfig.accessToken)
+                        .getOrElse { return@withContext Result.failure(it) }
+                } else {
+                    firstPull.getOrElse { return@withContext Result.failure(it) }
                 }
 
                 val parsedTriple = BackupAndCsvTransferEngine.parseFullBackupJson(pulledDto.snapshotJson)
@@ -792,7 +978,6 @@ object MoJiCloudSyncClient {
                 val rewrittenTransactions = rawTransactions.map { tx ->
                     val sha = tx.screenshotSha256.trim().lowercase(Locale.US)
                     if (sha.length != 64 || !sha.all { it in '0'..'9' || it in 'a'..'f' }) {
-                        // 若无 SHA-256，仅当本地原路径确实为本机安全截图时保留，否则置空防跨设备断链
                         val keepPath = tx.screenshotPath.takeIf {
                             it.isNotBlank() && BillScreenshotStorage.isSafeScreenshotFile(File(it), context)
                         }.orEmpty()
@@ -833,6 +1018,7 @@ object MoJiCloudSyncClient {
                 }
 
                 val now = System.currentTimeMillis()
+                // 仅构造待提交的 updatedCfg 返回给调用方，待本地 Room 事务恢复成功后再由 commitPulledConfigAfterRestore 正式写入！
                 val updatedCfg = authedConfig.copy(
                     lastSyncedRevision = pulledDto.revision,
                     lastSyncTimeMillis = now,
@@ -843,7 +1029,6 @@ object MoJiCloudSyncClient {
                     remoteUpdatedBy = pulledDto.updatedByMember.ifBlank { pulledDto.updatedByDevice },
                     remoteUpdatedAtMillis = pulledDto.updatedAtMs
                 )
-                saveConfig(context, updatedCfg)
 
                 Result.success(
                     CloudPulledRestoreBundle(
@@ -861,6 +1046,34 @@ object MoJiCloudSyncClient {
             } catch (e: Exception) {
                 Result.failure(IllegalStateException("从云端拉取恢复失败：${e.message ?: e.javaClass.simpleName}", e))
             }
+        }
+    }
+
+    private fun pullSnapshotDtoOnceInternal(
+        baseUrl: HttpUrl,
+        accessToken: String
+    ): Result<PulledSnapshotRespDto> {
+        val getUrl = baseUrl.newBuilder()
+            .addPathSegments("api/v1/sync/snapshot")
+            .build()
+        val req = Request.Builder()
+            .url(getUrl)
+            .header("Authorization", "Bearer $accessToken")
+            .get()
+            .build()
+
+        httpClient.newCall(req).execute().use { resp ->
+            val respText = readCappedUtf8(resp.body?.byteStream(), MAX_SNAPSHOT_BYTES)
+            if (resp.code == 401) {
+                return Result.failure(CloudUnauthorizedException("拉取快照时凭证已过期"))
+            }
+            if (!resp.isSuccessful) {
+                val errDto = runCatching { jsonCodec.decodeFromString<ErrorRespDto>(respText) }.getOrNull()
+                val msg = errDto?.message?.takeIf { it.isNotBlank() }
+                    ?: "下载云端快照失败（HTTP ${resp.code}）"
+                return Result.failure(IllegalStateException(msg))
+            }
+            return Result.success(jsonCodec.decodeFromString<PulledSnapshotRespDto>(respText))
         }
     }
 

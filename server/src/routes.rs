@@ -1,17 +1,19 @@
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, Query, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, Query, State};
+use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::task::spawn_blocking;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::{
     hash_sync_key, issue_access_token, mask_sync_key, normalize_and_validate_sync_key,
-    normalize_app_env, verify_access_code, verify_bearer_header, AuthRateLimiter,
+    normalize_app_env, verify_access_code, verify_bearer_header, AuthRateLimiter, TokenClaims,
 };
 use crate::config::ServerConfig;
 use crate::db::{
@@ -26,10 +28,92 @@ pub struct AppState {
     pub rate_limiter: AuthRateLimiter,
 }
 
+/// 在读取任何请求体（如 64 MiB 快照 JSON 或 10 MiB 图片）之前先校验 Bearer 凭证，阻断未授权大载荷内存耗尽攻击
+pub struct AuthenticatedUser(pub TokenClaims);
+
+#[axum::async_trait]
+impl FromRequestParts<Arc<AppState>> for AuthenticatedUser {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let claims = verify_bearer_header(&parts.headers, &state.config.token_secret)?;
+        Ok(AuthenticatedUser(claims))
+    }
+}
+
+/// 提取防暴力破解限流键：默认使用真实 TCP 对端 IP；仅当对端为本机回环反代或显式开启 `MOJI_TRUST_PROXY_HEADERS` 时才读取代理转发头
+pub struct ClientRateLimitKey(pub String);
+
+#[axum::async_trait]
+impl FromRequestParts<Arc<AppState>> for ClientRateLimitKey {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let key = resolve_rate_limit_key(&parts.headers, parts.extensions.get::<ConnectInfo<SocketAddr>>(), state.config.trust_proxy_headers);
+        Ok(ClientRateLimitKey(key))
+    }
+}
+
+fn resolve_rate_limit_key(
+    headers: &HeaderMap,
+    connect_info: Option<&ConnectInfo<SocketAddr>>,
+    trust_proxy_headers: bool,
+) -> String {
+    if let Some(ConnectInfo(peer_addr)) = connect_info {
+        let peer_ip = peer_addr.ip();
+        if peer_ip.is_loopback() || trust_proxy_headers {
+            if let Some(forwarded_ip) = extract_proxy_ip(headers) {
+                return forwarded_ip;
+            }
+        }
+        return peer_ip.to_string();
+    }
+
+    #[cfg(test)]
+    if let Some(test_ip) = headers.get("x-test-peer-ip").and_then(|v| v.to_str().ok()) {
+        let trimmed = test_ip.trim();
+        if !trimmed.is_empty() {
+            return trimmed.chars().take(64).collect();
+        }
+    }
+
+    if trust_proxy_headers {
+        if let Some(forwarded_ip) = extract_proxy_ip(headers) {
+            return forwarded_ip;
+        }
+    }
+
+    "local-inproc".to_string()
+}
+
+fn extract_proxy_ip(headers: &HeaderMap) -> Option<String> {
+    if let Some(real_ip) = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(real_ip.chars().take(64).collect());
+    }
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.rsplit(',').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.chars().take(64).collect())
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     let snapshot_routes = Router::new()
         .route("/api/v1/sync/snapshot", put(put_snapshot).get(get_snapshot))
-        .layer(DefaultBodyLimit::max(64 * 1024 * 1024));
+        .layer(DefaultBodyLimit::max(80 * 1024 * 1024));
 
     let screenshot_upload_routes = Router::new()
         .route(
@@ -99,26 +183,11 @@ pub struct KeyLoginResponse {
     pub account_summary: AccountSummary,
 }
 
-fn extract_client_rate_key(headers: &HeaderMap) -> String {
-    headers
-        .get("x-real-ip")
-        .or_else(|| headers.get("x-forwarded-for"))
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("direct-peer")
-        .chars()
-        .take(64)
-        .collect()
-}
-
 async fn key_login(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    ClientRateLimitKey(client_key): ClientRateLimitKey,
     Json(req): Json<KeyLoginRequest>,
 ) -> Result<Json<KeyLoginResponse>, AppError> {
-    let client_key = extract_client_rate_key(&headers);
     state.rate_limiter.check_allowed(&client_key)?;
 
     if let Err(err) = verify_access_code(
@@ -191,16 +260,14 @@ struct IdentitiesResponse {
 
 async fn list_identities(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    AuthenticatedUser(claims): AuthenticatedUser,
 ) -> Result<Json<IdentitiesResponse>, AppError> {
-    let claims = verify_bearer_header(&headers, &state.config.token_secret)?;
     let uid = claims.uid.clone();
     let env = claims.env.clone();
-    let state_cl = Arc::clone(&state);
 
     let identities = spawn_blocking(move || -> Result<Vec<BoundIdentityInfo>, AppError> {
-        state_cl.store.verify_active_user(&uid, &env)?;
-        let (_, ids, _, _) = state_cl.store.get_status_details(&uid)?;
+        state.store.verify_active_user(&uid, &env)?;
+        let (_, ids, _, _) = state.store.get_status_details(&uid)?;
         Ok(ids)
     })
     .await
@@ -225,16 +292,14 @@ struct SyncStatusResponse {
 
 async fn get_sync_status(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    AuthenticatedUser(claims): AuthenticatedUser,
 ) -> Result<Json<SyncStatusResponse>, AppError> {
-    let claims = verify_bearer_header(&headers, &state.config.token_secret)?;
     let uid = claims.uid.clone();
     let env = claims.env.clone();
-    let state_cl = Arc::clone(&state);
 
     let (display_name, summary, identities, devices, history) = spawn_blocking(move || {
-        let display_name = state_cl.store.verify_active_user(&uid, &env)?;
-        let (summary, identities, devices, history) = state_cl.store.get_status_details(&uid)?;
+        let display_name = state.store.verify_active_user(&uid, &env)?;
+        let (summary, identities, devices, history) = state.store.get_status_details(&uid)?;
         Ok::<_, AppError>((display_name, summary, identities, devices, history))
     })
     .await
@@ -273,10 +338,9 @@ pub struct PutSnapshotResponse {
 
 async fn put_snapshot(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Json(req): Json<PutSnapshotRequest>,
 ) -> Result<Json<PutSnapshotResponse>, AppError> {
-    let claims = verify_bearer_header(&headers, &state.config.token_secret)?;
     let uid = claims.uid;
     let env = claims.env;
     let dev_id = if req.device_id.is_empty() {
@@ -313,10 +377,9 @@ struct SnapshotQuery {
 
 async fn get_snapshot(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Query(query): Query<SnapshotQuery>,
 ) -> Result<Json<PulledSnapshotData>, AppError> {
-    let claims = verify_bearer_header(&headers, &state.config.token_secret)?;
     let uid = claims.uid;
     let env = claims.env;
 
@@ -342,10 +405,9 @@ struct MissingScreenshotsResponse {
 
 async fn check_missing_screenshots(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Json(req): Json<MissingScreenshotsRequest>,
 ) -> Result<Json<MissingScreenshotsResponse>, AppError> {
-    let claims = verify_bearer_header(&headers, &state.config.token_secret)?;
     let uid = claims.uid;
     let env = claims.env;
 
@@ -369,11 +431,10 @@ struct PutScreenshotResponse {
 
 async fn put_screenshot(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Path(sha256): Path<String>,
     body: Bytes,
 ) -> Result<Json<PutScreenshotResponse>, AppError> {
-    let claims = verify_bearer_header(&headers, &state.config.token_secret)?;
     let uid = claims.uid;
     let env = claims.env;
     let sha_ret = sha256.to_ascii_lowercase();
@@ -393,10 +454,9 @@ async fn put_screenshot(
 
 async fn get_screenshot(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    AuthenticatedUser(claims): AuthenticatedUser,
     Path(sha256): Path<String>,
 ) -> Result<Response, AppError> {
-    let claims = verify_bearer_header(&headers, &state.config.token_secret)?;
     let uid = claims.uid;
     let env = claims.env;
 

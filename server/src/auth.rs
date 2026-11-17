@@ -15,6 +15,7 @@ type HmacSha256 = Hmac<Sha256>;
 
 /// 默认签发 30 天有效期的访问令牌，客户端在过期时会自动静默重签
 pub const TOKEN_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+const MAX_RATE_LIMIT_TRACKED_KEYS: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenClaims {
@@ -74,7 +75,7 @@ pub fn normalize_and_validate_sync_key(raw_key: &str, app_env: &str) -> Result<S
         if g.len() != 4 || !g.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()) {
             return Err(AppError::BadRequest(
                 "invalid_sync_key_chars",
-                "同步密钥每段必须为 4 位字母或数字".to_string(),
+                "同步密钥每段必须为 4 位大写英文字母或数字".to_string(),
             ));
         }
     }
@@ -82,27 +83,41 @@ pub fn normalize_and_validate_sync_key(raw_key: &str, app_env: &str) -> Result<S
     Ok(cleaned)
 }
 
-/// 生成脱敏提示文本（如 `MOJI-8F3K-****-2M9N`），避免在接口或日志中回显完整密钥
+/// 生成高安全性脱敏提示文本（如 `MOJI-****-****-****-2M9N`），最多仅回显末尾 4 位，保留至少 60 bit 未知熵
 pub fn mask_sync_key(normalized_key: &str) -> String {
     let parts: Vec<&str> = normalized_key.split('-').collect();
-    if parts.len() >= 5 {
-        format!("{}-{}-****-{}", parts[0], parts[1], parts[parts.len() - 1])
+    if parts.len() >= 2 {
+        let prefix = parts[0];
+        let tail = parts[parts.len() - 1];
+        let masked_middle = vec!["****"; parts.len() - 2].join("-");
+        if masked_middle.is_empty() {
+            format!("{prefix}-{tail}")
+        } else {
+            format!("{prefix}-{masked_middle}-{tail}")
+        }
     } else {
         "MOJI-****".to_string()
     }
 }
 
-/// 计算入库存储的单向 SHA-256 身份哈希（数据库绝不明文存储原始 Sync Key）
+/// 计算入库存储的多轮拉伸 SHA-256 身份哈希（数据库绝不明文存储原始 Sync Key，且不耦合会话签名密钥以免轮换时丢失账户映射）
 pub fn hash_sync_key(normalized_key: &str, app_env: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"moji-sync-key-v1:");
-    hasher.update(app_env.as_bytes());
-    hasher.update(b":");
-    hasher.update(normalized_key.as_bytes());
-    hex::encode(hasher.finalize())
+    let mut seed = Sha256::new();
+    seed.update(b"moji-sync-key-v1:");
+    seed.update(app_env.as_bytes());
+    seed.update(b":");
+    seed.update(normalized_key.as_bytes());
+    let mut digest = seed.finalize();
+    for round in 0u32..4096 {
+        let mut h = Sha256::new();
+        h.update(digest);
+        h.update(round.to_le_bytes());
+        digest = h.finalize();
+    }
+    hex::encode(digest)
 }
 
-/// 常量时间校验服务端接入码，防止时序侧信道探测
+/// 定长摘要常量时间校验服务端接入码，防止时序侧信道泄露长度或内容
 pub fn verify_access_code(configured: Option<&str>, provided: Option<&str>) -> Result<(), AppError> {
     let Some(expected) = configured else {
         return Ok(());
@@ -114,7 +129,9 @@ pub fn verify_access_code(configured: Option<&str>, provided: Option<&str>) -> R
             "此云端服务已启用家庭接入保护，请填写正确的「服务器接入码」".to_string(),
         ));
     }
-    let eq: bool = expected.as_bytes().ct_eq(actual.as_bytes()).into();
+    let expected_digest = Sha256::digest(expected.as_bytes());
+    let actual_digest = Sha256::digest(actual.as_bytes());
+    let eq: bool = expected_digest.as_slice().ct_eq(actual_digest.as_slice()).into();
     if !eq {
         return Err(AppError::Forbidden(
             "invalid_access_code",
@@ -213,16 +230,24 @@ pub fn verify_bearer_header(headers: &HeaderMap, secret: &[u8]) -> Result<TokenC
     Ok(claims)
 }
 
-/// 轻量级内存滑动窗口防暴力破解限流器（按客户端标识统计 60 秒内失败次数）
+struct RateLimiterInner {
+    failures: HashMap<String, Vec<i64>>,
+    last_sweep_ms: i64,
+}
+
+/// 轻量级内存滑动窗口防暴力破解限流器（带硬容量上限与定频清扫，杜绝内存膨胀与 O(N^2) 退化）
 pub struct AuthRateLimiter {
-    failures: Mutex<HashMap<String, Vec<i64>>>,
+    inner: Mutex<RateLimiterInner>,
     max_failures_per_minute: usize,
 }
 
 impl AuthRateLimiter {
     pub fn new(max_failures_per_minute: usize) -> Self {
         Self {
-            failures: Mutex::new(HashMap::new()),
+            inner: Mutex::new(RateLimiterInner {
+                failures: HashMap::new(),
+                last_sweep_ms: 0,
+            }),
             max_failures_per_minute,
         }
     }
@@ -230,8 +255,8 @@ impl AuthRateLimiter {
     pub fn check_allowed(&self, client_key: &str) -> Result<(), AppError> {
         let now = now_millis();
         let cutoff = now - 60_000;
-        let mut guard = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(times) = guard.get_mut(client_key) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(times) = guard.failures.get_mut(client_key) {
             times.retain(|&ts| ts >= cutoff);
             if times.len() >= self.max_failures_per_minute {
                 return Err(AppError::TooManyRequests(
@@ -245,20 +270,36 @@ impl AuthRateLimiter {
     pub fn record_failure(&self, client_key: &str) {
         let now = now_millis();
         let cutoff = now - 60_000;
-        let mut guard = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-        if guard.len() > 2048 {
-            guard.retain(|_, v| {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+
+        if now - guard.last_sweep_ms >= 5_000 || guard.failures.len() >= MAX_RATE_LIMIT_TRACKED_KEYS {
+            guard.failures.retain(|_, v| {
                 v.retain(|&ts| ts >= cutoff);
                 !v.is_empty()
             });
+            guard.last_sweep_ms = now;
         }
-        let entry = guard.entry(client_key.to_string()).or_default();
+
+        if !guard.failures.contains_key(client_key)
+            && guard.failures.len() >= MAX_RATE_LIMIT_TRACKED_KEYS
+        {
+            if let Some(oldest_key) = guard
+                .failures
+                .iter()
+                .min_by_key(|(_, ts)| ts.last().copied().unwrap_or(0))
+                .map(|(k, _)| k.clone())
+            {
+                guard.failures.remove(&oldest_key);
+            }
+        }
+
+        let entry = guard.failures.entry(client_key.to_string()).or_default();
         entry.retain(|&ts| ts >= cutoff);
         entry.push(now);
     }
 
     pub fn clear_failures(&self, client_key: &str) {
-        let mut guard = self.failures.lock().unwrap_or_else(|e| e.into_inner());
-        guard.remove(client_key);
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.failures.remove(client_key);
     }
 }
