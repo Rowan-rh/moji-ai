@@ -85,4 +85,28 @@ class MoJiCloudSyncClientTest {
         assertFalse(changedKeyDraft.canAutoPushSafely)
         assertEquals(0L, changedKeyDraft.effectiveLastSyncedRevision)
     }
+
+    @Test
+    fun `validateSyncKey strictly rejects non-ASCII letters and fullwidth digits`() {
+        val prefix = MoJiCloudSyncClient.expectedKeyPrefix
+        assertTrue(MoJiCloudSyncClient.validateSyncKey("${prefix}测试账本-1234-ABCD-EFGH").isFailure)
+        assertTrue(MoJiCloudSyncClient.validateSyncKey("${prefix}１２３４-ABCD-EFGH-2345").isFailure)
+        assertTrue(MoJiCloudSyncClient.validateSyncKey("${prefix}ABCD-EFGH-2345-6789").isSuccess)
+    }
+
+    @Test
+    fun `restore suppression window blocks auto sync during and immediately after restore`() {
+        MoJiCloudSyncClient.endRestoreSuppression(cooldownMs = 0L)
+        Thread.sleep(5L)
+        assertFalse(MoJiCloudSyncClient.shouldSuppressAutoSync())
+
+        MoJiCloudSyncClient.beginRestoreSuppression()
+        assertTrue(MoJiCloudSyncClient.shouldSuppressAutoSync())
+
+        MoJiCloudSyncClient.endRestoreSuppression(cooldownMs = 80L)
+        assertTrue(MoJiCloudSyncClient.shouldSuppressAutoSync())
+
+        Thread.sleep(100L)
+        assertFalse(MoJiCloudSyncClient.shouldSuppressAutoSync())
+    }
 }

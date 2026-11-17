@@ -1,19 +1,23 @@
 use rand::RngCore;
 use std::env;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use uuid::Uuid;
 
 #[derive(Clone, Debug)]
 pub struct ServerConfig {
     pub bind_addr: SocketAddr,
     pub data_dir: PathBuf,
-    /// 可选的家庭/私有服务器接入密钥：配置后，所有密钥注册与令牌签发请求均需通过常量时间比对校验，防止公网陌生人滥用 ECS 存储
+    /// 可选的家庭/私有服务器接入密钥：配置后，所有密钥注册与令牌签发请求均需通过定长哈希常量时间比对校验
     pub server_access_code: Option<String>,
-    /// 用于签发无状态 Bearer 会话令牌（30天有效期）的 32 字节密钥；若未通过环境变量显式指定，首次启动自动生成并持久化在 data_dir/.token_secret
+    /// 用于签发无状态 Bearer 会话令牌（30天有效期）的密钥；若未通过环境变量指定，首次启动以 0600 权限原子生成并保存在 data_dir/.token_secret
     pub token_secret: Vec<u8>,
     /// 每个用户保留的历史快照回滚版本上限
     pub max_history_revisions: usize,
+    /// 是否信任来自本机或容器内网反向代理的 X-Real-IP / X-Forwarded-For 头
+    pub trust_proxy_headers: bool,
 }
 
 impl ServerConfig {
@@ -40,12 +44,18 @@ impl ServerConfig {
             .unwrap_or(10)
             .clamp(1, 50);
 
+        let trust_proxy_headers = env::var("MOJI_TRUST_PROXY_HEADERS")
+            .ok()
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+
         Ok(Self {
             bind_addr,
             data_dir,
             server_access_code,
             token_secret,
             max_history_revisions,
+            trust_proxy_headers,
         })
     }
 
@@ -57,7 +67,8 @@ impl ServerConfig {
             data_dir,
             server_access_code: access_code.map(|s| s.to_string()),
             token_secret: b"0123456789abcdef0123456789abcdef".to_vec(),
-            max_history_revisions: 5,
+            max_history_revisions: 3,
+            trust_proxy_headers: false,
         }
     }
 }
@@ -78,21 +89,38 @@ fn load_or_create_token_secret(data_dir: &Path) -> Result<Vec<u8>, String> {
             .map_err(|e| format!("读取 {:?} 失败: {e}", secret_file))?;
         let decoded = hex::decode(content.trim())
             .map_err(|e| format!("解析 {:?} 十六进制密钥失败: {e}", secret_file))?;
-        if decoded.len() >= 32 {
-            return Ok(decoded);
+        if decoded.len() < 32 {
+            return Err(format!(
+                "密钥文件 {:?} 长度不足 32 字节（已损坏），请修复或删除后重启重新生成",
+                secret_file
+            ));
         }
+        return Ok(decoded);
     }
 
     let mut random_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut random_bytes);
     let hex_secret = hex::encode(random_bytes);
-    fs::write(&secret_file, &hex_secret)
-        .map_err(|e| format!("写入 {:?} 失败: {e}", secret_file))?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&secret_file, fs::Permissions::from_mode(0o600));
+    let tmp_path = data_dir.join(format!(".token_secret.tmp.{}", Uuid::new_v4()));
+    let write_res = (|| -> std::io::Result<()> {
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut file = opts.open(&tmp_path)?;
+        file.write_all(hex_secret.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&tmp_path, &secret_file)?;
+        Ok(())
+    })();
+
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("原子创建密钥文件 {:?} 失败: {e}", secret_file));
     }
 
     Ok(random_bytes.to_vec())

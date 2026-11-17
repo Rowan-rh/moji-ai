@@ -117,7 +117,7 @@ object RomKeepAliveGuideHelper {
             isAccessibilityEnabled = isAccessGranted,
             accessibilityHealth = accessHealth,
             isIgnoringBatteryOptimizations = isBatteryIgnored,
-            requiresAndroid13RestrictedUnlock = sdkInt >= 33 && !isAccessGranted,
+            requiresAndroid13RestrictedUnlock = sdkInt >= 33 && accessHealth == AccessibilityHealthState.DISABLED,
             restrictedSettingSteps = restrictedSteps,
             romKeepAliveSteps = steps
         )
@@ -168,30 +168,33 @@ object RomKeepAliveGuideHelper {
         return inspectAccessibilityHealth(context) == AccessibilityHealthState.ACTIVE
     }
 
+    fun buildAccessibilitySettingsIntent(context: Context, highlightService: Boolean = true): Intent {
+        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (highlightService) {
+            val componentKey = ComponentName(
+                context.packageName,
+                SelectToSpeakService::class.java.name
+            ).flattenToString()
+            val bundle = Bundle().apply {
+                putString(":settings:fragment_args_key", componentKey)
+            }
+            intent.putExtra(":settings:fragment_args_key", componentKey)
+            intent.putExtra(":settings:show_fragment_args", bundle)
+        }
+        return intent
+    }
+
     /**
      * 跳转系统无障碍设置并自动定位高亮「默记」服务项（兼容 AOSP / ColorOS / HyperOS / OneUI，不支持的机型平滑回退至无障碍列表）
      */
     fun openAccessibilitySettingsForMoJi(context: Context) {
-        val componentKey = ComponentName(
-            context.packageName,
-            SelectToSpeakService::class.java.name
-        ).flattenToString()
         try {
-            val bundle = Bundle().apply {
-                putString(":settings:fragment_args_key", componentKey)
-            }
-            val highlightedIntent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                putExtra(":settings:fragment_args_key", componentKey)
-                putExtra(":settings:show_fragment_args", bundle)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-            context.startActivity(highlightedIntent)
+            context.startActivity(buildAccessibilitySettingsIntent(context, highlightService = true))
         } catch (_: Exception) {
             runCatching {
-                val fallback = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                context.startActivity(fallback)
+                context.startActivity(buildAccessibilitySettingsIntent(context, highlightService = false))
             }
         }
     }

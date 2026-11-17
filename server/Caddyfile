@@ -1,7 +1,9 @@
 # 将 sync.example.com 替换为你的备案域名（或海外免备案域名），Caddy 会自动申请并续期免费 HTTPS 证书
 sync.example.com {
     request_body {
-        max_size 64MB
+        max_size 80MiB
     }
-    reverse_proxy moji-cloud:8787
+    reverse_proxy moji-cloud:8787 {
+        header_up X-Real-IP {remote_host}
+    }
 }

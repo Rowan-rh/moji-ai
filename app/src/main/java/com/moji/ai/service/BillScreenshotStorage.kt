@@ -21,6 +21,7 @@ data class SavedScreenshotInfo(
 object BillScreenshotStorage {
 
     private const val SCREENSHOT_DIR_NAME = "bill_screenshots"
+    private const val MAX_SAFE_SCREENSHOT_BYTES = 8L * 1024L * 1024L
 
     @Volatile
     private var screenshotDirCanonicalPrefix: String? = null
@@ -131,7 +132,7 @@ object BillScreenshotStorage {
             // 1. 若原路径已在本机存在且 SHA-256 完全匹配，直接复用
             if (!existingPathHint.isNullOrBlank()) {
                 val hintFile = File(existingPathHint)
-                if (isSafeScreenshotFile(hintFile, context)) {
+                if (isSafeScreenshotFile(hintFile, context) && hintFile.length() in 1L..MAX_SAFE_SCREENSHOT_BYTES) {
                     val hintBytes = hintFile.readBytes()
                     if (sha256Hex(hintBytes) == expectedSha) {
                         return@runCatching hintFile.absolutePath
@@ -141,7 +142,7 @@ object BillScreenshotStorage {
 
             // 2. 检查本机固定内容寻址缓存文件是否已存在
             val cloudTarget = File(dir, "bill_cloud_${expectedSha.take(16)}.webp")
-            if (cloudTarget.exists() && cloudTarget.isFile) {
+            if (cloudTarget.exists() && cloudTarget.isFile && cloudTarget.length() in 1L..MAX_SAFE_SCREENSHOT_BYTES) {
                 val existingBytes = cloudTarget.readBytes()
                 if (sha256Hex(existingBytes) == expectedSha) {
                     return@runCatching cloudTarget.absolutePath
@@ -150,7 +151,7 @@ object BillScreenshotStorage {
 
             // 3. 若传入了云端下载字节流，强校验 WebP 魔数与 SHA-256 后原子落盘
             val bytes = downloadedWebpBytes ?: return@runCatching null
-            if (bytes.size < 16 || bytes.size > 8 * 1024 * 1024) return@runCatching null
+            if (bytes.size < 16 || bytes.size.toLong() > MAX_SAFE_SCREENSHOT_BYTES) return@runCatching null
             val isWebp = bytes[0] == 'R'.code.toByte() &&
                 bytes[1] == 'I'.code.toByte() &&
                 bytes[2] == 'F'.code.toByte() &&
@@ -164,16 +165,26 @@ object BillScreenshotStorage {
             }
 
             val tmpFile = File(dir, ".tmp_${expectedSha.take(16)}_${System.nanoTime()}.webp")
-            FileOutputStream(tmpFile).use { fos ->
-                fos.write(bytes)
-                fos.fd.sync()
-            }
-            if (!tmpFile.renameTo(cloudTarget)) {
-                FileOutputStream(cloudTarget).use { fos ->
+            try {
+                FileOutputStream(tmpFile).use { fos ->
                     fos.write(bytes)
                     fos.fd.sync()
                 }
-                tmpFile.delete()
+                if (!tmpFile.renameTo(cloudTarget)) {
+                    try {
+                        FileOutputStream(cloudTarget).use { fos ->
+                            fos.write(bytes)
+                            fos.fd.sync()
+                        }
+                    } catch (writeErr: Exception) {
+                        cloudTarget.delete()
+                        throw writeErr
+                    }
+                }
+            } finally {
+                if (tmpFile.exists()) {
+                    tmpFile.delete()
+                }
             }
             cloudTarget.absolutePath
         }.getOrNull()
@@ -181,6 +192,7 @@ object BillScreenshotStorage {
 
     fun computeFileSha256IfSafe(file: File, context: Context? = null): String? {
         if (!isSafeScreenshotFile(file, context)) return null
+        if (file.length() !in 1L..MAX_SAFE_SCREENSHOT_BYTES) return null
         return runCatching {
             val bytes = file.readBytes()
             if (bytes.isEmpty()) null else sha256Hex(bytes)

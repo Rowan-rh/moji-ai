@@ -81,7 +81,7 @@
 - **单笔分拆账单 (`splitExpenseTransaction`)**：支持在账单详情页将单笔消费（如超市综合采购）拆分为多个独立分类与金额的子账单，同时保持原付款账户总扣款金额严格不变（并拒绝直接分拆已关联冲销/报销到账的复杂账单，防止关联引用断裂）。
 - **可视化条件规则引擎 (`SmartRuleEngine`, `When -> Then`)**：支持按关键词、金额上下限、24 小时时间窗组合条件，自动改写分类/账本/附加标签、自动标为待报销或静默拦截非账单通知。
 - **默记自托管云存储服务与免登录专属密钥同步 (`MoJiCloudSyncClient` + Rust `server/moji-cloud-server`)**：
-  - **客户端密码学专属密钥（Sync Key）免登录模型**：手机端通过 `SecureRandom` 生成 80-bit 无歧义专属密钥（正式包 `MOJI-XXXX-XXXX-XXXX-XXXX`，QA 包 `MOJIQA-XXXX-XXXX-XXXX-XXXX` 物理隔离环境），服务端仅存储单向 `SHA-256` 哈希。不同家庭成员使用各自生成的独立密钥即可天然隔离账本（支持一键复制不含个人密钥的 `moji-pair://` 家人配对口令，仅共享服务器地址与家庭接入码）；本人换新手机时粘贴同一把密钥即可完整拉回账本与原图。
+  - **客户端密码学专属密钥（Sync Key）免登录模型**：手机端通过 `SecureRandom` 生成 80-bit 无歧义专属密钥（正式包 `MOJI-XXXX-XXXX-XXXX-XXXX`，QA 包 `MOJIQA-XXXX-XXXX-XXXX-XXXX` 物理隔离环境），服务端仅存储经 4,096 轮 `SHA-256` 拉伸的密钥摘要与仅保留末 4 位的脱敏提示。不同家庭成员使用各自生成的独立密钥即可天然隔离账本（支持一键复制不含个人密钥的 `moji-pair://` 家人配对口令，仅共享服务器地址与家庭接入码）；本人换新手机时粘贴同一把密钥即可完整拉回账本与原图。
   - **面向未来微信/手机号登录的零迁移解耦表结构**：Rust 后端（`Axum + Tokio + Rusqlite WAL`）采用 `users (user_id)` $\leftarrow$ `user_identities (provider, identifier_hash, user_id)` 标准表结构，所有同步接口统一校验基于内部 `user_id` 签发的 `HMAC-SHA256` 会话令牌；后期扩展微信开放平台或手机号登录时无需迁移任何存量云端数据。
   - **乐观并发冲突守卫、历史版本归档与账单原图内容寻址增量同步**：支持 `expected_revision` 版本锁与非空账本防误清空保护（`409 Conflict` 弹窗确认）、服务端自动保留最近 `N` 个历史版本（`.tmp` `fsync` + 原子 `rename`）、`BillScreenshotStorage` WebP 原图 `SHA-256` 增量去重上传与跨设备恢复路径自动重写，以及绑定对齐版本后记账/静默识账 6 秒防抖后台自动推送。
 - **WebDAV 自托管云同步 (`WebDavSyncClient`)**：支持连接坚果云、Nextcloud、群晖 Synology 等标准 WebDAV 服务（公网强制 `HTTPS` 防基础认证凭据明文泄露，仅局域网私有地址允许 `HTTP`），采用 `.tmp` 临时上传 + `MOVE Overwrite: T` 原子替换策略上传或下载恢复 `.mojibackup` 全量快照。

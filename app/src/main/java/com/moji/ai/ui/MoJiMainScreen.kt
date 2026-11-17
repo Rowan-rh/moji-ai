@@ -91,6 +91,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -1825,12 +1826,16 @@ private fun ICostSmartBookkeepingFullScreen(
     var pendingDeleteRule by remember { mutableStateOf<SmartConditionRule?>(null) }
     var showAccessibilityPromptDialog by remember { mutableStateOf(false) }
     var promptHealthState by remember { mutableStateOf(AccessibilityHealthState.DISABLED) }
+    val latestAiConfig by rememberUpdatedState(aiConfig)
 
     // 每次进入「智能记账」页面时自动检测无障碍服务真实运行状态（预留 350ms 容忍冷启动绑定时延）
     LaunchedEffect(Unit) {
         delay(350L)
         val latestHealth = RomKeepAliveGuideHelper.inspectAccessibilityHealth(context)
-        if (aiConfig.enableAccessibilityCapture && latestHealth != AccessibilityHealthState.ACTIVE) {
+        if (!showAccessibilityPromptDialog &&
+            latestAiConfig.enableAccessibilityCapture &&
+            latestHealth != AccessibilityHealthState.ACTIVE
+        ) {
             promptHealthState = latestHealth
             showAccessibilityPromptDialog = true
         }
@@ -1886,17 +1891,15 @@ private fun ICostSmartBookkeepingFullScreen(
                                     showAccessibilityPromptDialog = true
                                 }
                             } else null,
-                            checked = aiConfig.enableAccessibilityCapture && isAccessGranted,
+                            checked = aiConfig.enableAccessibilityCapture,
                             onCheckedChange = { wantEnable ->
+                                onUpdateAiConfig(aiConfig.copy(enableAccessibilityCapture = wantEnable))
                                 if (wantEnable) {
-                                    onUpdateAiConfig(aiConfig.copy(enableAccessibilityCapture = true))
                                     val latest = RomKeepAliveGuideHelper.inspectAccessibilityHealth(context)
                                     if (latest != AccessibilityHealthState.ACTIVE) {
                                         promptHealthState = latest
                                         showAccessibilityPromptDialog = true
                                     }
-                                } else {
-                                    onUpdateAiConfig(aiConfig.copy(enableAccessibilityCapture = false))
                                 }
                             }
                         )
@@ -3535,7 +3538,8 @@ private fun BackupAndCsvTransferSheet(
                         }
                         ICostFormField(
                             value = cloudSyncKey,
-                            onValueChange = { cloudSyncKey = it.uppercase(Locale.US) },
+                            onValueChange = { if (!isWorking) cloudSyncKey = it.uppercase(Locale.US) },
+                            readOnly = isWorking,
                             label = "我的专属密钥",
                             placeholder = "${MoJiCloudSyncClient.expectedKeyPrefix}XXXX-XXXX-XXXX-XXXX",
                             modifier = Modifier.fillMaxWidth(),
@@ -3563,8 +3567,14 @@ private fun BackupAndCsvTransferSheet(
                             verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             AssistChip(
+                                enabled = !isWorking,
                                 onClick = {
-                                    val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim()
+                                    val clipText = clipboard?.primaryClip
+                                        ?.takeIf { it.itemCount > 0 }
+                                        ?.getItemAt(0)
+                                        ?.coerceToText(context)
+                                        ?.toString()
+                                        ?.trim()
                                     if (clipText.isNullOrBlank()) {
                                         localBanner = "剪贴板为空"
                                     } else {
@@ -3582,6 +3592,7 @@ private fun BackupAndCsvTransferSheet(
                                 label = { Text("粘贴已有密钥（换机恢复）", fontSize = 12.sp) }
                             )
                             AssistChip(
+                                enabled = !isWorking,
                                 onClick = { showRegenerateKeyDialog = true },
                                 label = { Text("生成新密钥", fontSize = 12.sp) }
                             )
@@ -3599,7 +3610,8 @@ private fun BackupAndCsvTransferSheet(
                         )
                         ICostFormField(
                             value = cloudUrl,
-                            onValueChange = { cloudUrl = it },
+                            onValueChange = { if (!isWorking) cloudUrl = it },
+                            readOnly = isWorking,
                             label = "云服务器地址",
                             placeholder = "https://sync.example.com",
                             modifier = Modifier.fillMaxWidth(),
@@ -3608,7 +3620,8 @@ private fun BackupAndCsvTransferSheet(
                         )
                         ICostFormField(
                             value = cloudAccessCode,
-                            onValueChange = { cloudAccessCode = it },
+                            onValueChange = { if (!isWorking) cloudAccessCode = it },
+                            readOnly = isWorking,
                             label = "服务器接入码（可选，家庭防外人保护口令）",
                             placeholder = "对应服务端 MOJI_SERVER_ACCESS_CODE",
                             modifier = Modifier.fillMaxWidth(),
@@ -3630,7 +3643,8 @@ private fun BackupAndCsvTransferSheet(
                         )
                         ICostFormField(
                             value = cloudMemberLabel,
-                            onValueChange = { cloudMemberLabel = it },
+                            onValueChange = { if (!isWorking) cloudMemberLabel = it },
+                            readOnly = isWorking,
                             label = "成员 / 设备备注（区分谁的手机）",
                             placeholder = "如：我的手机 / 老婆",
                             modifier = Modifier.fillMaxWidth(),
@@ -3655,8 +3669,14 @@ private fun BackupAndCsvTransferSheet(
                                 label = { Text("复制家人配对口令（独立账本）", fontSize = 12.sp) }
                             )
                             AssistChip(
+                                enabled = !isWorking,
                                 onClick = {
-                                    val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+                                    val clipText = clipboard?.primaryClip
+                                        ?.takeIf { it.itemCount > 0 }
+                                        ?.getItemAt(0)
+                                        ?.coerceToText(context)
+                                        ?.toString()
+                                        .orEmpty()
                                     MoJiCloudSyncClient.decodeFamilyPairingText(clipText).fold(
                                         onSuccess = { (parsedUrl, parsedCode) ->
                                             cloudUrl = parsedUrl
@@ -3694,10 +3714,20 @@ private fun BackupAndCsvTransferSheet(
                                 )
                             }
                             Switch(
+                                enabled = !isWorking,
                                 checked = cloudAutoSync,
                                 onCheckedChange = { checked ->
                                     cloudAutoSync = checked
-                                    onSaveMoJiCloudConfig(currentCloudDraft().copy(autoSyncEnabled = checked))
+                                    val draft = currentCloudDraft()
+                                    val validKey = MoJiCloudSyncClient.validateSyncKey(draft.syncKey).isSuccess
+                                    val validUrl = draft.serverUrl.isBlank() ||
+                                        MoJiCloudSyncClient.validateServerUrl(draft.serverUrl).isSuccess
+                                    if (validKey && validUrl) {
+                                        onSaveMoJiCloudConfig(draft.copy(autoSyncEnabled = checked))
+                                    } else {
+                                        // 草稿输入框尚未编辑合法时，仅更新已保存配置的开关位，避免意外覆盖原有效密钥
+                                        onSaveMoJiCloudConfig(mojiCloudConfig.copy(autoSyncEnabled = checked))
+                                    }
                                 }
                             )
                         }
@@ -3948,7 +3978,7 @@ private fun BackupAndCsvTransferSheet(
         )
     }
 
-    if (showRegenerateKeyDialog) {
+    if (showRegenerateKeyDialog && !isWorking) {
         AlertDialog(
             onDismissRequest = { showRegenerateKeyDialog = false },
             containerColor = ICostCardWhite,
@@ -3961,8 +3991,17 @@ private fun BackupAndCsvTransferSheet(
                     showRegenerateKeyDialog = false
                     val newKey = MoJiCloudSyncClient.generateSyncKey()
                     cloudSyncKey = newKey
+                    val draft = currentCloudDraft()
+                    val safeUrl = if (draft.serverUrl.isBlank() ||
+                        MoJiCloudSyncClient.validateServerUrl(draft.serverUrl).isSuccess
+                    ) {
+                        draft.serverUrl
+                    } else {
+                        mojiCloudConfig.serverUrl
+                    }
                     onSaveMoJiCloudConfig(
-                        currentCloudDraft().copy(
+                        draft.copy(
+                            serverUrl = safeUrl,
                             syncKey = newKey,
                             userId = "",
                             accessToken = "",
@@ -3981,8 +4020,7 @@ private fun BackupAndCsvTransferSheet(
         )
     }
 
-    if (pendingCloudConflictMsg != null) {
-        val conflictText = pendingCloudConflictMsg!!
+    pendingCloudConflictMsg?.let { conflictText ->
         AlertDialog(
             onDismissRequest = { pendingCloudConflictMsg = null },
             containerColor = ICostCardWhite,

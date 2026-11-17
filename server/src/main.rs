@@ -4,6 +4,7 @@ mod db;
 mod error;
 mod routes;
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -60,23 +61,35 @@ async fn main() {
         if has_access_code { "已开启" } else { "未开启" }
     );
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .expect("server exited with error");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .expect("server exited with error");
 }
 
 async fn shutdown_signal() {
     let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::warn!("无法监听 Ctrl-C 信号 ({e})，挂起该分支");
+            std::future::pending::<()>().await;
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        if let Ok(mut sigterm) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        {
-            sigterm.recv().await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                if sigterm.recv().await.is_none() {
+                    std::future::pending::<()>().await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!("无法监听 SIGTERM 信号 ({e})，挂起该分支");
+                std::future::pending::<()>().await;
+            }
         }
     };
 
@@ -100,28 +113,32 @@ mod tests {
     use tempfile::TempDir;
     use tower::ServiceExt;
 
-    fn make_test_app(access_code: Option<&str>) -> (TempDir, axum::Router) {
+    fn make_test_app(access_code: Option<&str>, max_failures: usize) -> (TempDir, axum::Router) {
         let tmp = TempDir::new().unwrap();
         let cfg = ServerConfig::for_test(tmp.path().to_path_buf(), access_code);
         let store = CloudStore::open(&cfg.data_dir, cfg.max_history_revisions).unwrap();
         let state = Arc::new(AppState {
             config: cfg,
             store,
-            rate_limiter: AuthRateLimiter::new(10),
+            rate_limiter: AuthRateLimiter::new(max_failures),
         });
         (tmp, build_router(state))
     }
 
-    async fn send_json(
+    async fn send_json_with_peer(
         app: &axum::Router,
         method: &str,
         uri: &str,
         bearer: Option<&str>,
+        peer_ip: Option<&str>,
         payload: Option<Value>,
     ) -> (StatusCode, Value) {
         let mut builder = Request::builder().method(method).uri(uri);
         if let Some(tok) = bearer {
             builder = builder.header("Authorization", format!("Bearer {tok}"));
+        }
+        if let Some(ip) = peer_ip {
+            builder = builder.header("x-test-peer-ip", ip);
         }
         let body = if let Some(val) = payload {
             builder = builder.header("Content-Type", "application/json");
@@ -136,9 +153,19 @@ mod tests {
         (status, json_val)
     }
 
+    async fn send_json(
+        app: &axum::Router,
+        method: &str,
+        uri: &str,
+        bearer: Option<&str>,
+        payload: Option<Value>,
+    ) -> (StatusCode, Value) {
+        send_json_with_peer(app, method, uri, bearer, None, payload).await
+    }
+
     #[tokio::test]
     async fn test_end_to_end_family_isolation_conflict_and_screenshots() {
-        let (_tmp, app) = make_test_app(Some("family-8888"));
+        let (_tmp, app) = make_test_app(Some("family-8888"), 10);
 
         // 1. 未带家庭接入码应被拒绝
         let (st, _) = send_json(
@@ -172,7 +199,7 @@ mod tests {
         .await;
         assert_eq!(st, StatusCode::BAD_REQUEST);
 
-        // 3. 成员 A 与成员 B 使用不同专属 Key 登录，应获得各自独立隔离的 user_id
+        // 3. 成员 A 与成员 B 使用不同专属 Key 登录，应获得各自独立隔离的 user_id，且 key_hint 仅暴露末尾 4 位
         let (st_a, login_a) = send_json(
             &app,
             "POST",
@@ -189,6 +216,7 @@ mod tests {
         )
         .await;
         assert_eq!(st_a, StatusCode::OK);
+        assert_eq!(login_a["key_hint"], "MOJI-****-****-****-DDDD");
         let token_a = login_a["access_token"].as_str().unwrap().to_string();
         let uid_a = login_a["user_id"].as_str().unwrap().to_string();
         assert_eq!(login_a["is_new_account"], true);
@@ -245,24 +273,40 @@ mod tests {
         assert_eq!(put_res["account_summary"]["latest_revision"], 1);
         assert_eq!(put_res["account_summary"]["tx_count"], 2);
 
-        // 5. 模拟新手机绑定成员 A 的同一个 Key，未拉取前误传 expected_revision=0 应触发 409 冲突保护
-        let (st_conflict, conflict_res) = send_json(
+        // 5a. 新手机未传 expected_revision (null) 或传 0 均应触发 409 revision_conflict
+        let (st_null_rev, null_rev_res) = send_json(
             &app,
             "PUT",
             "/api/v1/sync/snapshot",
             Some(&token_a),
             Some(json!({
-                "expected_revision": 0,
+                "force_overwrite": false,
+                "snapshot_json": json!({"appName": "MoJi", "transactions": [{"id": 1}]}).to_string()
+            })),
+        )
+        .await;
+        assert_eq!(st_null_rev, StatusCode::CONFLICT);
+        assert_eq!(null_rev_res["error"], "revision_conflict");
+
+        // 5b. 即使传对了 expected_revision=1，非强制模式下上传 0 笔账单也应命中 empty_snapshot_guard (409)
+        let (st_empty_guard, empty_guard_res) = send_json(
+            &app,
+            "PUT",
+            "/api/v1/sync/snapshot",
+            Some(&token_a),
+            Some(json!({
+                "expected_revision": 1,
                 "force_overwrite": false,
                 "snapshot_json": json!({"appName": "MoJi", "transactions": []}).to_string()
             })),
         )
         .await;
-        assert_eq!(st_conflict, StatusCode::CONFLICT);
-        assert_eq!(conflict_res["error"], "revision_conflict");
+        assert_eq!(st_empty_guard, StatusCode::CONFLICT);
+        assert_eq!(empty_guard_res["error"], "empty_snapshot_guard");
 
         // 6. 成员 B 完全读不到成员 A 的账本快照（返回 404）
-        let (st_b_get, _) = send_json(&app, "GET", "/api/v1/sync/snapshot", Some(&token_b), None).await;
+        let (st_b_get, _) =
+            send_json(&app, "GET", "/api/v1/sync/snapshot", Some(&token_b), None).await;
         assert_eq!(st_b_get, StatusCode::NOT_FOUND);
 
         // 7. 测试 WebP 账单截图增量检查、上传与跨租户隔离
@@ -287,12 +331,11 @@ mod tests {
             .method("PUT")
             .uri(format!("/api/v1/screenshots/{ss_hash}"))
             .header("Authorization", format!("Bearer {token_a}"))
-            .body(Body::from(fake_webp.clone()))
+            .body(Body::from(fake_webp))
             .unwrap();
         let put_ss_resp = app.clone().oneshot(put_ss_req).await.unwrap();
         assert_eq!(put_ss_resp.status(), StatusCode::OK);
 
-        // 再次查询 missing 应为空（去重生效）
         let (_, miss_res2) = send_json(
             &app,
             "POST",
@@ -303,7 +346,6 @@ mod tests {
         .await;
         assert_eq!(miss_res2["missing_sha256"], json!([]));
 
-        // 成员 B 即使知道哈希也无法下载成员 A 的截图
         let get_ss_b = Request::builder()
             .method("GET")
             .uri(format!("/api/v1/screenshots/{ss_hash}"))
@@ -315,11 +357,131 @@ mod tests {
             StatusCode::NOT_FOUND
         );
 
-        // 成员 A 可以完整拉回快照与截图
         let (st_a_get, pulled_a) =
             send_json(&app, "GET", "/api/v1/sync/snapshot", Some(&token_a), None).await;
         assert_eq!(st_a_get, StatusCode::OK);
         assert_eq!(pulled_a["revision"], 1);
         assert_eq!(pulled_a["available_screenshots"], json!([&ss_hash]));
+    }
+
+    #[tokio::test]
+    async fn test_rate_limit_unauthenticated_body_guard_and_history_pruning() {
+        let (tmp, app) = make_test_app(Some("secret-code"), 3);
+
+        // 1. 未授权请求（即使发送非法 JSON 体）应在提取 Body 前直接以 401 拒绝，而非 400 解析错误
+        let unauth_req = Request::builder()
+            .method("PUT")
+            .uri("/api/v1/sync/snapshot")
+            .header("Content-Type", "application/json")
+            .body(Body::from("not-even-valid-json{{{"))
+            .unwrap();
+        let unauth_resp = app.clone().oneshot(unauth_req).await.unwrap();
+        assert_eq!(unauth_resp.status(), StatusCode::UNAUTHORIZED);
+
+        // 2. 篡改签名的 Token 应返回 401
+        let (st_bad_tok, _) = send_json(
+            &app,
+            "GET",
+            "/api/v1/sync/status",
+            Some("v1.eyJ2IjoxfQ.invalidsig"),
+            None,
+        )
+        .await;
+        assert_eq!(st_bad_tok, StatusCode::UNAUTHORIZED);
+
+        // 3. 攻击者 IP 连续输错 3 次触发 429 限流，即使伪造 X-Real-IP 也无法绕过，且不影响正常家庭成员 IP
+        for _ in 0..3 {
+            let (st, _) = send_json_with_peer(
+                &app,
+                "POST",
+                "/api/v1/auth/key-login",
+                None,
+                Some("203.0.113.99"),
+                Some(json!({
+                    "sync_key": "MOJI-AAAA-BBBB-CCCC-DDDD",
+                    "server_access_code": "wrong-code"
+                })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+        }
+        let mut spoof_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/key-login")
+            .header("Content-Type", "application/json")
+            .header("x-test-peer-ip", "203.0.113.99")
+            .header("x-real-ip", "198.51.100.1")
+            .body(Body::from(
+                serde_json::to_vec(&json!({
+                    "sync_key": "MOJI-AAAA-BBBB-CCCC-DDDD",
+                    "server_access_code": "secret-code"
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+        let _ = &mut spoof_req;
+        let spoof_resp = app.clone().oneshot(spoof_req).await.unwrap();
+        assert_eq!(spoof_resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // 正常家庭成员来自不同对端 IP，不受攻击者限流连坐
+        let (st_ok, login_ok) = send_json_with_peer(
+            &app,
+            "POST",
+            "/api/v1/auth/key-login",
+            None,
+            Some("198.51.100.88"),
+            Some(json!({
+                "sync_key": "MOJI-AAAA-BBBB-CCCC-DDDD",
+                "server_access_code": "secret-code",
+                "member_label": "家人A"
+            })),
+        )
+        .await;
+        assert_eq!(st_ok, StatusCode::OK);
+        let tok = login_ok["access_token"].as_str().unwrap().to_string();
+        let uid = login_ok["user_id"].as_str().unwrap().to_string();
+
+        // 4. 验证历史快照保留上限裁剪（for_test 设置 max_history_revisions = 3）
+        for rev in 0..5i64 {
+            let snap = json!({
+                "appName": "MoJi",
+                "exportedAtMillis": 1763380000000i64 + rev,
+                "transactions": [{"id": rev + 1, "amountCents": (rev + 1) * 100}]
+            })
+            .to_string();
+            let (st, _) = send_json(
+                &app,
+                "PUT",
+                "/api/v1/sync/snapshot",
+                Some(&tok),
+                Some(json!({
+                    "expected_revision": rev,
+                    "force_overwrite": false,
+                    "member_label": "家人A",
+                    "device_name": "Pixel 9",
+                    "snapshot_json": snap
+                })),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK);
+        }
+
+        // v1、v2 应已被裁剪（返回 404 且磁盘文件已清理），v3、v4、v5 仍可按 ?revision= 拉回
+        let (st_v2, _) =
+            send_json(&app, "GET", "/api/v1/sync/snapshot?revision=2", Some(&tok), None).await;
+        assert_eq!(st_v2, StatusCode::NOT_FOUND);
+        assert!(!tmp
+            .path()
+            .join("snapshots")
+            .join(&uid)
+            .join("history/rev_2.json")
+            .exists());
+
+        let (st_v3, pulled_v3) =
+            send_json(&app, "GET", "/api/v1/sync/snapshot?revision=3", Some(&tok), None).await;
+        assert_eq!(st_v3, StatusCode::OK);
+        assert_eq!(pulled_v3["revision"], 3);
+        assert_eq!(pulled_v3["updated_by_member"], "家人A");
+        assert_eq!(pulled_v3["updated_by_device"], "Pixel 9");
     }
 }
