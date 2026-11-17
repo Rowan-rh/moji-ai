@@ -18,6 +18,9 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import com.moji.ai.MoJiApp
 import com.moji.ai.ai.AiAccountingEngine
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.Executors
 import kotlin.math.abs
 
@@ -33,6 +36,9 @@ open class PaymentAccessibilityService : AccessibilityService() {
         @Volatile
         var instance: PaymentAccessibilityService? = null
             private set
+
+        private val _isConnectedFlow = MutableStateFlow(false)
+        val isConnectedFlow: StateFlow<Boolean> = _isConnectedFlow.asStateFlow()
 
         private val PROBE_DELAYS_MS = longArrayOf(60L, 200L, 450L, 850L, 1350L, 1950L)
         private val CONTENT_PROBE_DELAYS_MS = longArrayOf(95L, 280L, 650L, 1250L)
@@ -171,6 +177,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
+        _isConnectedFlow.value = true
         runCatching {
             val info = serviceInfo ?: AccessibilityServiceInfo()
             info.eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
@@ -1040,6 +1047,15 @@ open class PaymentAccessibilityService : AccessibilityService() {
         clearScheduledProbes()
     }
 
+    override fun onUnbind(intent: android.content.Intent?): Boolean {
+        clearScheduledProbes()
+        if (instance === this) {
+            instance = null
+            _isConnectedFlow.value = false
+        }
+        return super.onUnbind(intent)
+    }
+
     override fun onDestroy() {
         clearScheduledProbes()
         mainHandler.removeCallbacksAndMessages(null)
@@ -1051,6 +1067,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
         runCatching { screenshotIoExecutor.shutdown() }
         if (instance === this) {
             instance = null
+            _isConnectedFlow.value = false
         }
         super.onDestroy()
     }

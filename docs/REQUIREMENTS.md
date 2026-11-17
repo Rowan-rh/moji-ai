@@ -38,8 +38,8 @@
 - **纯后台静默入账 + 系统通知栏三键快捷操作**：
   - 付款后无需人工点击确认弹窗，后台直接完成解析与入账，并推送一条系统通知提醒。
   - 通知栏自带 **「撤销入账」「切换分类（同步写入商户记忆库）」「标为待报销」** 三个快捷按钮，无需打开 App 即可在通知栏一键完成回滚、改分类或打报销标记。
-- **国产 ROM 后台保活与 Android 13+ 受限设置一键诊断 (`RomKeepAliveGuideHelper`)**：
-  - 自动检测机型厂商（ColorOS / HyperOS / OriginOS / HarmonyOS），提供 `NotificationListenerService.requestRebind` 一键重连、Android 13+「应用详情 ➔ 允许受限设置」一键跳转与后台电池白名单诊断。
+- **国产 ROM 后台保活、无障碍状态自动检测提醒与 Android 13+ 受限设置一键诊断 (`RomKeepAliveGuideHelper`)**：
+  - 自动检测机型厂商（ColorOS / HyperOS / OriginOS / HarmonyOS），结合 `PaymentAccessibilityService.isConnectedFlow` 实时绑定态与 `Settings.Secure.ACCESSIBILITY_ENABLED / ENABLED_ACCESSIBILITY_SERVICES` 精准区分 **`ACTIVE`（正常运行）**、**`INTERRUPTED_BY_SYSTEM`（系统杀后台导致设置仍勾选但服务未绑定的“假开启”状态）** 与 **`DISABLED`（未启用或已被系统关闭）**；在进入「设置 › 智能记账」或打开识账开关时自动检测并弹窗提示（支持「去开启」携带 `:settings:fragment_args_key` 自动高亮跳转至默记无障碍项与「暂不处理」），同时提供 `NotificationListenerService.requestRebind` 一键重连、Android 13+「应用详情 ➔ 允许受限设置」一键跳转与后台电池白名单诊断。
 
 ### 2. AI 智能识别引擎（多模型兼容 + 商户记忆自学习 + 本地加权兜底）
 - **通用大模型接入**：
