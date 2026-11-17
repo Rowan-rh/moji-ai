@@ -36,7 +36,16 @@ class OcrTileService : TileService() {
                 "请先开启「${getString(R.string.accessibility_service_label)}」无障碍服务",
                 Toast.LENGTH_SHORT
             ).show()
+            val componentKey = android.content.ComponentName(
+                packageName,
+                com.google.android.accessibility.selecttospeak.SelectToSpeakService::class.java.name
+            ).flattenToString()
+            val bundle = android.os.Bundle().apply {
+                putString(":settings:fragment_args_key", componentKey)
+            }
             val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                putExtra(":settings:fragment_args_key", componentKey)
+                putExtra(":settings:show_fragment_args", bundle)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {

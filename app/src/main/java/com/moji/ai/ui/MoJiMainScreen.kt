@@ -144,6 +144,7 @@ import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.PasswordProtectionConfig
 import com.moji.ai.data.model.ReminderSettingsConfig
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.service.AccessibilityHealthState
 import com.moji.ai.service.CaptureEventOutcome
 import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.service.PaymentAccessibilityService
@@ -192,6 +193,7 @@ import com.moji.ai.ui.theme.preloadAllICostAssets
 import java.util.Calendar
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -1812,11 +1814,34 @@ private fun ICostSmartBookkeepingFullScreen(
     BackHandler(onBack = onBack)
     val context = LocalContext.current
     val resumeTick = rememberResumeTick()
+    val isAccessibilityBound by PaymentAccessibilityService.isConnectedFlow.collectAsState()
     val isNotifGranted = remember(resumeTick) { isNotificationListenerEnabled(context) }
-    val isAccessGranted = remember(resumeTick) { isAccessibilityServiceEnabled(context) }
+    val accessHealth = remember(resumeTick, isAccessibilityBound) {
+        RomKeepAliveGuideHelper.inspectAccessibilityHealth(context)
+    }
+    val isAccessGranted = accessHealth == AccessibilityHealthState.ACTIVE
 
     var showAddSmartRuleDialog by remember { mutableStateOf(false) }
     var pendingDeleteRule by remember { mutableStateOf<SmartConditionRule?>(null) }
+    var showAccessibilityPromptDialog by remember { mutableStateOf(false) }
+    var promptHealthState by remember { mutableStateOf(AccessibilityHealthState.DISABLED) }
+
+    // 每次进入「智能记账」页面时自动检测无障碍服务真实运行状态（预留 350ms 容忍冷启动绑定时延）
+    LaunchedEffect(Unit) {
+        delay(350L)
+        val latestHealth = RomKeepAliveGuideHelper.inspectAccessibilityHealth(context)
+        if (aiConfig.enableAccessibilityCapture && latestHealth != AccessibilityHealthState.ACTIVE) {
+            promptHealthState = latestHealth
+            showAccessibilityPromptDialog = true
+        }
+    }
+
+    // 用户从系统无障碍设置开启并返回后，一旦检测到服务已连接即自动收起提示弹窗
+    LaunchedEffect(isAccessGranted) {
+        if (isAccessGranted) {
+            showAccessibilityPromptDialog = false
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -1849,18 +1874,29 @@ private fun ICostSmartBookkeepingFullScreen(
                             title = "支付页自动识账",
                             subtitle = when {
                                 !aiConfig.enableAccessibilityCapture -> "读取微信 / 支付宝付款完成页与账单详情页，需无障碍权限"
-                                isAccessGranted -> "运行中 · 支持微信/支付宝账单详情页与免Root截屏OCR兜底"
-                                else -> "未授权无障碍权限，点此前往开启"
+                                accessHealth == AccessibilityHealthState.ACTIVE -> "运行中 · 支持微信/支付宝账单详情页与免Root截屏OCR兜底"
+                                accessHealth == AccessibilityHealthState.INTERRUPTED_BY_SYSTEM -> "无障碍服务在后台被系统中断（假开启），点此重新激活"
+                                else -> "无障碍权限未开启或已被系统自动关闭，点此开启"
                             },
                             subtitleIsWarning = aiConfig.enableAccessibilityCapture && !isAccessGranted,
                             onSubtitleClick = if (aiConfig.enableAccessibilityCapture && !isAccessGranted) {
-                                { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
+                                {
+                                    val latest = RomKeepAliveGuideHelper.inspectAccessibilityHealth(context)
+                                    promptHealthState = latest
+                                    showAccessibilityPromptDialog = true
+                                }
                             } else null,
-                            checked = aiConfig.enableAccessibilityCapture,
-                            onCheckedChange = {
-                                onUpdateAiConfig(aiConfig.copy(enableAccessibilityCapture = it))
-                                if (it && !isAccessGranted) {
-                                    context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                            checked = aiConfig.enableAccessibilityCapture && isAccessGranted,
+                            onCheckedChange = { wantEnable ->
+                                if (wantEnable) {
+                                    onUpdateAiConfig(aiConfig.copy(enableAccessibilityCapture = true))
+                                    val latest = RomKeepAliveGuideHelper.inspectAccessibilityHealth(context)
+                                    if (latest != AccessibilityHealthState.ACTIVE) {
+                                        promptHealthState = latest
+                                        showAccessibilityPromptDialog = true
+                                    }
+                                } else {
+                                    onUpdateAiConfig(aiConfig.copy(enableAccessibilityCapture = false))
                                 }
                             }
                         )
@@ -2221,6 +2257,42 @@ private fun ICostSmartBookkeepingFullScreen(
                 }
             }
         }
+    }
+
+    if (showAccessibilityPromptDialog) {
+        val isInterrupted = promptHealthState == AccessibilityHealthState.INTERRUPTED_BY_SYSTEM
+        AlertDialog(
+            onDismissRequest = { showAccessibilityPromptDialog = false },
+            containerColor = ICostCardWhite,
+            title = {
+                Text(
+                    text = if (isInterrupted) "无障碍服务已被系统中断" else "检测到无障碍模式未启用",
+                    fontWeight = FontWeight.ExtraBold
+                )
+            },
+            text = {
+                Text(
+                    text = if (isInterrupted) {
+                        "系统设置中虽仍勾选「默记」，但后台无障碍服务已被系统省电策略终止（处于假开启状态），当前无法自动识账。\n\n请点击「去开启」进入无障碍设置，将该开关【关闭后再重新打开一次】即可恢复，建议同时在多任务界面为默记加锁。"
+                    } else {
+                        "「支付页自动识账」依赖系统无障碍服务，检测到当前处于关闭状态（可能被系统省电策略自动关闭），将无法自动识别微信/支付宝账单页。\n\n是否立即前往系统无障碍设置开启？"
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showAccessibilityPromptDialog = false
+                    RomKeepAliveGuideHelper.openAccessibilitySettingsForMoJi(context)
+                }) {
+                    Text("去开启", color = ICostBlueAccent, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAccessibilityPromptDialog = false }) {
+                    Text("暂不处理", color = ICostTextSecondary)
+                }
+            }
+        )
     }
 
     pendingDeleteRule?.let { rule ->
@@ -2618,8 +2690,12 @@ private fun AiAndPermissionsSheetContent(
         apiKey != config.apiKey || modelName != config.modelName || enableFallback != config.enableHeuristicFallback
 
     val resumeTick = rememberResumeTick()
+    val isAccessibilityBound by PaymentAccessibilityService.isConnectedFlow.collectAsState()
     val isNotifGranted = remember(resumeTick) { isNotificationListenerEnabled(context) }
-    val isAccessGranted = remember(resumeTick) { isAccessibilityServiceEnabled(context) }
+    val accessHealth = remember(resumeTick, isAccessibilityBound) {
+        RomKeepAliveGuideHelper.inspectAccessibilityHealth(context)
+    }
+    val isAccessGranted = accessHealth == AccessibilityHealthState.ACTIVE
 
     Column(
         modifier = Modifier
@@ -2681,9 +2757,16 @@ private fun AiAndPermissionsSheetContent(
                             Text("无障碍权限", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         }
                         OutlinedButton(onClick = {
-                            context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                            RomKeepAliveGuideHelper.openAccessibilitySettingsForMoJi(context)
                         }) {
-                            Text(if (isAccessGranted) "已开启" else "去开启", fontSize = 12.sp)
+                            Text(
+                                when (accessHealth) {
+                                    AccessibilityHealthState.ACTIVE -> "已开启"
+                                    AccessibilityHealthState.INTERRUPTED_BY_SYSTEM -> "重新激活"
+                                    AccessibilityHealthState.DISABLED -> "去开启"
+                                },
+                                fontSize = 12.sp
+                            )
                         }
                     }
                 }
@@ -3944,7 +4027,10 @@ private fun RomKeepAliveGuideSheet(
     val context = LocalContext.current
     var refreshTick by remember { mutableIntStateOf(0) }
     val resumeTick = rememberResumeTick()
-    val diag = remember(refreshTick, resumeTick) { RomKeepAliveGuideHelper.inspectCurrentDevice(context) }
+    val isAccessibilityBound by PaymentAccessibilityService.isConnectedFlow.collectAsState()
+    val diag = remember(refreshTick, resumeTick, isAccessibilityBound) {
+        RomKeepAliveGuideHelper.inspectCurrentDevice(context)
+    }
     var actionFeedback by remember { mutableStateOf<String?>(null) }
 
     Column(
@@ -4009,12 +4095,24 @@ private fun RomKeepAliveGuideSheet(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = if (diag.isAccessibilityEnabled) "无障碍权限已开启" else "无障碍权限未开启",
+                                text = when (diag.accessibilityHealth) {
+                                    AccessibilityHealthState.ACTIVE -> "无障碍权限已开启"
+                                    AccessibilityHealthState.INTERRUPTED_BY_SYSTEM -> "无障碍服务已被系统中断（假开启）"
+                                    AccessibilityHealthState.DISABLED -> "无障碍权限未开启"
+                                },
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = if (diag.isAccessibilityEnabled) ICostGreenIncome else ICostAmberGold
                             )
-                            Text("无法开启时，先到「应用详情 › 右上角菜单」允许受限设置", fontSize = 12.sp, color = ICostTextSecondary)
+                            Text(
+                                text = if (diag.accessibilityHealth == AccessibilityHealthState.INTERRUPTED_BY_SYSTEM) {
+                                    "请进入无障碍设置将开关关闭后再重新打开一次恢复绑定"
+                                } else {
+                                    "无法开启时，先到「应用详情 › 右上角菜单」允许受限设置"
+                                },
+                                fontSize = 12.sp,
+                                color = ICostTextSecondary
+                            )
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                             OutlinedButton(onClick = {
@@ -4023,10 +4121,17 @@ private fun RomKeepAliveGuideSheet(
                                 Text("解除受限", fontSize = 11.sp)
                             }
                             Button(
-                                onClick = { context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
+                                onClick = { RomKeepAliveGuideHelper.openAccessibilitySettingsForMoJi(context) },
                                 colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent)
                             ) {
-                                Text(if (diag.isAccessibilityEnabled) "已开启" else "去开启", fontSize = 11.sp)
+                                Text(
+                                    when (diag.accessibilityHealth) {
+                                        AccessibilityHealthState.ACTIVE -> "已开启"
+                                        AccessibilityHealthState.INTERRUPTED_BY_SYSTEM -> "去重开"
+                                        AccessibilityHealthState.DISABLED -> "去开启"
+                                    },
+                                    fontSize = 11.sp
+                                )
                             }
                         }
                     }
