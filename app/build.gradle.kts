@@ -40,7 +40,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 5
-        versionName = "1.2.0"
+        versionName = "1.1.3"
 
         buildConfigField("Boolean", "IS_QA_BUILD", "false")
         buildConfigField("String", "GITHUB_UPDATE_REPO", "\"${escapeForBuildConfig(githubUpdateRepo)}\"")
