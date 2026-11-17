@@ -133,6 +133,8 @@ import com.moji.ai.ai.MerchantMemoryEntry
 import com.moji.ai.ai.SmartConditionRule
 import com.moji.ai.data.backup.BackupAndCsvTransferEngine
 import com.moji.ai.data.backup.CsvParsePreviewResult
+import com.moji.ai.data.backup.MoJiCloudConfig
+import com.moji.ai.data.backup.MoJiCloudSyncClient
 import com.moji.ai.data.backup.WebDavConfig
 import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.TransactionEntity
@@ -218,6 +220,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val smartRules by viewModel.smartRules.collectAsState()
     val observabilityLogs by viewModel.observabilityLogs.collectAsState()
     val webDavConfig by viewModel.webDavConfig.collectAsState()
+    val mojiCloudConfig by viewModel.mojiCloudConfig.collectAsState()
     val appUpdateConfig by viewModel.appUpdateConfig.collectAsState()
     val appUpdateState by viewModel.appUpdateState.collectAsState()
     val pendingOpenTxId by viewModel.pendingOpenTransactionId.collectAsState()
@@ -626,6 +629,11 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 },
                 onOpenCsvExport = {
                     backupInitialTab = 1
+                    showBackupTransferSheet = true
+                },
+                mojiCloudConfig = mojiCloudConfig,
+                onOpenMoJiCloudSync = {
+                    backupInitialTab = 3
                     showBackupTransferSheet = true
                 },
                 onOpenWebDavSync = {
@@ -1085,6 +1093,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     initialTab = backupInitialTab,
                     statusMessage = sandboxStatus,
                     webDavConfig = webDavConfig,
+                    mojiCloudConfig = mojiCloudConfig,
                     onPreviewCsv = { csv -> viewModel.previewCsvImportAsync(csv) },
                     onCommitCsvImport = { csv, applyBalance, onDone ->
                         viewModel.commitCsvImport(csv, applyBalance, onDone)
@@ -1093,6 +1102,18 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onExportFullBackup = { viewModel.buildFullBackupJson() },
                     onRestoreFullBackup = { json, onDone ->
                         viewModel.restoreFromBackupJson(json, onDone)
+                    },
+                    onSaveMoJiCloudConfig = { cfg ->
+                        viewModel.updateMoJiCloudConfig(cfg)
+                    },
+                    onVerifyMoJiCloudKey = { cfg, onDone ->
+                        viewModel.verifyMoJiCloudKey(cfg, onDone)
+                    },
+                    onUploadMoJiCloud = { cfg, forceOverwrite, onConflict, onDone ->
+                        viewModel.uploadBackupToMoJiCloud(cfg, forceOverwrite, onConflict, onDone)
+                    },
+                    onRestoreMoJiCloud = { cfg, onDone ->
+                        viewModel.restoreBackupFromMoJiCloud(cfg, onDone)
                     },
                     onUploadWebDav = { cfg, onDone ->
                         viewModel.uploadBackupToWebDav(cfg, onDone)
@@ -1484,6 +1505,8 @@ private fun ICostSettingsFullScreen(
     onOpenBudgetDialog: () -> Unit,
     onOpenCsvImport: () -> Unit = {},
     onOpenCsvExport: () -> Unit = {},
+    mojiCloudConfig: MoJiCloudConfig = MoJiCloudConfig(),
+    onOpenMoJiCloudSync: () -> Unit = {},
     onOpenWebDavSync: () -> Unit = {},
     onOpenBatchReimburse: () -> Unit = {},
     onOpenAppUpdate: () -> Unit = {},
@@ -1619,12 +1642,19 @@ private fun ICostSettingsFullScreen(
             }
 
             item {
+                val cloudRowTrailing = when {
+                    mojiCloudConfig.isTargetBound && mojiCloudConfig.remoteRevision > 0L ->
+                        "已连接 · v${mojiCloudConfig.remoteRevision}"
+                    mojiCloudConfig.isTargetBound -> "已绑定专属密钥"
+                    else -> "免登录专属密钥"
+                }
                 SettingsSectionTitle("数据与更新")
                 SettingsGroupCard(
                     rows = listOf(
+                        SettingRowDef("setting_backup.webp", "默记云存储", cloudRowTrailing, onClick = onOpenMoJiCloudSync),
                         SettingRowDef("setting_import.webp", "数据导入", "iCost / 微信 / 支付宝", onClick = onOpenCsvImport),
                         SettingRowDef("setting_export.webp", "数据导出", "CSV", onClick = onOpenCsvExport),
-                        SettingRowDef("setting_backup.webp", "备份与云同步", "快照 / WebDAV", onClick = onOpenWebDavSync),
+                        SettingRowDef("setting_backup.webp", "本地快照与 WebDAV", "备份 / WebDAV", onClick = onOpenWebDavSync),
                         SettingRowDef("setting_vip.webp", "版本与自动更新", updateRowTrailing, onClick = onOpenAppUpdate)
                     )
                 )
@@ -2799,11 +2829,16 @@ private fun BackupAndCsvTransferSheet(
     initialTab: Int,
     statusMessage: String?,
     webDavConfig: WebDavConfig = WebDavConfig(),
+    mojiCloudConfig: MoJiCloudConfig = MoJiCloudConfig(),
     onPreviewCsv: suspend (String) -> CsvParsePreviewResult,
     onCommitCsvImport: (String, Boolean, (String) -> Unit) -> Unit,
     onExportCsv: suspend () -> String,
     onExportFullBackup: suspend () -> String,
     onRestoreFullBackup: (String, (String) -> Unit) -> Unit,
+    onSaveMoJiCloudConfig: (MoJiCloudConfig) -> Unit = {},
+    onVerifyMoJiCloudKey: (MoJiCloudConfig, (String) -> Unit) -> Unit = { _, _ -> },
+    onUploadMoJiCloud: (MoJiCloudConfig, Boolean, (String) -> Unit, (String) -> Unit) -> Unit = { _, _, _, _ -> },
+    onRestoreMoJiCloud: (MoJiCloudConfig, (String) -> Unit) -> Unit = { _, _ -> },
     onUploadWebDav: (WebDavConfig, (String) -> Unit) -> Unit = { _, _ -> },
     onRestoreWebDav: (WebDavConfig, (String) -> Unit) -> Unit = { _, _ -> },
     onClose: () -> Unit = {}
@@ -2813,6 +2848,9 @@ private fun BackupAndCsvTransferSheet(
     var currentTab by remember(initialTab) { mutableIntStateOf(initialTab) }
     var csvText by remember { mutableStateOf("") }
     var showDavPassword by remember { mutableStateOf(false) }
+    var showCloudAccessCode by remember { mutableStateOf(false) }
+    var showRegenerateKeyDialog by remember { mutableStateOf(false) }
+    var pendingCloudConflictMsg by remember { mutableStateOf<String?>(null) }
     var pendingRestoreKind by remember { mutableIntStateOf(0) }
     var previewResult by remember { mutableStateOf<CsvParsePreviewResult?>(null) }
     var applyImportToWalletBalance by remember { mutableStateOf(false) }
@@ -2821,10 +2859,30 @@ private fun BackupAndCsvTransferSheet(
     var localBanner by remember { mutableStateOf<String?>(null) }
     var isWorking by remember { mutableStateOf(false) }
 
+    var cloudUrl by remember(mojiCloudConfig.serverUrl) { mutableStateOf(mojiCloudConfig.serverUrl) }
+    var cloudAccessCode by remember(mojiCloudConfig.serverAccessCode) { mutableStateOf(mojiCloudConfig.serverAccessCode) }
+    var cloudSyncKey by remember(mojiCloudConfig.syncKey) {
+        mutableStateOf(mojiCloudConfig.syncKey.ifBlank { MoJiCloudSyncClient.generateSyncKey() })
+    }
+    var cloudMemberLabel by remember(mojiCloudConfig.memberLabel) {
+        mutableStateOf(mojiCloudConfig.memberLabel.ifBlank { MoJiCloudSyncClient.defaultDeviceName() })
+    }
+    var cloudAutoSync by remember(mojiCloudConfig.autoSyncEnabled) {
+        mutableStateOf(mojiCloudConfig.autoSyncEnabled)
+    }
+
     var davUrl by remember(webDavConfig) { mutableStateOf(webDavConfig.serverUrl) }
     var davUser by remember(webDavConfig) { mutableStateOf(webDavConfig.username) }
     var davPassword by remember(webDavConfig) { mutableStateOf(webDavConfig.appPassword) }
     var davFileName by remember(webDavConfig) { mutableStateOf(webDavConfig.remoteFileName) }
+
+    fun currentCloudDraft(): MoJiCloudConfig = mojiCloudConfig.copy(
+        serverUrl = cloudUrl.trim(),
+        serverAccessCode = cloudAccessCode.trim(),
+        syncKey = cloudSyncKey.trim().uppercase(Locale.US),
+        memberLabel = cloudMemberLabel.trim(),
+        autoSyncEnabled = cloudAutoSync
+    )
 
     val clipboard = remember {
         context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
@@ -2881,7 +2939,8 @@ private fun BackupAndCsvTransferSheet(
                         0 to "批量导入",
                         1 to "导出 CSV",
                         2 to "备份快照",
-                        3 to "WebDAV 同步"
+                        3 to "默记云同步",
+                        4 to "WebDAV 同步"
                     )
                     tabs.forEach { (idx, title) ->
                         FilterChip(
@@ -3332,6 +3391,307 @@ private fun BackupAndCsvTransferSheet(
                         Text("从备份恢复", fontWeight = FontWeight.Bold, fontSize = 15.sp)
                     }
                 }
+            } else if (currentTab == 3) {
+                val activeDraft = currentCloudDraft()
+                val isBoundNow = activeDraft.isTargetBound
+                item {
+                    ICostFormCard {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "专属同步密钥（免登录身份）",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostTextPrimary
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isBoundNow) ICostGreenIncome.copy(alpha = 0.14f) else ICostBlueAccent.copy(alpha = 0.12f)
+                            ) {
+                                Text(
+                                    text = if (isBoundNow) {
+                                        if (mojiCloudConfig.remoteRevision > 0L) "已绑定 · 云端 v${mojiCloudConfig.remoteRevision}" else "已绑定云端"
+                                    } else {
+                                        "待连接绑定"
+                                    },
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isBoundNow) ICostGreenIncome else ICostBlueAccent,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            text = "每台手机生成唯一密码学密钥绑定云端。你和家人使用各自不同的密钥即可天然隔离账单；本人换新手机时粘贴同一把密钥即可完整找回账本与识屏原图。",
+                            fontSize = 12.sp,
+                            color = ICostTextSecondary
+                        )
+                        if (isBoundNow && mojiCloudConfig.remoteRevision > 0L) {
+                            val timeFmt = remember { java.text.SimpleDateFormat("MM-dd HH:mm", Locale.CHINA) }
+                            val timeStr = if (mojiCloudConfig.remoteUpdatedAtMillis > 0L) {
+                                timeFmt.format(java.util.Date(mojiCloudConfig.remoteUpdatedAtMillis))
+                            } else {
+                                "刚刚"
+                            }
+                            val whoStr = mojiCloudConfig.remoteUpdatedBy.takeIf { it.isNotBlank() }?.let { " · 由「$it」更新" }.orEmpty()
+                            Surface(
+                                shape = RoundedCornerShape(12.dp),
+                                color = ICostBgGray,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(
+                                    text = "云端摘要：${mojiCloudConfig.remoteTxCount} 笔账单 · ${mojiCloudConfig.remoteWalletCount} 个账户 · ${mojiCloudConfig.remoteScreenshotCount} 张原图（$timeStr$whoStr）",
+                                    fontSize = 12.sp,
+                                    color = ICostTextPrimary,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)
+                                )
+                            }
+                        }
+                        ICostFormField(
+                            value = cloudSyncKey,
+                            onValueChange = { cloudSyncKey = it.uppercase(Locale.US) },
+                            label = "我的专属密钥",
+                            placeholder = "${MoJiCloudSyncClient.expectedKeyPrefix}XXXX-XXXX-XXXX-XXXX",
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            trailingContent = {
+                                Text(
+                                    text = "复制",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostBlueAccent,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            clipboard?.setPrimaryClip(
+                                                ClipData.newPlainText("MoJi_SyncKey", cloudSyncKey.trim())
+                                            )
+                                            localBanner = "已复制专属密钥，请妥善保存以便日后换机恢复"
+                                        }
+                                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                                )
+                            }
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            AssistChip(
+                                onClick = {
+                                    val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim()
+                                    if (clipText.isNullOrBlank()) {
+                                        localBanner = "剪贴板为空"
+                                    } else {
+                                        MoJiCloudSyncClient.validateSyncKey(clipText).fold(
+                                            onSuccess = { validKey ->
+                                                cloudSyncKey = validKey
+                                                localBanner = "已填入专属密钥，请点击「连接并验证密钥」或「从云端恢复」"
+                                            },
+                                            onFailure = { err ->
+                                                localBanner = err.message
+                                            }
+                                        )
+                                    }
+                                },
+                                label = { Text("粘贴已有密钥（换机恢复）", fontSize = 12.sp) }
+                            )
+                            AssistChip(
+                                onClick = { showRegenerateKeyDialog = true },
+                                label = { Text("生成新密钥", fontSize = 12.sp) }
+                            )
+                        }
+                    }
+                }
+
+                item {
+                    ICostFormCard {
+                        Text(
+                            text = "自建 ECS 云服务器与家人配对",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ICostTextPrimary
+                        )
+                        ICostFormField(
+                            value = cloudUrl,
+                            onValueChange = { cloudUrl = it },
+                            label = "云服务器地址",
+                            placeholder = "https://sync.example.com",
+                            modifier = Modifier.fillMaxWidth(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                            singleLine = true
+                        )
+                        ICostFormField(
+                            value = cloudAccessCode,
+                            onValueChange = { cloudAccessCode = it },
+                            label = "服务器接入码（可选，家庭防外人保护口令）",
+                            placeholder = "对应服务端 MOJI_SERVER_ACCESS_CODE",
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            visualTransformation = if (showCloudAccessCode) VisualTransformation.None else PasswordVisualTransformation(),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                            trailingContent = {
+                                Text(
+                                    text = if (showCloudAccessCode) "隐藏" else "显示",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostBlueAccent,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { showCloudAccessCode = !showCloudAccessCode }
+                                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                                )
+                            }
+                        )
+                        ICostFormField(
+                            value = cloudMemberLabel,
+                            onValueChange = { cloudMemberLabel = it },
+                            label = "成员 / 设备备注（区分谁的手机）",
+                            placeholder = "如：我的手机 / 老婆",
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            AssistChip(
+                                onClick = {
+                                    MoJiCloudSyncClient.encodeFamilyPairingText(cloudUrl, cloudAccessCode).fold(
+                                        onSuccess = { pairText ->
+                                            clipboard?.setPrimaryClip(ClipData.newPlainText("MoJi_Family_Pair", pairText))
+                                            localBanner = "已复制家人配对口令（仅含服务器地址与接入码，不含你的个人密钥，家人粘贴后将拥有独立账本）"
+                                        },
+                                        onFailure = { err ->
+                                            localBanner = err.message
+                                        }
+                                    )
+                                },
+                                label = { Text("复制家人配对口令（独立账本）", fontSize = 12.sp) }
+                            )
+                            AssistChip(
+                                onClick = {
+                                    val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
+                                    MoJiCloudSyncClient.decodeFamilyPairingText(clipText).fold(
+                                        onSuccess = { (parsedUrl, parsedCode) ->
+                                            cloudUrl = parsedUrl
+                                            if (parsedCode.isNotBlank()) {
+                                                cloudAccessCode = parsedCode
+                                            }
+                                            localBanner = "已填入云服务器配置（本机保留独立专属密钥）"
+                                        },
+                                        onFailure = { err ->
+                                            localBanner = err.message
+                                        }
+                                    )
+                                },
+                                label = { Text("粘贴家人配对口令", fontSize = 12.sp) }
+                            )
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "记账后后台自动同步上云",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = ICostTextPrimary
+                                )
+                                Text(
+                                    text = "绑定并对齐云端版本后，新增账单与静默识账原图自动静默备份",
+                                    fontSize = 11.sp,
+                                    color = ICostTextSecondary
+                                )
+                            }
+                            Switch(
+                                checked = cloudAutoSync,
+                                onCheckedChange = { checked ->
+                                    cloudAutoSync = checked
+                                    onSaveMoJiCloudConfig(currentCloudDraft().copy(autoSyncEnabled = checked))
+                                }
+                            )
+                        }
+                    }
+                }
+
+                item {
+                    val cloudReady = cloudUrl.isNotBlank() && cloudSyncKey.isNotBlank() && !isWorking
+                    Column(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        OutlinedButton(
+                            enabled = cloudReady,
+                            onClick = {
+                                val draft = currentCloudDraft()
+                                isWorking = true
+                                localBanner = "正在连接云服务器并验证专属密钥…"
+                                onVerifyMoJiCloudKey(draft) { msg ->
+                                    isWorking = false
+                                    localBanner = msg
+                                }
+                            },
+                            shape = RoundedCornerShape(16.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(46.dp)
+                        ) {
+                            Text("连接并验证密钥", fontWeight = FontWeight.Bold)
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Button(
+                                enabled = cloudReady,
+                                onClick = {
+                                    val draft = currentCloudDraft()
+                                    isWorking = true
+                                    localBanner = "正在同步账本快照与账单原图到云端…"
+                                    onUploadMoJiCloud(
+                                        draft,
+                                        false,
+                                        { conflictMsg ->
+                                            isWorking = false
+                                            pendingCloudConflictMsg = conflictMsg
+                                            localBanner = conflictMsg
+                                        },
+                                        { msg ->
+                                            isWorking = false
+                                            localBanner = msg
+                                        }
+                                    )
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                            ) {
+                                Text("上传到云端", fontWeight = FontWeight.Bold)
+                            }
+                            OutlinedButton(
+                                enabled = cloudReady,
+                                onClick = {
+                                    pendingRestoreKind = 3
+                                },
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                            ) {
+                                Text("从云端恢复", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
             } else {
                 item {
                     ICostFormCard {
@@ -3453,38 +3813,122 @@ private fun BackupAndCsvTransferSheet(
     }
 
     if (pendingRestoreKind != 0) {
-        val fromCloud = pendingRestoreKind == 2
+        val fromWebDav = pendingRestoreKind == 2
+        val fromMoJiCloud = pendingRestoreKind == 3
         AlertDialog(
             onDismissRequest = { pendingRestoreKind = 0 },
             containerColor = ICostCardWhite,
             title = { Text("覆盖现有数据？", fontWeight = FontWeight.ExtraBold) },
             text = {
                 Text(
-                    if (fromCloud) "将从云端下载备份并恢复，当前设备上的账户和账单会被备份内容替换。"
-                    else "当前设备上的账户和账单会被备份内容替换。建议先生成一份当前数据的备份。"
+                    when {
+                        fromMoJiCloud -> "将从默记云服务器拉取该密钥名下的最新备份及识屏账单原图，当前设备上的账户和账单会被替换。"
+                        fromWebDav -> "将从 WebDAV 云端下载备份并恢复，当前设备上的账户和账单会被备份内容替换。"
+                        else -> "当前设备上的账户和账单会被备份内容替换。建议先生成一份当前数据的备份。"
+                    }
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
+                    val kind = pendingRestoreKind
                     pendingRestoreKind = 0
-                    if (fromCloud) {
-                        localBanner = "正在从云端恢复…"
-                        onRestoreWebDav(
-                            WebDavConfig(
-                                serverUrl = davUrl.trim(),
-                                username = davUser.trim(),
-                                appPassword = davPassword.trim(),
-                                remoteFileName = davFileName.trim().ifBlank { WebDavSyncClient.DEFAULT_REMOTE_FILE_NAME },
-                                lastSyncTimeMillis = webDavConfig.lastSyncTimeMillis
-                            )
-                        ) { msg -> localBanner = msg }
-                    } else {
-                        onRestoreFullBackup(backupJsonText) { msg -> localBanner = msg }
+                    when (kind) {
+                        3 -> {
+                            isWorking = true
+                            localBanner = "正在从默记云拉取备份与原图…"
+                            onRestoreMoJiCloud(currentCloudDraft()) { msg ->
+                                isWorking = false
+                                localBanner = msg
+                            }
+                        }
+                        2 -> {
+                            localBanner = "正在从云端恢复…"
+                            onRestoreWebDav(
+                                WebDavConfig(
+                                    serverUrl = davUrl.trim(),
+                                    username = davUser.trim(),
+                                    appPassword = davPassword.trim(),
+                                    remoteFileName = davFileName.trim().ifBlank { WebDavSyncClient.DEFAULT_REMOTE_FILE_NAME },
+                                    lastSyncTimeMillis = webDavConfig.lastSyncTimeMillis
+                                )
+                            ) { msg -> localBanner = msg }
+                        }
+                        else -> {
+                            onRestoreFullBackup(backupJsonText) { msg -> localBanner = msg }
+                        }
                     }
                 }) { Text("恢复", color = ICostCoralRed, fontWeight = FontWeight.Bold) }
             },
             dismissButton = {
                 TextButton(onClick = { pendingRestoreKind = 0 }) { Text("取消") }
+            }
+        )
+    }
+
+    if (showRegenerateKeyDialog) {
+        AlertDialog(
+            onDismissRequest = { showRegenerateKeyDialog = false },
+            containerColor = ICostCardWhite,
+            title = { Text("生成新的专属密钥？", fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Text("生成新密钥后，本机将绑定到一个全新的空白云端空间（原密钥下的云端数据仍保留在服务器，凭原密钥可随时找回）。建议先复制备份当前密钥。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showRegenerateKeyDialog = false
+                    val newKey = MoJiCloudSyncClient.generateSyncKey()
+                    cloudSyncKey = newKey
+                    onSaveMoJiCloudConfig(
+                        currentCloudDraft().copy(
+                            syncKey = newKey,
+                            userId = "",
+                            accessToken = "",
+                            tokenExpiresAtMillis = 0L,
+                            boundTargetSignature = "",
+                            lastSyncedRevision = 0L,
+                            remoteRevision = 0L
+                        )
+                    )
+                    localBanner = "已生成新专属密钥：$newKey"
+                }) { Text("生成新密钥", color = ICostCoralRed, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRegenerateKeyDialog = false }) { Text("取消") }
+            }
+        )
+    }
+
+    if (pendingCloudConflictMsg != null) {
+        val conflictText = pendingCloudConflictMsg!!
+        AlertDialog(
+            onDismissRequest = { pendingCloudConflictMsg = null },
+            containerColor = ICostCardWhite,
+            title = { Text("检测到云端版本冲突", fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Text("$conflictText\n\n如果是换新手机找回账单，请点击「取消」后使用「从云端恢复」；如果确认以当前手机数据覆盖云端，请点击「强制覆盖上传」。")
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingCloudConflictMsg = null
+                    val draft = currentCloudDraft()
+                    isWorking = true
+                    localBanner = "正在强制覆盖上传到云端…"
+                    onUploadMoJiCloud(
+                        draft,
+                        true,
+                        { msg ->
+                            isWorking = false
+                            localBanner = msg
+                        },
+                        { msg ->
+                            isWorking = false
+                            localBanner = msg
+                        }
+                    )
+                }) { Text("强制覆盖上传", color = ICostCoralRed, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingCloudConflictMsg = null }) { Text("取消") }
             }
         )
     }

@@ -36,3 +36,9 @@ local.properties
 captures/
 .externalNativeBuild/
 .cxx/
+
+# Rust Cloud Sync Server build artifacts & runtime data
+server/target/
+server/data/
+server/.env
+

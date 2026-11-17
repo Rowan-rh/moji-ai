@@ -1,0 +1,975 @@
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use uuid::Uuid;
+
+use crate::auth::now_millis;
+use crate::error::AppError;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountSummary {
+    pub latest_revision: i64,
+    pub wallet_count: usize,
+    pub tx_count: usize,
+    pub ledger_count: usize,
+    pub screenshot_count: usize,
+    pub snapshot_bytes: usize,
+    pub snapshot_sha256: String,
+    pub updated_by_device: String,
+    pub updated_by_member: String,
+    pub updated_at_ms: i64,
+}
+
+impl Default for AccountSummary {
+    fn default() -> Self {
+        Self {
+            latest_revision: 0,
+            wallet_count: 0,
+            tx_count: 0,
+            ledger_count: 0,
+            screenshot_count: 0,
+            snapshot_bytes: 0,
+            snapshot_sha256: String::new(),
+            updated_by_device: String::new(),
+            updated_by_member: String::new(),
+            updated_at_ms: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BoundIdentityInfo {
+    pub provider: String,
+    pub key_hint: String,
+    pub created_at_ms: i64,
+    pub last_used_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BoundDeviceInfo {
+    pub device_id: String,
+    pub device_name: String,
+    pub member_label: String,
+    pub app_version: String,
+    pub last_sync_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SnapshotHistoryItem {
+    pub revision: i64,
+    pub snapshot_sha256: String,
+    pub byte_size: usize,
+    pub tx_count: usize,
+    pub updated_by_device: String,
+    pub created_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct KeyBindOutcome {
+    pub user_id: String,
+    pub is_new_account: bool,
+    pub summary: AccountSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PulledSnapshotData {
+    pub revision: i64,
+    pub snapshot_sha256: String,
+    pub updated_at_ms: i64,
+    pub updated_by_device: String,
+    pub updated_by_member: String,
+    pub snapshot_json: String,
+    pub available_screenshots: Vec<String>,
+}
+
+/// 用于轻量级校验上传 JSON 是否为合法的 MoJiFullBackupSnapshot 并提取统计指标
+#[derive(Deserialize)]
+struct SnapshotProbe {
+    #[serde(rename = "appName", default)]
+    app_name: String,
+    #[serde(rename = "exportedAtMillis", default)]
+    exported_at_millis: i64,
+    #[serde(default)]
+    ledgers: Vec<serde_json::Value>,
+    #[serde(default)]
+    wallets: Vec<serde_json::Value>,
+    #[serde(default)]
+    transactions: Vec<serde_json::Value>,
+}
+
+pub struct CloudStore {
+    conn: Mutex<Connection>,
+    data_dir: PathBuf,
+    max_history_revisions: usize,
+}
+
+impl CloudStore {
+    pub fn open(data_dir: &Path, max_history_revisions: usize) -> Result<Self, String> {
+        fs::create_dir_all(data_dir.join("snapshots"))
+            .map_err(|e| format!("create snapshots dir: {e}"))?;
+        fs::create_dir_all(data_dir.join("screenshots"))
+            .map_err(|e| format!("create screenshots dir: {e}"))?;
+
+        let db_path = data_dir.join("moji_cloud.db");
+        let conn = Connection::open(&db_path)
+            .map_err(|e| format!("open sqlite {:?}: {e}", db_path))?;
+
+        conn.execute_batch(
+            r#"
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA foreign_keys = ON;
+            PRAGMA busy_timeout = 5000;
+
+            -- 1. 内部唯一用户表（与具体登录方式完全解耦）
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL DEFAULT '',
+                app_env TEXT NOT NULL DEFAULT 'prod',
+                status TEXT NOT NULL DEFAULT 'active',
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+
+            -- 2. 多身份凭证绑定表（一期 provider='sync_key'；后期可直接新增 'wechat' / 'phone' / 'email' 挂接同一 user_id）
+            CREATE TABLE IF NOT EXISTS user_identities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                identifier_hash TEXT NOT NULL,
+                key_hint TEXT NOT NULL DEFAULT '',
+                created_at_ms INTEGER NOT NULL,
+                last_used_at_ms INTEGER NOT NULL,
+                UNIQUE(provider, identifier_hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_identities_uid ON user_identities(user_id);
+
+            -- 3. 设备同步记录表（区分不同家庭成员或换机前后的手机设备）
+            CREATE TABLE IF NOT EXISTS user_devices (
+                device_id TEXT NOT NULL,
+                user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                device_name TEXT NOT NULL DEFAULT '',
+                member_label TEXT NOT NULL DEFAULT '',
+                app_version TEXT NOT NULL DEFAULT '',
+                last_sync_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (user_id, device_id)
+            );
+
+            -- 4. 用户当前最新云端快照索引表
+            CREATE TABLE IF NOT EXISTS cloud_snapshots (
+                user_id TEXT PRIMARY KEY REFERENCES users(user_id) ON DELETE CASCADE,
+                revision INTEGER NOT NULL DEFAULT 0,
+                snapshot_sha256 TEXT NOT NULL,
+                byte_size INTEGER NOT NULL,
+                wallet_count INTEGER NOT NULL DEFAULT 0,
+                tx_count INTEGER NOT NULL DEFAULT 0,
+                ledger_count INTEGER NOT NULL DEFAULT 0,
+                updated_by_device TEXT NOT NULL DEFAULT '',
+                updated_by_member TEXT NOT NULL DEFAULT '',
+                exported_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+
+            -- 5. 历史快照回滚归档表
+            CREATE TABLE IF NOT EXISTS cloud_snapshot_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                revision INTEGER NOT NULL,
+                snapshot_sha256 TEXT NOT NULL,
+                byte_size INTEGER NOT NULL,
+                tx_count INTEGER NOT NULL DEFAULT 0,
+                updated_by_device TEXT NOT NULL DEFAULT '',
+                created_at_ms INTEGER NOT NULL,
+                UNIQUE(user_id, revision)
+            );
+
+            -- 6. 账单识屏原图内容寻址关联表（按 user_id 严格隔离访问权限）
+            CREATE TABLE IF NOT EXISTS user_screenshots (
+                user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                sha256 TEXT NOT NULL,
+                byte_size INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (user_id, sha256)
+            );
+            "#,
+        )
+        .map_err(|e| format!("init sqlite schema: {e}"))?;
+
+        Ok(Self {
+            conn: Mutex::new(conn),
+            data_dir: data_dir.to_path_buf(),
+            max_history_revisions,
+        })
+    }
+
+    pub fn bind_or_login_with_sync_key(
+        &self,
+        identifier_hash: &str,
+        key_hint: &str,
+        app_env: &str,
+        member_label: &str,
+        device_id: &str,
+        device_name: &str,
+        app_version: &str,
+    ) -> Result<KeyBindOutcome, AppError> {
+        let now = now_millis();
+        let clean_member = sanitize_short_text(member_label, 48);
+        let clean_device_id = sanitize_short_text(device_id, 64);
+        let clean_device_name = sanitize_short_text(device_name, 64);
+        let clean_version = sanitize_short_text(app_version, 32);
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| AppError::Internal(format!("begin tx: {e}")))?;
+
+        let existing: Option<(String, String, String)> = tx
+            .query_row(
+                r#"
+                SELECT u.user_id, u.app_env, u.status
+                FROM user_identities i
+                JOIN users u ON u.user_id = i.user_id
+                WHERE i.provider = 'sync_key' AND i.identifier_hash = ?1
+                "#,
+                params![identifier_hash],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| AppError::Internal(format!("query identity: {e}")))?;
+
+        let (user_id, is_new_account) = if let Some((uid, stored_env, status)) = existing {
+            if status != "active" {
+                return Err(AppError::Forbidden(
+                    "account_disabled",
+                    "该云端账号已被停用".to_string(),
+                ));
+            }
+            if stored_env != app_env {
+                return Err(AppError::Forbidden(
+                    "env_mismatch",
+                    "密钥所属环境与当前客户端包类型不匹配".to_string(),
+                ));
+            }
+            tx.execute(
+                "UPDATE user_identities SET last_used_at_ms = ?1 WHERE provider = 'sync_key' AND identifier_hash = ?2",
+                params![now, identifier_hash],
+            )
+            .map_err(|e| AppError::Internal(format!("update identity ts: {e}")))?;
+
+            if !clean_member.is_empty() {
+                tx.execute(
+                    "UPDATE users SET display_name = ?1, updated_at_ms = ?2 WHERE user_id = ?3",
+                    params![clean_member, now, uid],
+                )
+                .map_err(|e| AppError::Internal(format!("update user name: {e}")))?;
+            }
+            (uid, false)
+        } else {
+            let uid = Uuid::new_v4().to_string();
+            tx.execute(
+                "INSERT INTO users (user_id, display_name, app_env, status, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, 'active', ?4, ?4)",
+                params![uid, clean_member, app_env, now],
+            )
+            .map_err(|e| AppError::Internal(format!("insert user: {e}")))?;
+
+            tx.execute(
+                "INSERT INTO user_identities (user_id, provider, identifier_hash, key_hint, created_at_ms, last_used_at_ms) VALUES (?1, 'sync_key', ?2, ?3, ?4, ?4)",
+                params![uid, identifier_hash, key_hint, now],
+            )
+            .map_err(|e| AppError::Internal(format!("insert identity: {e}")))?;
+            (uid, true)
+        };
+
+        if !clean_device_id.is_empty() {
+            tx.execute(
+                r#"
+                INSERT INTO user_devices (device_id, user_id, device_name, member_label, app_version, last_sync_at_ms)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                ON CONFLICT(user_id, device_id) DO UPDATE SET
+                    device_name = excluded.device_name,
+                    member_label = CASE WHEN excluded.member_label != '' THEN excluded.member_label ELSE user_devices.member_label END,
+                    app_version = excluded.app_version,
+                    last_sync_at_ms = excluded.last_sync_at_ms
+                "#,
+                params![clean_device_id, user_id, clean_device_name, clean_member, clean_version, now],
+            )
+            .map_err(|e| AppError::Internal(format!("upsert device: {e}")))?;
+        }
+
+        let summary = query_account_summary(&tx, &user_id)?;
+        tx.commit()
+            .map_err(|e| AppError::Internal(format!("commit bind tx: {e}")))?;
+
+        Ok(KeyBindOutcome {
+            user_id,
+            is_new_account,
+            summary,
+        })
+    }
+
+    pub fn verify_active_user(&self, user_id: &str, expected_env: &str) -> Result<String, AppError> {
+        validate_uuid(user_id)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+
+        let row: Option<(String, String, String)> = conn
+            .query_row(
+                "SELECT display_name, app_env, status FROM users WHERE user_id = ?1",
+                params![user_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| AppError::Internal(format!("query user: {e}")))?;
+
+        let Some((display_name, app_env, status)) = row else {
+            return Err(AppError::Unauthorized(
+                "user_not_found",
+                "云端账户不存在，请重新绑定同步密钥".to_string(),
+            ));
+        };
+        if status != "active" || app_env != expected_env {
+            return Err(AppError::Forbidden(
+                "user_access_denied",
+                "当前凭证无权访问该环境数据".to_string(),
+            ));
+        }
+        Ok(display_name)
+    }
+
+    pub fn get_status_details(
+        &self,
+        user_id: &str,
+    ) -> Result<
+        (
+            AccountSummary,
+            Vec<BoundIdentityInfo>,
+            Vec<BoundDeviceInfo>,
+            Vec<SnapshotHistoryItem>,
+        ),
+        AppError,
+    > {
+        validate_uuid(user_id)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+
+        let summary = query_account_summary(&conn, user_id)?;
+
+        let mut id_stmt = conn
+            .prepare(
+                "SELECT provider, key_hint, created_at_ms, last_used_at_ms FROM user_identities WHERE user_id = ?1 ORDER BY id ASC",
+            )
+            .map_err(|e| AppError::Internal(format!("prepare identities: {e}")))?;
+        let identities = id_stmt
+            .query_map(params![user_id], |r| {
+                Ok(BoundIdentityInfo {
+                    provider: r.get(0)?,
+                    key_hint: r.get(1)?,
+                    created_at_ms: r.get(2)?,
+                    last_used_at_ms: r.get(3)?,
+                })
+            })
+            .map_err(|e| AppError::Internal(format!("map identities: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Internal(format!("collect identities: {e}")))?;
+
+        let mut dev_stmt = conn
+            .prepare(
+                "SELECT device_id, device_name, member_label, app_version, last_sync_at_ms FROM user_devices WHERE user_id = ?1 ORDER BY last_sync_at_ms DESC LIMIT 20",
+            )
+            .map_err(|e| AppError::Internal(format!("prepare devices: {e}")))?;
+        let devices = dev_stmt
+            .query_map(params![user_id], |r| {
+                Ok(BoundDeviceInfo {
+                    device_id: r.get(0)?,
+                    device_name: r.get(1)?,
+                    member_label: r.get(2)?,
+                    app_version: r.get(3)?,
+                    last_sync_at_ms: r.get(4)?,
+                })
+            })
+            .map_err(|e| AppError::Internal(format!("map devices: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Internal(format!("collect devices: {e}")))?;
+
+        let mut hist_stmt = conn
+            .prepare(
+                "SELECT revision, snapshot_sha256, byte_size, tx_count, updated_by_device, created_at_ms FROM cloud_snapshot_history WHERE user_id = ?1 ORDER BY revision DESC LIMIT ?2",
+            )
+            .map_err(|e| AppError::Internal(format!("prepare history: {e}")))?;
+        let history = hist_stmt
+            .query_map(params![user_id, self.max_history_revisions as i64], |r| {
+                Ok(SnapshotHistoryItem {
+                    revision: r.get(0)?,
+                    snapshot_sha256: r.get(1)?,
+                    byte_size: r.get::<_, i64>(2)? as usize,
+                    tx_count: r.get::<_, i64>(3)? as usize,
+                    updated_by_device: r.get(4)?,
+                    created_at_ms: r.get(5)?,
+                })
+            })
+            .map_err(|e| AppError::Internal(format!("map history: {e}")))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::Internal(format!("collect history: {e}")))?;
+
+        Ok((summary, identities, devices, history))
+    }
+
+    pub fn save_snapshot(
+        &self,
+        user_id: &str,
+        expected_revision: Option<i64>,
+        force_overwrite: bool,
+        device_id: &str,
+        device_name: &str,
+        member_label: &str,
+        snapshot_json: &str,
+    ) -> Result<AccountSummary, AppError> {
+        validate_uuid(user_id)?;
+        let raw_trimmed = snapshot_json.trim();
+        if raw_trimmed.is_empty() {
+            return Err(AppError::BadRequest(
+                "empty_snapshot",
+                "上传的账本快照内容为空".to_string(),
+            ));
+        }
+
+        let probe: SnapshotProbe = serde_json::from_str(raw_trimmed).map_err(|e| {
+            AppError::BadRequest(
+                "invalid_snapshot_json",
+                format!("账本快照 JSON 格式不合法: {e}"),
+            )
+        })?;
+        if !probe.app_name.is_empty() && probe.app_name != "MoJi" {
+            return Err(AppError::BadRequest(
+                "unsupported_app_snapshot",
+                "仅支持默记（MoJi）标准备份快照格式".to_string(),
+            ));
+        }
+
+        let raw_bytes = raw_trimmed.as_bytes();
+        let snapshot_sha256 = sha256_hex(raw_bytes);
+        let wallet_count = probe.wallets.len();
+        let tx_count = probe.transactions.len();
+        let ledger_count = probe.ledgers.len().max(1);
+        let now = now_millis();
+        let exported_at = if probe.exported_at_millis > 0 {
+            probe.exported_at_millis
+        } else {
+            now
+        };
+        let clean_dev_id = sanitize_short_text(device_id, 64);
+        let clean_dev_name = sanitize_short_text(device_name, 64);
+        let clean_member = sanitize_short_text(member_label, 48);
+
+        let user_snap_dir = self.user_snapshot_dir(user_id)?;
+        let history_dir = user_snap_dir.join("history");
+        fs::create_dir_all(&history_dir)
+            .map_err(|e| AppError::Internal(format!("create user history dir: {e}")))?;
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| AppError::Internal(format!("begin snapshot tx: {e}")))?;
+
+        let current_summary = query_account_summary(&tx, user_id)?;
+
+        // 1. 乐观并发控制：防止新设备在未拉取云端数据前误覆盖远端更新版本
+        if !force_overwrite && current_summary.latest_revision > 0 {
+            if let Some(exp_rev) = expected_revision {
+                if exp_rev != current_summary.latest_revision {
+                    return Err(AppError::Conflict {
+                        code: "revision_conflict",
+                        message: format!(
+                            "云端已有更新版本（v{}，共 {} 笔账单，由「{}」同步），请先从云端拉取恢复，或手动确认强制覆盖",
+                            current_summary.latest_revision,
+                            current_summary.tx_count,
+                            if current_summary.updated_by_member.is_empty() {
+                                &current_summary.updated_by_device
+                            } else {
+                                &current_summary.updated_by_member
+                            }
+                        ),
+                        account_summary: Some(current_summary),
+                    });
+                }
+            }
+            // 2. 空账本防误抹除守卫：远端已有账单时，禁止非强制模式写入 0 笔账单快照
+            if current_summary.tx_count > 0 && tx_count == 0 {
+                return Err(AppError::Conflict {
+                    code: "empty_snapshot_guard",
+                    message: format!(
+                        "云端当前存有 {} 笔账单，安全守卫已拦截空账本自动覆盖；如确需清空云端，请点击手动强制上传",
+                        current_summary.tx_count
+                    ),
+                    account_summary: Some(current_summary),
+                });
+            }
+        }
+
+        // 幂等短路：如果内容 SHA-256 与云端最新版本完全一致，无需重复递增版本号与落盘
+        if current_summary.latest_revision > 0 && current_summary.snapshot_sha256 == snapshot_sha256
+        {
+            if !clean_dev_id.is_empty() {
+                let _ = tx.execute(
+                    "UPDATE user_devices SET last_sync_at_ms = ?1 WHERE user_id = ?2 AND device_id = ?3",
+                    params![now, user_id, clean_dev_id],
+                );
+            }
+            tx.commit()
+                .map_err(|e| AppError::Internal(format!("commit idempotent tx: {e}")))?;
+            return Ok(current_summary);
+        }
+
+        let new_revision = current_summary.latest_revision + 1;
+        let latest_path = user_snap_dir.join("latest.json");
+        let history_path = history_dir.join(format!("rev_{new_revision}.json"));
+
+        write_file_atomically(&history_path, raw_bytes)?;
+        write_file_atomically(&latest_path, raw_bytes)?;
+
+        tx.execute(
+            r#"
+            INSERT INTO cloud_snapshots (
+                user_id, revision, snapshot_sha256, byte_size,
+                wallet_count, tx_count, ledger_count,
+                updated_by_device, updated_by_member, exported_at_ms, updated_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            ON CONFLICT(user_id) DO UPDATE SET
+                revision = excluded.revision,
+                snapshot_sha256 = excluded.snapshot_sha256,
+                byte_size = excluded.byte_size,
+                wallet_count = excluded.wallet_count,
+                tx_count = excluded.tx_count,
+                ledger_count = excluded.ledger_count,
+                updated_by_device = excluded.updated_by_device,
+                updated_by_member = excluded.updated_by_member,
+                exported_at_ms = excluded.exported_at_ms,
+                updated_at_ms = excluded.updated_at_ms
+            "#,
+            params![
+                user_id,
+                new_revision,
+                snapshot_sha256,
+                raw_bytes.len() as i64,
+                wallet_count as i64,
+                tx_count as i64,
+                ledger_count as i64,
+                clean_dev_name,
+                clean_member,
+                exported_at,
+                now
+            ],
+        )
+        .map_err(|e| AppError::Internal(format!("upsert cloud_snapshots: {e}")))?;
+
+        tx.execute(
+            r#"
+            INSERT INTO cloud_snapshot_history (
+                user_id, revision, snapshot_sha256, byte_size, tx_count, updated_by_device, created_at_ms
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                user_id,
+                new_revision,
+                snapshot_sha256,
+                raw_bytes.len() as i64,
+                tx_count as i64,
+                if clean_member.is_empty() {
+                    &clean_dev_name
+                } else {
+                    &clean_member
+                },
+                now
+            ],
+        )
+        .map_err(|e| AppError::Internal(format!("insert snapshot history: {e}")))?;
+
+        if !clean_dev_id.is_empty() {
+            let _ = tx.execute(
+                r#"
+                INSERT INTO user_devices (device_id, user_id, device_name, member_label, app_version, last_sync_at_ms)
+                VALUES (?1, ?2, ?3, ?4, '', ?5)
+                ON CONFLICT(user_id, device_id) DO UPDATE SET
+                    device_name = CASE WHEN excluded.device_name != '' THEN excluded.device_name ELSE user_devices.device_name END,
+                    member_label = CASE WHEN excluded.member_label != '' THEN excluded.member_label ELSE user_devices.member_label END,
+                    last_sync_at_ms = excluded.last_sync_at_ms
+                "#,
+                params![clean_dev_id, user_id, clean_dev_name, clean_member, now],
+            );
+        }
+
+        // 清理超出上限的旧历史快照记录与文件
+        let stale_revs: Vec<i64> = {
+            let mut stmt = tx
+                .prepare(
+                    r#"
+                    SELECT revision FROM cloud_snapshot_history
+                    WHERE user_id = ?1
+                    ORDER BY revision DESC
+                    LIMIT -1 OFFSET ?2
+                    "#,
+                )
+                .map_err(|e| AppError::Internal(format!("prepare prune history: {e}")))?;
+            let rows = stmt
+                .query_map(params![user_id, self.max_history_revisions as i64], |r| {
+                    r.get(0)
+                })
+                .map_err(|e| AppError::Internal(format!("map prune history: {e}")))?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| AppError::Internal(format!("collect prune history: {e}")))?
+        };
+
+        for old_rev in &stale_revs {
+            let _ = tx.execute(
+                "DELETE FROM cloud_snapshot_history WHERE user_id = ?1 AND revision = ?2",
+                params![user_id, old_rev],
+            );
+        }
+
+        let updated_summary = query_account_summary(&tx, user_id)?;
+        tx.commit()
+            .map_err(|e| AppError::Internal(format!("commit snapshot tx: {e}")))?;
+
+        for old_rev in stale_revs {
+            let _ = fs::remove_file(history_dir.join(format!("rev_{old_rev}.json")));
+        }
+
+        Ok(updated_summary)
+    }
+
+    pub fn load_snapshot(
+        &self,
+        user_id: &str,
+        requested_revision: Option<i64>,
+    ) -> Result<PulledSnapshotData, AppError> {
+        validate_uuid(user_id)?;
+        let user_snap_dir = self.user_snapshot_dir(user_id)?;
+
+        let (revision, expected_sha256, updated_at_ms, updated_by_device, updated_by_member, screenshots, target_path) = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+
+            let mut ss_stmt = conn
+                .prepare("SELECT sha256 FROM user_screenshots WHERE user_id = ?1")
+                .map_err(|e| AppError::Internal(format!("prepare screenshots: {e}")))?;
+            let available_screenshots = ss_stmt
+                .query_map(params![user_id], |r| r.get::<_, String>(0))
+                .map_err(|e| AppError::Internal(format!("map screenshots: {e}")))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| AppError::Internal(format!("collect screenshots: {e}")))?;
+
+            if let Some(rev) = requested_revision {
+                let row: Option<(i64, String, i64, String)> = conn
+                    .query_row(
+                        "SELECT revision, snapshot_sha256, created_at_ms, updated_by_device FROM cloud_snapshot_history WHERE user_id = ?1 AND revision = ?2",
+                        params![user_id, rev],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .optional()
+                    .map_err(|e| AppError::Internal(format!("query snapshot history: {e}")))?;
+
+                let Some((r, sha, ts, dev)) = row else {
+                    return Err(AppError::NotFound(
+                        "revision_not_found",
+                        format!("未找到历史快照版本 v{rev}"),
+                    ));
+                };
+                let p = user_snap_dir.join("history").join(format!("rev_{r}.json"));
+                (r, sha, ts, dev.clone(), dev, available_screenshots, p)
+            } else {
+                let row: Option<(i64, String, i64, String, String)> = conn
+                    .query_row(
+                        "SELECT revision, snapshot_sha256, updated_at_ms, updated_by_device, updated_by_member FROM cloud_snapshots WHERE user_id = ?1",
+                        params![user_id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                    )
+                    .optional()
+                    .map_err(|e| AppError::Internal(format!("query latest snapshot: {e}")))?;
+
+                let Some((r, sha, ts, dev, member)) = row else {
+                    return Err(AppError::NotFound(
+                        "snapshot_not_found",
+                        "该密钥名下尚无云端备份快照，请先上传当前账本".to_string(),
+                    ));
+                };
+                let p = user_snap_dir.join("latest.json");
+                (r, sha, ts, dev, member, available_screenshots, p)
+            }
+        };
+
+        let bytes = fs::read(&target_path).map_err(|e| {
+            AppError::Internal(format!("读取云端快照文件 {:?} 失败: {e}", target_path))
+        })?;
+        let actual_sha = sha256_hex(&bytes);
+        if actual_sha != expected_sha256 {
+            return Err(AppError::Internal(
+                "云端快照文件完整性摘要校验不匹配".to_string(),
+            ));
+        }
+        let snapshot_json = String::from_utf8(bytes)
+            .map_err(|e| AppError::Internal(format!("invalid utf8 snapshot: {e}")))?;
+
+        Ok(PulledSnapshotData {
+            revision,
+            snapshot_sha256: expected_sha256,
+            updated_at_ms,
+            updated_by_device,
+            updated_by_member,
+            snapshot_json,
+            available_screenshots: screenshots,
+        })
+    }
+
+    pub fn find_missing_screenshots(
+        &self,
+        user_id: &str,
+        candidate_hashes: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        validate_uuid(user_id)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+
+        let mut missing = Vec::new();
+        for raw_hash in candidate_hashes.iter().take(5000) {
+            let norm = normalize_sha256(raw_hash)?;
+            let linked: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM user_screenshots WHERE user_id = ?1 AND sha256 = ?2)",
+                    params![user_id, norm],
+                    |r| r.get(0),
+                )
+                .map_err(|e| AppError::Internal(format!("check screenshot row: {e}")))?;
+
+            let blob_path = self.screenshot_blob_path(&norm)?;
+            if !linked || !blob_path.exists() {
+                missing.push(norm);
+            }
+        }
+        Ok(missing)
+    }
+
+    pub fn save_screenshot(
+        &self,
+        user_id: &str,
+        expected_sha256_raw: &str,
+        webp_bytes: &[u8],
+    ) -> Result<usize, AppError> {
+        validate_uuid(user_id)?;
+        let expected_sha = normalize_sha256(expected_sha256_raw)?;
+
+        if webp_bytes.len() < 16 || webp_bytes.len() > 8 * 1024 * 1024 {
+            return Err(AppError::BadRequest(
+                "invalid_screenshot_size",
+                "账单截图文件大小不合法（单张需在 16B ~ 8MB 之间）".to_string(),
+            ));
+        }
+        if &webp_bytes[0..4] != b"RIFF" || &webp_bytes[8..12] != b"WEBP" {
+            return Err(AppError::BadRequest(
+                "invalid_webp_header",
+                "仅允许上传合法的 WebP 账单截图文件".to_string(),
+            ));
+        }
+
+        let actual_sha = sha256_hex(webp_bytes);
+        if actual_sha != expected_sha {
+            return Err(AppError::BadRequest(
+                "screenshot_hash_mismatch",
+                "上传图片的 SHA-256 摘要与请求参数不一致".to_string(),
+            ));
+        }
+
+        let blob_path = self.screenshot_blob_path(&expected_sha)?;
+        if let Some(parent) = blob_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| AppError::Internal(format!("create screenshot shard dir: {e}")))?;
+        }
+        if !blob_path.exists() {
+            write_file_atomically(&blob_path, webp_bytes)?;
+        }
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+        conn.execute(
+            r#"
+            INSERT INTO user_screenshots (user_id, sha256, byte_size, created_at_ms)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(user_id, sha256) DO NOTHING
+            "#,
+            params![user_id, expected_sha, webp_bytes.len() as i64, now_millis()],
+        )
+        .map_err(|e| AppError::Internal(format!("insert user_screenshot: {e}")))?;
+
+        Ok(webp_bytes.len())
+    }
+
+    pub fn load_screenshot(&self, user_id: &str, sha256_raw: &str) -> Result<Vec<u8>, AppError> {
+        validate_uuid(user_id)?;
+        let sha = normalize_sha256(sha256_raw)?;
+
+        let authorized: bool = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM user_screenshots WHERE user_id = ?1 AND sha256 = ?2)",
+                params![user_id, sha],
+                |r| r.get(0),
+            )
+            .map_err(|e| AppError::Internal(format!("verify screenshot ownership: {e}")))?
+        };
+
+        if !authorized {
+            return Err(AppError::NotFound(
+                "screenshot_not_found",
+                "未找到该账单原图或无访问权限".to_string(),
+            ));
+        }
+
+        let blob_path = self.screenshot_blob_path(&sha)?;
+        if !blob_path.exists() {
+            return Err(AppError::NotFound(
+                "screenshot_blob_missing",
+                "云端账单原图文件不存在".to_string(),
+            ));
+        }
+
+        fs::read(&blob_path)
+            .map_err(|e| AppError::Internal(format!("read screenshot {:?}: {e}", blob_path)))
+    }
+
+    fn user_snapshot_dir(&self, user_id: &str) -> Result<PathBuf, AppError> {
+        validate_uuid(user_id)?;
+        Ok(self.data_dir.join("snapshots").join(user_id))
+    }
+
+    fn screenshot_blob_path(&self, normalized_sha256: &str) -> Result<PathBuf, AppError> {
+        let sha = normalize_sha256(normalized_sha256)?;
+        Ok(self
+            .data_dir
+            .join("screenshots")
+            .join(&sha[0..2])
+            .join(format!("{sha}.webp")))
+    }
+}
+
+fn query_account_summary(conn: &Connection, user_id: &str) -> Result<AccountSummary, AppError> {
+    let screenshot_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM user_screenshots WHERE user_id = ?1",
+            params![user_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| AppError::Internal(format!("count screenshots: {e}")))?;
+
+    let snap_row: Option<AccountSummary> = conn
+        .query_row(
+            r#"
+            SELECT revision, wallet_count, tx_count, ledger_count, byte_size,
+                   snapshot_sha256, updated_by_device, updated_by_member, updated_at_ms
+            FROM cloud_snapshots
+            WHERE user_id = ?1
+            "#,
+            params![user_id],
+            |r| {
+                Ok(AccountSummary {
+                    latest_revision: r.get(0)?,
+                    wallet_count: r.get::<_, i64>(1)? as usize,
+                    tx_count: r.get::<_, i64>(2)? as usize,
+                    ledger_count: r.get::<_, i64>(3)? as usize,
+                    screenshot_count: screenshot_count as usize,
+                    snapshot_bytes: r.get::<_, i64>(4)? as usize,
+                    snapshot_sha256: r.get(5)?,
+                    updated_by_device: r.get(6)?,
+                    updated_by_member: r.get(7)?,
+                    updated_at_ms: r.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| AppError::Internal(format!("query cloud_snapshots: {e}")))?;
+
+    Ok(snap_row.unwrap_or_else(|| AccountSummary {
+        screenshot_count: screenshot_count as usize,
+        ..AccountSummary::default()
+    }))
+}
+
+fn validate_uuid(raw: &str) -> Result<(), AppError> {
+    if Uuid::parse_str(raw).is_err() {
+        return Err(AppError::BadRequest(
+            "invalid_user_id",
+            "非法用户标识格式".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn normalize_sha256(raw: &str) -> Result<String, AppError> {
+    let lower = raw.trim().to_ascii_lowercase();
+    if lower.len() != 64 || !lower.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(AppError::BadRequest(
+            "invalid_sha256",
+            "SHA-256 哈希参数格式无效（需为 64 位十六进制字符）".to_string(),
+        ));
+    }
+    Ok(lower)
+}
+
+fn sanitize_short_text(raw: &str, max_chars: usize) -> String {
+    raw.trim()
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(max_chars)
+        .collect()
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
+fn write_file_atomically(dest: &Path, bytes: &[u8]) -> Result<(), AppError> {
+    let tmp_name = format!(
+        ".{}.tmp.{}",
+        dest.file_name().and_then(|n| n.to_str()).unwrap_or("blob"),
+        Uuid::new_v4()
+    );
+    let tmp_path = dest.with_file_name(tmp_name);
+    let write_res = (|| -> std::io::Result<()> {
+        let mut f = File::create(&tmp_path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        fs::rename(&tmp_path, dest)?;
+        Ok(())
+    })();
+    if let Err(e) = write_res {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(AppError::Internal(format!(
+            "atomic write {:?} failed: {e}",
+            dest
+        )));
+    }
+    Ok(())
+}

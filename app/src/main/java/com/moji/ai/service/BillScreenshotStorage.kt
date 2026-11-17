@@ -105,6 +105,88 @@ object BillScreenshotStorage {
         }
     }
 
+    /**
+     * 查找或保存从云端拉取的 WebP 账单原图（严格校验 SHA-256 与 RIFF/WEBP 头，防止损坏或篡改数据落盘），
+     * 返回当前设备上可直接访问的安全沙盒绝对路径。
+     */
+    fun resolveOrSaveCloudScreenshot(
+        context: Context,
+        expectedSha256Raw: String,
+        existingPathHint: String? = null,
+        downloadedWebpBytes: ByteArray? = null
+    ): String? {
+        val expectedSha = expectedSha256Raw.trim().lowercase()
+        if (expectedSha.length != 64 || !expectedSha.all { it in '0'..'9' || it in 'a'..'f' }) {
+            return null
+        }
+        return runCatching {
+            val dir = File(context.applicationContext.filesDir, SCREENSHOT_DIR_NAME)
+            if (!dir.exists()) {
+                dir.mkdirs()
+            }
+            if (screenshotDirCanonicalPrefix == null) {
+                screenshotDirCanonicalPrefix = dir.canonicalPath.replace('\\', '/').trimEnd('/') + "/"
+            }
+
+            // 1. 若原路径已在本机存在且 SHA-256 完全匹配，直接复用
+            if (!existingPathHint.isNullOrBlank()) {
+                val hintFile = File(existingPathHint)
+                if (isSafeScreenshotFile(hintFile, context)) {
+                    val hintBytes = hintFile.readBytes()
+                    if (sha256Hex(hintBytes) == expectedSha) {
+                        return@runCatching hintFile.absolutePath
+                    }
+                }
+            }
+
+            // 2. 检查本机固定内容寻址缓存文件是否已存在
+            val cloudTarget = File(dir, "bill_cloud_${expectedSha.take(16)}.webp")
+            if (cloudTarget.exists() && cloudTarget.isFile) {
+                val existingBytes = cloudTarget.readBytes()
+                if (sha256Hex(existingBytes) == expectedSha) {
+                    return@runCatching cloudTarget.absolutePath
+                }
+            }
+
+            // 3. 若传入了云端下载字节流，强校验 WebP 魔数与 SHA-256 后原子落盘
+            val bytes = downloadedWebpBytes ?: return@runCatching null
+            if (bytes.size < 16 || bytes.size > 8 * 1024 * 1024) return@runCatching null
+            val isWebp = bytes[0] == 'R'.code.toByte() &&
+                bytes[1] == 'I'.code.toByte() &&
+                bytes[2] == 'F'.code.toByte() &&
+                bytes[3] == 'F'.code.toByte() &&
+                bytes[8] == 'W'.code.toByte() &&
+                bytes[9] == 'E'.code.toByte() &&
+                bytes[10] == 'B'.code.toByte() &&
+                bytes[11] == 'P'.code.toByte()
+            if (!isWebp || sha256Hex(bytes) != expectedSha) {
+                return@runCatching null
+            }
+
+            val tmpFile = File(dir, ".tmp_${expectedSha.take(16)}_${System.nanoTime()}.webp")
+            FileOutputStream(tmpFile).use { fos ->
+                fos.write(bytes)
+                fos.fd.sync()
+            }
+            if (!tmpFile.renameTo(cloudTarget)) {
+                FileOutputStream(cloudTarget).use { fos ->
+                    fos.write(bytes)
+                    fos.fd.sync()
+                }
+                tmpFile.delete()
+            }
+            cloudTarget.absolutePath
+        }.getOrNull()
+    }
+
+    fun computeFileSha256IfSafe(file: File, context: Context? = null): String? {
+        if (!isSafeScreenshotFile(file, context)) return null
+        return runCatching {
+            val bytes = file.readBytes()
+            if (bytes.isEmpty()) null else sha256Hex(bytes)
+        }.getOrNull()
+    }
+
     private fun sha256Hex(bytes: ByteArray): String {
         val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
         val sb = StringBuilder(digest.size * 2)

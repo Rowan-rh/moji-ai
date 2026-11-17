@@ -15,7 +15,11 @@ import com.moji.ai.ai.ProposedRuleItem
 import com.moji.ai.ai.SmartConditionRule
 import com.moji.ai.ai.TriageBillItem
 import com.moji.ai.data.backup.BackupAndCsvTransferEngine
+import com.moji.ai.data.backup.CloudSyncConflictException
 import com.moji.ai.data.backup.CsvParsePreviewResult
+import com.moji.ai.data.backup.MoJiCloudConfig
+import com.moji.ai.data.backup.MoJiCloudSyncClient
+import com.moji.ai.data.backup.MoJiFullBackupSnapshot
 import com.moji.ai.data.backup.WebDavConfig
 import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.RecurringRuleEntity
@@ -598,6 +602,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _webDavConfig = MutableStateFlow(WebDavSyncClient.loadConfig(application))
     val webDavConfig: StateFlow<WebDavConfig> = _webDavConfig.asStateFlow()
+
+    val mojiCloudConfig: StateFlow<MoJiCloudConfig> = MoJiCloudSyncClient.configFlow
 
     /**
      * 从流体云胶囊或系统通知点击跳转进入 App 时，待直接打开详情页的账单 ID
@@ -1306,6 +1312,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             val (backupWallets, backupTxs, snapshot) = parsed
             val backupRules = BackupAndCsvTransferEngine.toRecurringRuleEntities(snapshot.recurringRules)
+            val txCount = applyRestoredSnapshotInternal(backupWallets, backupTxs, backupRules, snapshot)
+            onResult("恢复完成：${backupWallets.size} 个账户、$txCount 笔账单")
+        }
+    }
+
+    private suspend fun applyRestoredSnapshotInternal(
+        backupWallets: List<WalletEntity>,
+        backupTxs: List<TransactionEntity>,
+        backupRules: List<RecurringRuleEntity>,
+        snapshot: MoJiFullBackupSnapshot
+    ): Int {
+        MoJiCloudSyncClient.isRestoringSnapshot = true
+        return try {
             val txCount = withContext(Dispatchers.IO) {
                 repository.restoreFullSnapshot(backupWallets, backupTxs, backupRules)
             }
@@ -1352,7 +1371,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (snapshot.appearanceSettingsJson.isNotBlank()) {
                 AppearanceConfigManager.restoreFromBackupJson(snapshot.appearanceSettingsJson)
             }
-            onResult("恢复完成：${backupWallets.size} 个账户、$txCount 笔账单")
+            txCount
+        } finally {
+            MoJiCloudSyncClient.isRestoringSnapshot = false
         }
     }
 
@@ -1473,6 +1494,76 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 },
                 onFailure = { err ->
                     onResult("下载失败：${err.message}")
+                }
+            )
+        }
+    }
+
+    fun updateMoJiCloudConfig(config: MoJiCloudConfig) {
+        MoJiCloudSyncClient.saveConfig(app, config)
+    }
+
+    fun verifyMoJiCloudKey(
+        draftConfig: MoJiCloudConfig,
+        onResult: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val res = MoJiCloudSyncClient.verifyAndBindKey(app, draftConfig)
+            res.fold(
+                onSuccess = { (_, msg) -> onResult(msg) },
+                onFailure = { err -> onResult("验证失败：${err.message}") }
+            )
+        }
+    }
+
+    fun uploadBackupToMoJiCloud(
+        draftConfig: MoJiCloudConfig,
+        forceOverwrite: Boolean = false,
+        onConflict: (String) -> Unit = {},
+        onResult: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val freshTxs = withContext(Dispatchers.IO) { repository.getAllTransactions() }
+            val backupJson = buildFullBackupJson()
+            val res = MoJiCloudSyncClient.uploadSnapshotAndScreenshots(
+                context = app,
+                draftConfig = draftConfig,
+                backupJson = backupJson,
+                localTransactions = freshTxs,
+                forceOverwrite = forceOverwrite
+            )
+            res.fold(
+                onSuccess = { (_, msg) -> onResult(msg) },
+                onFailure = { err ->
+                    if (err is CloudSyncConflictException) {
+                        onConflict(err.message)
+                    } else {
+                        onResult("上传失败：${err.message}")
+                    }
+                }
+            )
+        }
+    }
+
+    fun restoreBackupFromMoJiCloud(
+        draftConfig: MoJiCloudConfig,
+        onResult: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val res = MoJiCloudSyncClient.downloadSnapshotAndScreenshots(app, draftConfig)
+            res.fold(
+                onSuccess = { bundle ->
+                    val txCount = applyRestoredSnapshotInternal(
+                        backupWallets = bundle.wallets,
+                        backupTxs = bundle.transactions,
+                        backupRules = bundle.recurringRules,
+                        snapshot = bundle.snapshot
+                    )
+                    val ssText = if (bundle.syncedScreenshots > 0) "、拉回 ${bundle.syncedScreenshots} 张账单原图" else ""
+                    onResult("✅ 已从默记云 v${bundle.revision} 恢复：${bundle.wallets.size} 个账户、$txCount 笔账单$ssText")
+                },
+                onFailure = { err ->
+                    onResult("云端恢复失败：${err.message}")
                 }
             )
         }
