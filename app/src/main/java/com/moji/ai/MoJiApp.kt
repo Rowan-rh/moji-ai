@@ -6,6 +6,7 @@ import com.moji.ai.ai.AiAccountingEngine
 import com.moji.ai.ai.AiConfigManager
 import com.moji.ai.ai.MerchantMemoryManager
 import com.moji.ai.ai.SmartRuleEngine
+import com.moji.ai.data.backup.MoJiCloudSyncClient
 import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.model.AppLockManager
 import com.moji.ai.data.model.AppearanceConfigManager
@@ -22,7 +23,11 @@ import com.moji.ai.update.AppUpdateManager
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 
 class MoJiApp : Application() {
@@ -69,6 +74,7 @@ class MoJiApp : Application() {
         ReminderConfigManager.init(this)
         AppearanceConfigManager.init(this)
         BillScreenshotStorage.init(this)
+        MoJiCloudSyncClient.init(this)
         database = AppDatabase.getInstance(this)
         repository = LedgerRepository(database)
         aiConfigManager = AiConfigManager(this)
@@ -107,6 +113,38 @@ class MoJiApp : Application() {
             if (!BuildConfig.IS_QA_BUILD && appUpdateManager.configFlow.value.autoCheckOnLaunch) {
                 appUpdateManager.checkForUpdate(isManual = false)
             }
+        }
+
+        startBackgroundCloudAutoSync()
+    }
+
+    @OptIn(FlowPreview::class)
+    private fun startBackgroundCloudAutoSync() {
+        appScope.launch {
+            combine(
+                repository.walletsFlow,
+                repository.transactionsFlow,
+                repository.recurringRulesFlow
+            ) { wallets, txs, rules ->
+                Triple(wallets.size, txs.sumOf { it.updatedAtMillis xor it.id }, rules.size)
+            }
+                .drop(1)
+                .debounce(6_000L)
+                .collect {
+                    if (MoJiCloudSyncClient.isRestoringSnapshot) return@collect
+                    val cfg = MoJiCloudSyncClient.configFlow.value
+                    if (!cfg.canAutoPushSafely) return@collect
+                    val (snapshotJson, freshTxs) = MoJiCloudSyncClient.buildSnapshotFromApp(this@MoJiApp)
+                    MoJiCloudSyncClient.uploadSnapshotAndScreenshots(
+                        context = this@MoJiApp,
+                        draftConfig = cfg,
+                        backupJson = snapshotJson,
+                        localTransactions = freshTxs,
+                        forceOverwrite = false
+                    ).onFailure { err ->
+                        Log.w("MoJiCloudSync", "后台静默云同步暂缓: ${err.message}")
+                    }
+                }
         }
     }
 }

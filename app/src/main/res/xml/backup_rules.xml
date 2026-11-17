@@ -6,6 +6,7 @@
     <exclude domain="file" path="bill_screenshots" />
     <exclude domain="sharedpref" path="moji_ai_config_prefs.xml" />
     <exclude domain="sharedpref" path="moji_webdav_prefs.xml" />
+    <exclude domain="sharedpref" path="moji_cloud_sync_prefs.xml" />
     <exclude domain="sharedpref" path="moji_app_update_prefs.xml" />
     <exclude domain="sharedpref" path="moji_app_lock_prefs.xml" />
 </full-backup-content>
