@@ -50,6 +50,7 @@ import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.update.AppUpdateConfig
 import com.moji.ai.update.ReleaseUpdateInfo
 import com.moji.ai.update.UpdateCheckState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -1313,12 +1314,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             val (backupWallets, backupTxs, snapshot) = parsed
             val backupRules = BackupAndCsvTransferEngine.toRecurringRuleEntities(snapshot.recurringRules)
-            val txCount = withContext(NonCancellable) {
-                val count = applyRestoredSnapshotInternal(backupWallets, backupTxs, backupRules, snapshot)
-                MoJiCloudSyncClient.markLocalSnapshotDivergedFromCloud(app)
-                count
+            try {
+                val txCount = withContext(NonCancellable) {
+                    val count = applyRestoredSnapshotInternal(backupWallets, backupTxs, backupRules, snapshot)
+                    MoJiCloudSyncClient.markLocalSnapshotDivergedFromCloud(app)
+                    count
+                }
+                onResult("恢复完成：${backupWallets.size} 个账户、$txCount 笔账单")
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (err: Exception) {
+                onResult("恢复失败：${err.message ?: err.javaClass.simpleName}")
             }
-            onResult("恢复完成：${backupWallets.size} 个账户、$txCount 笔账单")
         }
     }
 
@@ -1471,7 +1478,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         updateWebDavConfig(config)
         viewModelScope.launch {
-            val backupJson = buildFullBackupJson()
+            val backupJson = try {
+                buildFullBackupJson()
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (err: Exception) {
+                onResult("构建本地备份失败：${err.message ?: err.javaClass.simpleName}")
+                return@launch
+            }
             val res = WebDavSyncClient.uploadSnapshot(config, backupJson)
             res.fold(
                 onSuccess = { msg ->
@@ -1528,7 +1542,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         onResult: (String) -> Unit
     ) {
         viewModelScope.launch {
-            val (backupJson, enrichedTxs) = MoJiCloudSyncClient.buildSnapshotFromApp(app)
+            val (backupJson, enrichedTxs) = try {
+                MoJiCloudSyncClient.buildSnapshotFromApp(app)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (err: Exception) {
+                onResult("构建本地快照失败：${err.message ?: err.javaClass.simpleName}")
+                return@launch
+            }
             val res = MoJiCloudSyncClient.uploadSnapshotAndScreenshots(
                 context = app,
                 draftConfig = draftConfig,
@@ -1557,18 +1578,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val res = MoJiCloudSyncClient.downloadSnapshotAndScreenshots(app, draftConfig)
             res.fold(
                 onSuccess = { bundle ->
-                    val txCount = withContext(NonCancellable) {
-                        val count = applyRestoredSnapshotInternal(
-                            backupWallets = bundle.wallets,
-                            backupTxs = bundle.transactions,
-                            backupRules = bundle.recurringRules,
-                            snapshot = bundle.snapshot
-                        )
-                        MoJiCloudSyncClient.commitPulledConfigAfterRestore(app, bundle.updatedConfig)
-                        count
+                    try {
+                        val txCount = withContext(NonCancellable) {
+                            val count = applyRestoredSnapshotInternal(
+                                backupWallets = bundle.wallets,
+                                backupTxs = bundle.transactions,
+                                backupRules = bundle.recurringRules,
+                                snapshot = bundle.snapshot
+                            )
+                            MoJiCloudSyncClient.commitPulledConfigAfterRestore(app, bundle.updatedConfig)
+                            count
+                        }
+                        val ssText = if (bundle.syncedScreenshots > 0) "、拉回 ${bundle.syncedScreenshots} 张账单原图" else ""
+                        onResult("✅ 已从默记云 v${bundle.revision} 恢复：${bundle.wallets.size} 个账户、$txCount 笔账单$ssText")
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (err: Exception) {
+                        onResult("云端恢复落盘失败：${err.message ?: err.javaClass.simpleName}")
                     }
-                    val ssText = if (bundle.syncedScreenshots > 0) "、拉回 ${bundle.syncedScreenshots} 张账单原图" else ""
-                    onResult("✅ 已从默记云 v${bundle.revision} 恢复：${bundle.wallets.size} 个账户、$txCount 笔账单$ssText")
                 },
                 onFailure = { err ->
                     onResult("云端恢复失败：${err.message}")
