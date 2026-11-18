@@ -3743,9 +3743,7 @@ private fun BackupAndCsvTransferSheet(
                                     MoJiCloudSyncClient.decodeFamilyPairingText(clipText).fold(
                                         onSuccess = { (parsedUrl, parsedCode) ->
                                             cloudUrl = parsedUrl
-                                            if (parsedCode.isNotBlank()) {
-                                                cloudAccessCode = parsedCode
-                                            }
+                                            cloudAccessCode = parsedCode
                                             localBanner = "已填入云服务器配置（本机保留独立专属密钥）"
                                         },
                                         onFailure = { err ->

@@ -29,6 +29,14 @@ class OcrTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
+        if (isLocked) {
+            unlockAndRun { performTileAction() }
+        } else {
+            performTileAction()
+        }
+    }
+
+    private fun performTileAction() {
         val service = PaymentAccessibilityService.instance
         if (service == null) {
             val health = RomKeepAliveGuideHelper.inspectAccessibilityHealth(this)
@@ -44,14 +52,14 @@ class OcrTileService : TileService() {
                 highlightService = true
             )
             try {
-                launchAndCollapseCompat(highlightedIntent)
+                launchAndCollapseCompat(highlightedIntent, requestCode = 1001)
             } catch (_: Exception) {
                 runCatching {
                     val fallbackIntent = RomKeepAliveGuideHelper.buildAccessibilitySettingsIntent(
                         this,
                         highlightService = false
                     )
-                    launchAndCollapseCompat(fallbackIntent)
+                    launchAndCollapseCompat(fallbackIntent, requestCode = 1002)
                 }
             }
             return
@@ -68,12 +76,12 @@ class OcrTileService : TileService() {
         )
     }
 
-    private fun launchAndCollapseCompat(intent: Intent) {
+    private fun launchAndCollapseCompat(intent: Intent, requestCode: Int) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startActivityAndCollapse(
                 PendingIntent.getActivity(
                     this,
-                    0,
+                    requestCode,
                     intent,
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
                 )

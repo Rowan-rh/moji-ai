@@ -344,14 +344,19 @@ open class PaymentAccessibilityService : AccessibilityService() {
                 ?.takeIf { it !in systemOverlayPackages }
                 ?: activePackage.ifBlank { "com.tencent.mm" }
 
+            var manualBlockedReason: String? = null
             val capturedByNodes = inspectCurrentScreen(
                 pkg = pkg,
                 eventSource = null,
                 allowAutoOcrFallback = false,
-                forceManual = true
+                forceManual = true,
+                onManualBlocked = { reason -> manualBlockedReason = reason }
             )
+            val blockedReason = manualBlockedReason
             if (capturedByNodes) {
                 onResultMessage?.invoke("已通过页面节点识别账单并保存截图")
+            } else if (blockedReason != null) {
+                onResultMessage?.invoke(blockedReason)
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 captureScreenshotAndRunOcr(
                     pkg = pkg,
@@ -446,7 +451,8 @@ open class PaymentAccessibilityService : AccessibilityService() {
         pkg: String,
         eventSource: AccessibilityNodeInfo?,
         allowAutoOcrFallback: Boolean,
-        forceManual: Boolean = false
+        forceManual: Boolean = false,
+        onManualBlocked: ((String) -> Unit)? = null
     ): Boolean {
         val snapshot = collectPrimaryWindowSnapshot(
             targetPkg = pkg,
@@ -458,6 +464,9 @@ open class PaymentAccessibilityService : AccessibilityService() {
             return false
         }
         if (snapshot.hasVisiblePasswordNode) {
+            if (forceManual) {
+                onManualBlocked?.invoke("当前为密码或身份核验敏感页面，已拦截识屏")
+            }
             return false
         }
 
@@ -489,6 +498,16 @@ open class PaymentAccessibilityService : AccessibilityService() {
         )
 
         if (!eval.accepted) {
+            if (forceManual && eval.reason in setOf(
+                    com.moji.ai.ai.WindowRejectReason.SENSITIVE_AUTH_PAGE,
+                    com.moji.ai.ai.WindowRejectReason.CASHIER_OR_UNPAID_STATE,
+                    com.moji.ai.ai.WindowRejectReason.CLOSED_FAILED_OR_REFUND_PENDING,
+                    com.moji.ai.ai.WindowRejectReason.CHAT_FEED_OR_BILL_LIST
+                )
+            ) {
+                onManualBlocked?.invoke("已跳过：${eval.reason.summary}")
+                return false
+            }
             if (isCurrentlyOnBillDetailPage && snapshot.snippets.size >= 3) {
                 isCurrentlyOnBillDetailPage = false
                 lastDispatchedSignature = ""
@@ -663,7 +682,6 @@ open class PaymentAccessibilityService : AccessibilityService() {
                                         onResultMessage?.invoke("未识别到屏幕文字")
                                         return@addOnSuccessListener
                                     }
-
                                     val currentAct = expectedActivity.ifBlank {
                                         lastVerifiedActivityByPkg[pkg].orEmpty()
                                     }
@@ -682,7 +700,15 @@ open class PaymentAccessibilityService : AccessibilityService() {
                                     if (!ocrEval.accepted) {
                                         BillScreenshotStorage.deleteIfExists(savedScreenshot?.absolutePath)
                                         if (isManualTrigger) {
-                                            onResultMessage?.invoke("屏幕未满足有效账单要素（${ocrEval.reason.summary}）")
+                                            val msg = "屏幕未满足有效账单要素（${ocrEval.reason.summary}）"
+                                            if (onResultMessage == null) {
+                                                Toast.makeText(
+                                                    this@PaymentAccessibilityService,
+                                                    "默记：$msg",
+                                                    Toast.LENGTH_SHORT
+                                                ).show()
+                                            }
+                                            onResultMessage?.invoke(msg)
                                         }
                                         return@addOnSuccessListener
                                     }

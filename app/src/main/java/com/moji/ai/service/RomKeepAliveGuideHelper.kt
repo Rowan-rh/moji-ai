@@ -125,13 +125,16 @@ object RomKeepAliveGuideHelper {
 
     fun checkNotificationListenerEnabled(context: Context): Boolean {
         val flat = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners") ?: return false
+        val expected = ComponentName(context.packageName, PaymentNotificationListenerService::class.java.name)
         return flat.split(':').any { token ->
-            ComponentName.unflattenFromString(token.trim())?.packageName == context.packageName
+            val parsed = ComponentName.unflattenFromString(token.trim()) ?: return@any false
+            parsed.packageName.equals(expected.packageName, ignoreCase = true) &&
+                parsed.className == expected.className
         }
     }
 
     /**
-     * 检查系统设置层是否勾选了默记的无障碍服务（同时核验 ACCESSIBILITY_ENABLED 总开关）
+     * 检查系统设置层是否勾选了默记的无障碍服务（同时核验 ACCESSIBILITY_ENABLED 总开关与精确服务组件名）
      */
     fun isAccessibilitySettingChecked(context: Context): Boolean {
         val masterEnabled = runCatching {
@@ -143,10 +146,11 @@ object RomKeepAliveGuideHelper {
             context.contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
+        val expected = ComponentName(context.packageName, SelectToSpeakService::class.java.name)
         return flat.split(':').any { token ->
-            ComponentName.unflattenFromString(token.trim())
-                ?.packageName
-                ?.equals(context.packageName, ignoreCase = true) == true
+            val parsed = ComponentName.unflattenFromString(token.trim()) ?: return@any false
+            parsed.packageName.equals(expected.packageName, ignoreCase = true) &&
+                parsed.className == expected.className
         }
     }
 

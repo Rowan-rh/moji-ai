@@ -2,6 +2,8 @@ package com.moji.ai.ai
 
 import android.content.Context
 import android.content.SharedPreferences
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import java.util.Locale
 
 enum class AiProviderType(val displayName: String, val defaultBaseUrl: String, val defaultModel: String) {
     OPENAI_COMPATIBLE(
@@ -24,7 +26,31 @@ data class AiConfig(
     val enableAccessibilityCapture: Boolean,
     val enableNotificationCapture: Boolean,
     val enableHeuristicFallback: Boolean
-)
+) {
+    /**
+     * 判断当前配置是否允许免填 API Key（支持本机回环与家庭局域网自建 Ollama / vLLM / LM Studio）
+     */
+    fun allowsEmptyApiKey(): Boolean {
+        if (provider != AiProviderType.OPENAI_COMPATIBLE) return false
+        val raw = baseUrl.trim()
+        if (raw.isEmpty()) return false
+        val host = raw.toHttpUrlOrNull()?.host?.lowercase(Locale.US)
+            ?: runCatching { java.net.URI(raw).host?.lowercase(Locale.US) }.getOrNull()
+            ?: return false
+        if (host == "localhost" || host == "127.0.0.1" || host == "::1" || host == "10.0.2.2") {
+            return true
+        }
+        val ipv4Parts = host.split('.')
+        if (ipv4Parts.size == 4 && ipv4Parts.all { it.toIntOrNull() in 0..255 }) {
+            val a = ipv4Parts[0].toInt()
+            val b = ipv4Parts[1].toInt()
+            if (a == 10) return true
+            if (a == 192 && b == 168) return true
+            if (a == 172 && b in 16..31) return true
+        }
+        return false
+    }
+}
 
 class AiConfigManager(context: Context) {
     private val prefs: SharedPreferences =

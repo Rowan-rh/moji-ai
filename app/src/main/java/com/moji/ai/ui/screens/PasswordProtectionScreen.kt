@@ -31,11 +31,15 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -603,10 +607,34 @@ private fun PinHintEditorBottomSheet(
     onSaveHint: (rawHint: String, requestDismiss: () -> Unit) -> Unit
 ) {
     var hintInput by remember(currentHint) { mutableStateOf(currentHint) }
-    val validation = remember(hintInput) {
-        AppLockManager.validatePinHint(hintInput)
+    val trimmedLength = hintInput.trim().length
+    val immediateLengthError = if (trimmedLength > AppLockManager.MAX_PIN_HINT_LENGTH) {
+        "密码提示语不能超过 ${AppLockManager.MAX_PIN_HINT_LENGTH} 个字符"
+    } else {
+        null
     }
-    val errorText = validation.exceptionOrNull()?.message
+    val needsAsyncValidation = trimmedLength in 4..AppLockManager.MAX_PIN_HINT_LENGTH
+    var asyncHintError by remember(currentHint) { mutableStateOf<String?>(null) }
+    var validatedInput by remember(currentHint) { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(hintInput) {
+        asyncHintError = null
+        val snapshot = hintInput
+        val trimmed = snapshot.trim()
+        if (trimmed.length > AppLockManager.MAX_PIN_HINT_LENGTH || trimmed.length < 4) {
+            validatedInput = snapshot
+            return@LaunchedEffect
+        }
+        delay(160L)
+        val validation = withContext(Dispatchers.Default) {
+            AppLockManager.validatePinHint(snapshot)
+        }
+        asyncHintError = validation.exceptionOrNull()?.message
+        validatedInput = snapshot
+    }
+
+    val isValidatingHint = needsAsyncValidation && validatedInput != hintInput
+    val errorText = immediateLengthError ?: asyncHintError
 
     ICostSmoothBottomSheet(
         onDismissRequest = onDismiss,
@@ -637,7 +665,7 @@ private fun PinHintEditorBottomSheet(
                         label = "密码提示语（选填，最多 20 字）",
                         placeholder = "例如：常用四位数字 / 生日月日",
                         isError = errorText != null,
-                        supportingText = errorText ?: "当前已输入 ${hintInput.trim().length}/20 字（留空表示不显示提示入口）"
+                        supportingText = errorText ?: "当前已输入 $trimmedLength/20 字（留空表示不显示提示入口）"
                     )
                 }
 
@@ -667,7 +695,7 @@ private fun PinHintEditorBottomSheet(
                         }
                     }
                     Button(
-                        enabled = errorText == null,
+                        enabled = errorText == null && !isValidatingHint,
                         onClick = { onSaveHint(hintInput, requestDismiss) },
                         shape = RoundedCornerShape(14.dp),
                         colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),

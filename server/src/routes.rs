@@ -44,7 +44,7 @@ impl FromRequestParts<Arc<AppState>> for AuthenticatedUser {
     }
 }
 
-/// 提取防暴力破解限流键：默认使用真实 TCP 对端 IP；仅当对端为本机回环反代或显式开启 `MOJI_TRUST_PROXY_HEADERS` 时才读取代理转发头
+/// 提取防暴力破解限流键：默认使用真实 TCP 对端 IP；仅当显式开启 `MOJI_TRUST_PROXY_HEADERS` 时才读取受信任反代转发头
 pub struct ClientRateLimitKey(pub String);
 
 #[axum::async_trait]
@@ -67,7 +67,7 @@ fn resolve_rate_limit_key(
 ) -> String {
     if let Some(ConnectInfo(peer_addr)) = connect_info {
         let peer_ip = peer_addr.ip();
-        if peer_ip.is_loopback() || trust_proxy_headers {
+        if trust_proxy_headers {
             if let Some(forwarded_ip) = extract_proxy_ip(headers) {
                 return forwarded_ip;
             }
@@ -218,6 +218,8 @@ async fn key_login(
     let env_for_db = app_env.clone();
     let hint_for_db = key_hint.clone();
     let dev_for_db = device_id.clone();
+    let client_key_for_db = client_key.clone();
+    let max_users = state.config.max_users;
 
     let outcome = spawn_blocking(move || {
         state_for_db.store.bind_or_login_with_sync_key(
@@ -228,12 +230,20 @@ async fn key_login(
             &dev_for_db,
             &device_name,
             &app_version,
+            max_users,
+            || {
+                state_for_db
+                    .rate_limiter
+                    .try_record_registration(&client_key_for_db)
+            },
         )
     })
     .await
     .map_err(|e| AppError::Internal(format!("join key_login task: {e}")))??;
 
-    state.rate_limiter.clear_failures(&client_key);
+    if state.config.server_access_code.is_some() || !outcome.is_new_account {
+        state.rate_limiter.clear_failures(&client_key);
+    }
 
     let (access_token, expires_at_ms) = issue_access_token(
         &state.config.token_secret,

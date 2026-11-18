@@ -577,8 +577,32 @@ object CaptureWindowGuard {
         )
         val hasExplicitOrderNo = hasExplicitOrderNumber(sanitized)
 
-        // 手动磁贴强制识屏：跳过自动防误触门禁，仅校验存在有效金额与发生时间
+        // 手动磁贴强制识屏：跳过自动容器白名单/骨架黑名单门禁，但仍拦截待付款收银台、已关闭订单、多笔账单列表与会话流
         if (input.forceManual) {
+            if (CASHIER_OR_UNPAID_BLACKLIST.any { sanitized.contains(it) }) {
+                return WindowEvaluationResult(false, WindowRejectReason.CASHIER_OR_UNPAID_STATE, containerRole, sanitized)
+            }
+            if (CLOSED_FAILED_OR_REFUND_PENDING_BLACKLIST.any { sanitized.contains(it) }) {
+                return WindowEvaluationResult(false, WindowRejectReason.CLOSED_FAILED_OR_REFUND_PENDING, containerRole, sanitized)
+            }
+            val isManualOrderListTabs = sanitized.contains("待付款") &&
+                sanitized.contains("待收货") &&
+                (sanitized.contains("待发货") || sanitized.contains("待评价") || sanitized.contains("待分享") || sanitized.contains("退款/售后"))
+            val isManualChatComposer = sanitized.contains("按住 说话") ||
+                sanitized.contains("切换到按住说话") ||
+                sanitized.contains("可按住 转文字") ||
+                sanitized.contains("切换到发消息")
+            val isManualSingleHeader = sanitized.contains("账单详情") ||
+                sanitized.contains("交易详情") ||
+                sanitized.contains("订单详情") ||
+                sanitized.contains("转账详情") ||
+                sanitized.contains("收款详情")
+            val isManualAlipayHome = sanitized.contains("扫一扫") && sanitized.contains("收付款")
+            if (isManualOrderListTabs || isManualChatComposer || isManualAlipayHome ||
+                (!isManualSingleHeader && MULTI_BILL_OR_FEED_BLACKLIST.any { sanitized.contains(it) })
+            ) {
+                return WindowEvaluationResult(false, WindowRejectReason.CHAT_FEED_OR_BILL_LIST, containerRole, sanitized)
+            }
             if (!hasAmount) {
                 return WindowEvaluationResult(false, WindowRejectReason.MISSING_BILL_AMOUNT, containerRole, sanitized)
             }

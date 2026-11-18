@@ -217,7 +217,7 @@ impl CloudStore {
         })
     }
 
-    pub fn bind_or_login_with_sync_key(
+    pub fn bind_or_login_with_sync_key<F>(
         &self,
         identifier_hash: &str,
         key_hint: &str,
@@ -226,7 +226,11 @@ impl CloudStore {
         device_id: &str,
         device_name: &str,
         app_version: &str,
-    ) -> Result<KeyBindOutcome, AppError> {
+        max_users: usize,
+        authorize_new_registration: F,
+    ) -> Result<KeyBindOutcome, AppError>
+    where
+        F: FnOnce() -> Result<(), AppError>, {
         let now = now_millis();
         let clean_member = sanitize_short_text(member_label, 48);
         let clean_device_id = sanitize_short_text(device_id, 64);
@@ -283,6 +287,19 @@ impl CloudStore {
             }
             (uid, false)
         } else {
+            if max_users > 0 {
+                let total_users: i64 = tx
+                    .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+                    .map_err(|e| AppError::Internal(format!("count users: {e}")))?;
+                let active_count = usize::try_from(total_users.max(0)).unwrap_or(usize::MAX);
+                if active_count >= max_users {
+                    return Err(AppError::Forbidden(
+                        "max_users_reached",
+                        format!("此云端服务器已达到最大账号绑定上限（{max_users}），请联系管理员调整 MOJI_MAX_USERS"),
+                    ));
+                }
+            }
+            authorize_new_registration()?;
             let uid = Uuid::new_v4().to_string();
             tx.execute(
                 "INSERT INTO users (user_id, display_name, app_env, status, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, 'active', ?4, ?4)",

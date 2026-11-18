@@ -103,7 +103,8 @@ data class CloudPulledRestoreBundle(
     val snapshot: MoJiFullBackupSnapshot,
     val revision: Long,
     val syncedScreenshots: Int,
-    val updatedConfig: MoJiCloudConfig
+    val updatedConfig: MoJiCloudConfig,
+    val failedScreenshots: Int = 0
 )
 
 /**
@@ -127,14 +128,22 @@ object MoJiCloudSyncClient {
     private val syncMutex = Mutex()
     private val secureRandom = SecureRandom()
 
+    private const val KEY_PENDING_AUTO_PUSH = "pending_auto_push"
+
     private val _configFlow = MutableStateFlow(MoJiCloudConfig())
     val configFlow: StateFlow<MoJiCloudConfig> = _configFlow.asStateFlow()
+
+    private val _localMutationSignal = MutableStateFlow(0L)
+    val localMutationSignal: StateFlow<Long> = _localMutationSignal.asStateFlow()
 
     @Volatile
     private var isRestoringFlag: Boolean = false
 
     @Volatile
     private var suppressAutoSyncUntilNano: Long = 0L
+
+    @Volatile
+    private var lastRestoredState: Pair<Triple<Long, Long, Long>, Long>? = null
 
     fun init(context: Context) {
         _configFlow.value = loadConfig(context)
@@ -150,8 +159,87 @@ object MoJiCloudSyncClient {
         isRestoringFlag = false
     }
 
+    fun isRestoringNow(): Boolean = isRestoringFlag
+
+    fun remainingSuppressionMillis(): Long {
+        val diffNano = suppressAutoSyncUntilNano - System.nanoTime()
+        return if (diffNano > 0L) TimeUnit.NANOSECONDS.toMillis(diffNano).coerceAtLeast(1L) else 0L
+    }
+
     fun shouldSuppressAutoSync(): Boolean {
         return isRestoringFlag || (System.nanoTime() - suppressAutoSyncUntilNano < 0L)
+    }
+
+    private fun mix64(value: Long): Long {
+        var z = value + -0x61c8864680b583ebL
+        z = (z xor (z ushr 30)) * -0x40a7b892e31b1a47L
+        z = (z xor (z ushr 27)) * -0x6b2fb644ecceee15L
+        return z xor (z ushr 31)
+    }
+
+    fun computeRoomSignature(
+        wallets: List<WalletEntity>,
+        txs: List<TransactionEntity>,
+        rules: List<RecurringRuleEntity>
+    ): Triple<Long, Long, Long> {
+        var walletHash = mix64(wallets.size.toLong())
+        for (w in wallets) {
+            walletHash += mix64((w.id * 31L) xor w.hashCode().toLong())
+        }
+        var txHash = mix64(txs.size.toLong())
+        for (t in txs) {
+            val normalizedCode = if (t.screenshotSha256.isEmpty()) {
+                t.hashCode()
+            } else {
+                t.copy(screenshotSha256 = "").hashCode()
+            }
+            txHash += mix64((t.id * 31L) xor normalizedCode.toLong())
+        }
+        var ruleHash = mix64(rules.size.toLong())
+        for (r in rules) {
+            ruleHash += mix64((r.id * 31L) xor r.hashCode().toLong())
+        }
+        return Triple(walletHash, txHash, ruleHash)
+    }
+
+    fun recordRestoredState(
+        signature: Triple<Long, Long, Long>?,
+        mutationSeq: Long = _localMutationSignal.value
+    ) {
+        lastRestoredState = signature?.let { it to mutationSeq }
+    }
+
+    fun consumeIfMatchesRestoredState(
+        signature: Triple<Long, Long, Long>,
+        mutationSeq: Long
+    ): Boolean {
+        val expected = lastRestoredState ?: return false
+        lastRestoredState = null
+        return expected.first == signature && expected.second == mutationSeq
+    }
+
+    fun hasPendingAutoPush(context: Context): Boolean {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean(KEY_PENDING_AUTO_PUSH, false)
+    }
+
+    fun markPendingAutoPush(context: Context, notifySignal: Boolean = true) {
+        if (isRestoringFlag) return
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(KEY_PENDING_AUTO_PUSH, false)) {
+            prefs.edit().putBoolean(KEY_PENDING_AUTO_PUSH, true).apply()
+        }
+        if (notifySignal) {
+            lastRestoredState = null
+            _localMutationSignal.value += 1L
+        }
+    }
+
+    fun clearPendingAutoPush(context: Context) {
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_PENDING_AUTO_PUSH, false)) {
+            prefs.edit().putBoolean(KEY_PENDING_AUTO_PUSH, false).apply()
+        }
     }
 
     /**
@@ -159,6 +247,7 @@ object MoJiCloudSyncClient {
      * 防止外部备份在未经确认的情况下自动静默覆盖默记云服务器数据。
      */
     fun markLocalSnapshotDivergedFromCloud(context: Context) {
+        clearPendingAutoPush(context)
         val current = _configFlow.value
         if (current.isTargetBound && current.remoteRevision > 0L && current.lastSyncedRevision != 0L) {
             saveConfig(context, current.copy(lastSyncedRevision = 0L))
@@ -169,6 +258,7 @@ object MoJiCloudSyncClient {
      * 在本地 Room 数据库原子恢复成功之后，正式提交云端拉取到的最新修订号配置。
      */
     fun commitPulledConfigAfterRestore(context: Context, pulledConfig: MoJiCloudConfig) {
+        clearPendingAutoPush(context)
         val latest = _configFlow.value
         val merged = if (latest.currentTargetSignature == pulledConfig.currentTargetSignature) {
             pulledConfig.copy(autoSyncEnabled = latest.autoSyncEnabled)
@@ -358,16 +448,30 @@ object MoJiCloudSyncClient {
             val rawTxs = app.repository.getAllTransactions()
             val freshRules = app.repository.getAllRecurringRules()
 
+            val backfilledHashes = ArrayList<Pair<Long, String>>()
             val enrichedTxs = rawTxs.map { tx ->
                 val existingSha = tx.screenshotSha256.trim().lowercase(Locale.US)
                 if (existingSha.length == 64 && existingSha.all { it in '0'..'9' || it in 'a'..'f' }) {
+                    if (existingSha != tx.screenshotSha256 && tx.id > 0L) {
+                        backfilledHashes.add(tx.id to existingSha)
+                    }
                     if (existingSha == tx.screenshotSha256) tx else tx.copy(screenshotSha256 = existingSha)
                 } else if (tx.screenshotPath.isNotBlank()) {
                     val computed = BillScreenshotStorage.computeFileSha256IfSafe(File(tx.screenshotPath), app)
-                    if (computed != null) tx.copy(screenshotSha256 = computed) else tx
+                    if (computed != null) {
+                        if (tx.id > 0L) {
+                            backfilledHashes.add(tx.id to computed)
+                        }
+                        tx.copy(screenshotSha256 = computed)
+                    } else {
+                        tx
+                    }
                 } else {
                     tx
                 }
+            }
+            if (backfilledHashes.isNotEmpty()) {
+                runCatching { app.repository.backfillTransactionScreenshotHashes(backfilledHashes) }
             }
 
             val snapshotJson = BackupAndCsvTransferEngine.exportFullBackupJson(
@@ -758,6 +862,7 @@ object MoJiCloudSyncClient {
                 remoteUpdatedAtMillis = finalSummary.updatedAtMs
             )
             saveConfig(context, updatedCfg)
+            clearPendingAutoPush(context)
 
             val kbStr = String.format(Locale.US, "%.1f", backupJson.toByteArray(Charsets.UTF_8).size / 1024.0)
             val ssNote = if (uploadedScreenshotCount > 0) "，新增上传 $uploadedScreenshotCount 张账单原图" else ""
@@ -905,15 +1010,20 @@ object MoJiCloudSyncClient {
             .build()
 
         val missingHashes = httpClient.newCall(checkReq).execute().use { resp ->
+            val txt = readCappedUtf8(resp.body?.byteStream(), 2 * 1024 * 1024)
             if (resp.code == 401) {
                 return Result.failure(CloudUnauthorizedException("检查原图时凭证已过期"))
             }
             if (!resp.isSuccessful) {
-                return Result.success(0)
+                val errDto = runCatching { jsonCodec.decodeFromString<ErrorRespDto>(txt) }.getOrNull()
+                val msg = errDto?.message?.takeIf { it.isNotBlank() }
+                    ?: "检查云端缺失原图失败（HTTP ${resp.code}）"
+                return Result.failure(IllegalStateException(msg))
             }
-            val txt = readCappedUtf8(resp.body?.byteStream(), 2 * 1024 * 1024)
             runCatching { jsonCodec.decodeFromString<MissingScreenshotsRespDto>(txt).missingSha256 }
-                .getOrDefault(emptyList())
+                .getOrElse { err ->
+                    return Result.failure(IllegalStateException("解析云端原图校验响应失败：${err.message}", err))
+                }
         }
 
         var uploaded = 0
@@ -922,6 +1032,7 @@ object MoJiCloudSyncClient {
             if (file.length() !in 1L..MAX_SCREENSHOT_BYTES.toLong()) continue
             val bytes = runCatching { file.readBytes() }.getOrNull() ?: continue
             if (bytes.isEmpty() || bytes.size > MAX_SCREENSHOT_BYTES) continue
+            if (!BillScreenshotStorage.isValidWebpBytes(bytes)) continue
             if (sha256Hex(bytes) != sha) continue
 
             val putUrl = baseUrl.newBuilder()
@@ -934,12 +1045,17 @@ object MoJiCloudSyncClient {
                 .put(bytes.toRequestBody("image/webp".toMediaType()))
                 .build()
             httpClient.newCall(putReq).execute().use { putResp ->
+                val respTxt = readCappedUtf8(putResp.body?.byteStream(), 64 * 1024)
                 if (putResp.code == 401) {
                     return Result.failure(CloudUnauthorizedException("上传原图时凭证已过期"))
                 }
-                if (putResp.isSuccessful) {
-                    uploaded++
+                if (!putResp.isSuccessful) {
+                    val errDto = runCatching { jsonCodec.decodeFromString<ErrorRespDto>(respTxt) }.getOrNull()
+                    val msg = errDto?.message?.takeIf { it.isNotBlank() }
+                        ?: "上传账单原图失败（HTTP ${putResp.code}）"
+                    return Result.failure(IllegalStateException(msg))
                 }
+                uploaded++
             }
         }
         return Result.success(uploaded)
@@ -976,6 +1092,8 @@ object MoJiCloudSyncClient {
 
                 var downloadedCount = 0
                 val resolvedPathBySha = HashMap<String, String>()
+                val failedShas = HashSet<String>()
+                var refreshedDuringScreenshots = false
 
                 val rewrittenTransactions = rawTransactions.map { tx ->
                     val sha = tx.screenshotSha256.trim().lowercase(Locale.US)
@@ -995,8 +1113,20 @@ object MoJiCloudSyncClient {
                         val finalPath = if (cachedLocal != null) {
                             resolvedPathBySha[sha] = cachedLocal
                             cachedLocal
-                        } else if (sha in availableRemoteSet) {
-                            val dlBytes = downloadSingleScreenshotBytes(baseUrl, authedConfig.accessToken, sha)
+                        } else if (sha in availableRemoteSet && sha !in failedShas) {
+                            var dlRes = downloadSingleScreenshotBytes(baseUrl, authedConfig.accessToken, sha)
+                            if (dlRes.isFailure &&
+                                dlRes.exceptionOrNull() is CloudUnauthorizedException &&
+                                !refreshedDuringScreenshots
+                            ) {
+                                refreshedDuringScreenshots = true
+                                performKeyLoginInternal(context, authedConfig, persistImmediately = true)
+                                    .getOrNull()?.let { (newCfg, _) ->
+                                        authedConfig = newCfg
+                                        dlRes = downloadSingleScreenshotBytes(baseUrl, authedConfig.accessToken, sha)
+                                    }
+                            }
+                            val dlBytes = dlRes.getOrNull()
                             val savedPath = if (dlBytes != null) {
                                 BillScreenshotStorage.resolveOrSaveCloudScreenshot(
                                     context = context,
@@ -1010,6 +1140,8 @@ object MoJiCloudSyncClient {
                             if (savedPath != null) {
                                 downloadedCount++
                                 resolvedPathBySha[sha] = savedPath
+                            } else {
+                                failedShas.add(sha)
                             }
                             savedPath.orEmpty()
                         } else {
@@ -1040,6 +1172,7 @@ object MoJiCloudSyncClient {
                         snapshot = snapshot,
                         revision = pulledDto.revision,
                         syncedScreenshots = downloadedCount,
+                        failedScreenshots = failedShas.size,
                         updatedConfig = updatedCfg
                     )
                 )
@@ -1083,22 +1216,42 @@ object MoJiCloudSyncClient {
         baseUrl: HttpUrl,
         accessToken: String,
         sha256: String
-    ): ByteArray? {
-        return runCatching {
-            val url = baseUrl.newBuilder()
-                .addPathSegments("api/v1/screenshots")
-                .addPathSegment(sha256)
-                .build()
-            val req = Request.Builder()
-                .url(url)
-                .header("Authorization", "Bearer $accessToken")
-                .get()
-                .build()
-            httpClient.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) return@use null
-                readCappedBytes(resp.body?.byteStream(), MAX_SCREENSHOT_BYTES)
+    ): Result<ByteArray> {
+        val url = baseUrl.newBuilder()
+            .addPathSegments("api/v1/screenshots")
+            .addPathSegment(sha256)
+            .build()
+        var lastError: Throwable? = null
+        for (attempt in 0..1) {
+            try {
+                val req = Request.Builder()
+                    .url(url)
+                    .header("Authorization", "Bearer $accessToken")
+                    .get()
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (resp.code == 401) {
+                        return Result.failure(CloudUnauthorizedException("下载原图时凭证已过期"))
+                    }
+                    if (resp.isSuccessful) {
+                        val bytes = readCappedBytes(resp.body?.byteStream(), MAX_SCREENSHOT_BYTES)
+                        if (BillScreenshotStorage.isValidWebpBytes(bytes)) {
+                            return Result.success(bytes)
+                        }
+                        return Result.failure(IllegalStateException("云端原图非合法 WebP 格式"))
+                    }
+                    if (resp.code in 500..599 && attempt == 0) {
+                        lastError = IllegalStateException("HTTP ${resp.code}")
+                    } else {
+                        return Result.failure(IllegalStateException("下载原图失败（HTTP ${resp.code}）"))
+                    }
+                }
+            } catch (e: Exception) {
+                lastError = e
+                if (attempt > 0) break
             }
-        }.getOrNull()
+        }
+        return Result.failure(lastError ?: IllegalStateException("下载原图失败"))
     }
 
     private fun readCappedBytes(stream: java.io.InputStream?, maxBytes: Int): ByteArray {

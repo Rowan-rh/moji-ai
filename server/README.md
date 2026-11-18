@@ -7,7 +7,7 @@
 1. **客户端专属密钥（Sync Key）免登录认证 + 家庭成员账单隔离**：
    - 手机端通过密码学安全随机数生成高强度专属密钥（正式包 `MOJI-XXXX-XXXX-XXXX-XXXX`，QA 测试包 `MOJIQA-XXXX-XXXX-XXXX-XXXX`）。
    - 服务端仅存储经 4,096 轮 `SHA-256` 拉伸的密钥摘要与仅保留末 4 位的脱敏提示（绝不明文落盘），你和家人各自生成独立密钥即可天然隔离各自的账本与原图。
-   - 支持配置 `MOJI_SERVER_ACCESS_CODE` 家庭接入保护码（定长摘要常量时间校验 + 连接来源防爆破限流），防止公网陌生人扫描端口写入垃圾数据。
+   - 支持配置 `MOJI_SERVER_ACCESS_CODE` 家庭接入保护码（4,096 轮 `SHA-256` 拉伸 + 常量时间校验 + 防爆破限流）及 `MOJI_MAX_USERS` 家庭账号总数上限（配合每 IP 每小时新建账号限流），防止公网陌生人扫描端口耗尽磁盘或写入垃圾数据。
 2. **无缝衔接后期微信 / 手机号登录（零数据迁移）**：
    - 数据库采用 `users (user_id)` $\leftarrow$ `user_identities (provider, identifier_hash, user_id)` 标准解耦表结构，所有同步接口统一使用内部 `user_id` 签发的 `Bearer` 令牌。
    - 后续对外推广接入微信开放平台或手机号登录时，只需在 `user_identities` 新增 `'wechat'` 或 `'phone'` 绑定记录，现有云端账单、历史快照与识屏原图无需任何迁移。
