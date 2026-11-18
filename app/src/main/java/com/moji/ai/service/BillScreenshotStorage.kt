@@ -151,16 +151,7 @@ object BillScreenshotStorage {
 
             // 3. 若传入了云端下载字节流，强校验 WebP 魔数与 SHA-256 后原子落盘
             val bytes = downloadedWebpBytes ?: return@runCatching null
-            if (bytes.size < 16 || bytes.size.toLong() > MAX_SAFE_SCREENSHOT_BYTES) return@runCatching null
-            val isWebp = bytes[0] == 'R'.code.toByte() &&
-                bytes[1] == 'I'.code.toByte() &&
-                bytes[2] == 'F'.code.toByte() &&
-                bytes[3] == 'F'.code.toByte() &&
-                bytes[8] == 'W'.code.toByte() &&
-                bytes[9] == 'E'.code.toByte() &&
-                bytes[10] == 'B'.code.toByte() &&
-                bytes[11] == 'P'.code.toByte()
-            if (!isWebp || sha256Hex(bytes) != expectedSha) {
+            if (!isValidWebpBytes(bytes) || sha256Hex(bytes) != expectedSha) {
                 return@runCatching null
             }
 
@@ -188,6 +179,46 @@ object BillScreenshotStorage {
             }
             cloudTarget.absolutePath
         }.getOrNull()
+    }
+
+    fun isValidWebpBytes(bytes: ByteArray): Boolean {
+        if (bytes.size < 16 || bytes.size.toLong() > MAX_SAFE_SCREENSHOT_BYTES) return false
+        return bytes[0] == 'R'.code.toByte() &&
+            bytes[1] == 'I'.code.toByte() &&
+            bytes[2] == 'F'.code.toByte() &&
+            bytes[3] == 'F'.code.toByte() &&
+            bytes[8] == 'W'.code.toByte() &&
+            bytes[9] == 'E'.code.toByte() &&
+            bytes[10] == 'B'.code.toByte() &&
+            bytes[11] == 'P'.code.toByte()
+    }
+
+    /**
+     * 全量恢复快照后清理 `files/bill_screenshots/` 中不再被任何账单引用的孤儿截图，
+     * 防止切换账本密钥或恢复历史备份后在沙盒残留旧私密账单原图。
+     */
+    fun cleanupUnreferencedScreenshots(context: Context, referencedPaths: Set<String>): Int {
+        return runCatching {
+            val dir = File(context.applicationContext.filesDir, SCREENSHOT_DIR_NAME)
+            if (!dir.exists() || !dir.isDirectory) return@runCatching 0
+            val keepCanonical = referencedPaths
+                .filter { it.isNotBlank() }
+                .mapNotNull { p -> runCatching { File(p).canonicalPath.replace('\\', '/') }.getOrNull() }
+                .toSet()
+            val now = System.currentTimeMillis()
+            var deleted = 0
+            dir.listFiles()?.forEach { file ->
+                if (!file.isFile) return@forEach
+                if (file.name.startsWith(".tmp_") && (now - file.lastModified()) < 60_000L) {
+                    return@forEach
+                }
+                val canonical = runCatching { file.canonicalPath.replace('\\', '/') }.getOrNull() ?: return@forEach
+                if (canonical !in keepCanonical && file.delete()) {
+                    deleted++
+                }
+            }
+            deleted
+        }.getOrDefault(0)
     }
 
     fun computeFileSha256IfSafe(file: File, context: Context? = null): String? {

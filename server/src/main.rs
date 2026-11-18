@@ -484,4 +484,92 @@ mod tests {
         assert_eq!(pulled_v3["updated_by_member"], "家人A");
         assert_eq!(pulled_v3["updated_by_device"], "Pixel 9");
     }
+
+    #[tokio::test]
+    async fn test_loopback_spoof_blocked_and_registration_quota_enforced() {
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = ServerConfig::for_test(tmp.path().to_path_buf(), None);
+        cfg.max_users = 3;
+        let store = CloudStore::open(&cfg.data_dir, cfg.max_history_revisions).unwrap();
+        let state = Arc::new(AppState {
+            config: cfg,
+            store,
+            rate_limiter: AuthRateLimiter::with_registration_limit(3, 2),
+        });
+        let app = build_router(state);
+
+        // 1. 未开启 trust_proxy_headers 时，即使来自 127.0.0.1 回环隧道，也不得采信伪造的 X-Real-IP 绕过限流
+        for idx in 0..2 {
+            let key = format!("MOJI-AA0{idx}-BBBB-CCCC-DDDD");
+            let req = Request::builder()
+                .method("POST")
+                .uri("/api/v1/auth/key-login")
+                .header("Content-Type", "application/json")
+                .header("x-real-ip", format!("198.51.100.{idx}"))
+                .extension(axum::extract::ConnectInfo::<SocketAddr>(
+                    "127.0.0.1:54321".parse().unwrap(),
+                ))
+                .body(Body::from(
+                    serde_json::to_vec(&json!({ "sync_key": key })).unwrap(),
+                ))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+
+        // 第 3 个来自同一回环 IP 的新账号无法通过伪造新的 X-Real-IP 绕过每小时注册限流（返回 429）
+        let third_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/key-login")
+            .header("Content-Type", "application/json")
+            .header("x-real-ip", "203.0.113.77")
+            .extension(axum::extract::ConnectInfo::<SocketAddr>(
+                "127.0.0.1:54322".parse().unwrap(),
+            ))
+            .body(Body::from(
+                serde_json::to_vec(&json!({ "sync_key": "MOJI-AA09-BBBB-CCCC-DDDD" })).unwrap(),
+            ))
+            .unwrap();
+        let third_resp = app.clone().oneshot(third_req).await.unwrap();
+        assert_eq!(third_resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // 不同对端 IP 可注册第 3 个账号，随后第 4 个账号触发 max_users=3 全局配额上限（返回 403）
+        let (st_third_ip, _) = send_json_with_peer(
+            &app,
+            "POST",
+            "/api/v1/auth/key-login",
+            None,
+            Some("198.51.100.200"),
+            Some(json!({ "sync_key": "MOJI-AA08-BBBB-CCCC-DDDD" })),
+        )
+        .await;
+        assert_eq!(st_third_ip, StatusCode::OK);
+
+        let (st_fourth_ip, fourth_body) = send_json_with_peer(
+            &app,
+            "POST",
+            "/api/v1/auth/key-login",
+            None,
+            Some("198.51.100.201"),
+            Some(json!({ "sync_key": "MOJI-AA07-BBBB-CCCC-DDDD" })),
+        )
+        .await;
+        assert_eq!(st_fourth_ip, StatusCode::FORBIDDEN);
+        assert_eq!(fourth_body["error"], "max_users_reached");
+
+        // 但已注册的老账号正常重签 Token 不受 max_users 或注册配额影响
+        let relogin_req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/auth/key-login")
+            .header("Content-Type", "application/json")
+            .extension(axum::extract::ConnectInfo::<SocketAddr>(
+                "127.0.0.1:54323".parse().unwrap(),
+            ))
+            .body(Body::from(
+                serde_json::to_vec(&json!({ "sync_key": "MOJI-AA00-BBBB-CCCC-DDDD" })).unwrap(),
+            ))
+            .unwrap();
+        let relogin_resp = app.clone().oneshot(relogin_req).await.unwrap();
+        assert_eq!(relogin_resp.status(), StatusCode::OK);
+    }
 }

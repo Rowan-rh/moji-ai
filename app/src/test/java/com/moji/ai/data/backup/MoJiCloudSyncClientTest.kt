@@ -109,4 +109,38 @@ class MoJiCloudSyncClientTest {
         Thread.sleep(100L)
         assertFalse(MoJiCloudSyncClient.shouldSuppressAutoSync())
     }
+
+    @Test
+    fun `restored room signature is consumed once to suppress restore echo without dropping subsequent edits`() {
+        val wallets = emptyList<com.moji.ai.data.local.WalletEntity>()
+        val rules = emptyList<com.moji.ai.data.local.RecurringRuleEntity>()
+        val tx1 = com.moji.ai.data.local.TransactionEntity(
+            id = 1L,
+            ledgerName = "默认账本",
+            type = com.moji.ai.data.model.TransactionType.EXPENSE,
+            amountCents = 1800L,
+            amountCnyCents = 1800L,
+            category = "餐饮",
+            merchant = "瑞幸咖啡",
+            sourceWalletId = null,
+            timestamp = 1_762_574_400_000L,
+            updatedAtMillis = 1_762_574_400_000L
+        )
+        val restoredSig = MoJiCloudSyncClient.computeRoomSignature(wallets, listOf(tx1), rules)
+        MoJiCloudSyncClient.recordRestoredRoomSignature(restoredSig)
+
+        // 首次匹配的恢复回声精确消费并拦截
+        assertTrue(MoJiCloudSyncClient.consumeIfMatchesRestoredSignature(restoredSig))
+        // 消费后不残留，后续状态正常放行
+        assertFalse(MoJiCloudSyncClient.consumeIfMatchesRestoredSignature(restoredSig))
+
+        // 若恢复后立刻新增了另一笔账单，签名不同，绝不误吞真实改动
+        MoJiCloudSyncClient.recordRestoredRoomSignature(restoredSig)
+        val editedSig = MoJiCloudSyncClient.computeRoomSignature(
+            wallets,
+            listOf(tx1, tx1.copy(id = 2L, amountCents = 3500L)),
+            rules
+        )
+        assertFalse(MoJiCloudSyncClient.consumeIfMatchesRestoredSignature(editedSig))
+    }
 }

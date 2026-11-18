@@ -396,9 +396,12 @@ object TagCatalog {
     }
 
     @Synchronized
-    fun replaceAllTags(customList: List<TagDef>) {
+    fun replaceAllTags(customList: List<TagDef>, allowEmpty: Boolean = false) {
         val clean = sanitizeTagList(customList)
-        if (clean.isEmpty()) return
+        if (clean.isEmpty() && !allowEmpty) return
+        if (clean.isEmpty()) {
+            _mutedTagNames.clear()
+        }
         persist(clean)
     }
 

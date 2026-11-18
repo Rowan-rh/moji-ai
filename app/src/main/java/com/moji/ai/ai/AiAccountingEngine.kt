@@ -405,10 +405,7 @@ class AiAccountingEngine(
 
         val parsed: AiParsedTransactionResult? = if (
             !shouldSkipNetworkForFastScreenCapture && (
-                config.apiKey.isNotBlank() ||
-                    config.baseUrl.contains("127.0.0.1") ||
-                    config.baseUrl.contains("10.0.2.2") ||
-                    config.baseUrl.contains("localhost")
+                config.apiKey.isNotBlank() || config.allowsEmptyApiKey()
                 )
         ) {
             runCatching {

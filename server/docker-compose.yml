@@ -8,7 +8,7 @@ services:
     environment:
       - MOJI_BIND_ADDR=0.0.0.0:8787
       - MOJI_DATA_DIR=/data
-      - MOJI_TRUST_PROXY_HEADERS=true
+      - MOJI_TRUST_PROXY_HEADERS=${MOJI_TRUST_PROXY_HEADERS:-false}
     volumes:
       - ./data:/data
     ports:

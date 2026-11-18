@@ -117,7 +117,21 @@ pub fn hash_sync_key(normalized_key: &str, app_env: &str) -> String {
     hex::encode(digest)
 }
 
-/// 定长摘要常量时间校验服务端接入码，防止时序侧信道泄露长度或内容
+fn stretch_access_code_digest(code: &str) -> [u8; 32] {
+    let mut seed = Sha256::new();
+    seed.update(b"moji-access-code-v1:");
+    seed.update(code.as_bytes());
+    let mut digest = seed.finalize();
+    for round in 0u32..4096 {
+        let mut h = Sha256::new();
+        h.update(digest);
+        h.update(round.to_le_bytes());
+        digest = h.finalize();
+    }
+    digest.into()
+}
+
+/// 定长多轮拉伸摘要常量时间校验服务端接入码，防止时序侧信道泄露长度或内容并提高暴力猜测成本
 pub fn verify_access_code(configured: Option<&str>, provided: Option<&str>) -> Result<(), AppError> {
     let Some(expected) = configured else {
         return Ok(());
@@ -129,9 +143,9 @@ pub fn verify_access_code(configured: Option<&str>, provided: Option<&str>) -> R
             "此云端服务已启用家庭接入保护，请填写正确的「服务器接入码」".to_string(),
         ));
     }
-    let expected_digest = Sha256::digest(expected.as_bytes());
-    let actual_digest = Sha256::digest(actual.as_bytes());
-    let eq: bool = expected_digest.as_slice().ct_eq(actual_digest.as_slice()).into();
+    let expected_digest = stretch_access_code_digest(expected);
+    let actual_digest = stretch_access_code_digest(actual);
+    let eq: bool = expected_digest.ct_eq(&actual_digest).into();
     if !eq {
         return Err(AppError::Forbidden(
             "invalid_access_code",
@@ -232,23 +246,34 @@ pub fn verify_bearer_header(headers: &HeaderMap, secret: &[u8]) -> Result<TokenC
 
 struct RateLimiterInner {
     failures: HashMap<String, Vec<i64>>,
+    registrations: HashMap<String, Vec<i64>>,
     last_sweep_ms: i64,
 }
 
-/// 轻量级内存滑动窗口防暴力破解限流器（带硬容量上限与定频清扫，杜绝内存膨胀与 O(N^2) 退化）
+/// 轻量级内存滑动窗口防暴力破解与防刷号限流器（带硬容量上限与定频清扫，杜绝内存膨胀与 O(N^2) 退化）
 pub struct AuthRateLimiter {
     inner: Mutex<RateLimiterInner>,
     max_failures_per_minute: usize,
+    max_registrations_per_hour: usize,
 }
 
 impl AuthRateLimiter {
     pub fn new(max_failures_per_minute: usize) -> Self {
+        Self::with_registration_limit(max_failures_per_minute, 12)
+    }
+
+    pub fn with_registration_limit(
+        max_failures_per_minute: usize,
+        max_registrations_per_hour: usize,
+    ) -> Self {
         Self {
             inner: Mutex::new(RateLimiterInner {
                 failures: HashMap::new(),
+                registrations: HashMap::new(),
                 last_sweep_ms: 0,
             }),
             max_failures_per_minute,
+            max_registrations_per_hour,
         }
     }
 
@@ -267,14 +292,56 @@ impl AuthRateLimiter {
         Ok(())
     }
 
+    pub fn try_record_registration(&self, client_key: &str) -> Result<(), AppError> {
+        let now = now_millis();
+        let cutoff = now - 3_600_000;
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(times) = guard.registrations.get_mut(client_key) {
+            times.retain(|&ts| ts >= cutoff);
+            if times.len() >= self.max_registrations_per_hour {
+                return Err(AppError::TooManyRequests(
+                    "短时间内新建同步密钥过于频繁，请稍后再试".to_string(),
+                ));
+            }
+            times.push(now);
+            return Ok(());
+        }
+
+        if guard.registrations.len() >= MAX_RATE_LIMIT_TRACKED_KEYS {
+            guard.registrations.retain(|_, v| {
+                v.retain(|&ts| ts >= cutoff);
+                !v.is_empty()
+            });
+            if guard.registrations.len() >= MAX_RATE_LIMIT_TRACKED_KEYS {
+                if let Some(oldest_key) = guard
+                    .registrations
+                    .iter()
+                    .min_by_key(|(_, ts)| ts.last().copied().unwrap_or(0))
+                    .map(|(k, _)| k.clone())
+                {
+                    guard.registrations.remove(&oldest_key);
+                }
+            }
+        }
+        guard
+            .registrations
+            .insert(client_key.to_string(), vec![now]);
+        Ok(())
+    }
+
     pub fn record_failure(&self, client_key: &str) {
         let now = now_millis();
         let cutoff = now - 60_000;
+        let reg_cutoff = now - 3_600_000;
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         if now - guard.last_sweep_ms >= 5_000 || guard.failures.len() >= MAX_RATE_LIMIT_TRACKED_KEYS {
             guard.failures.retain(|_, v| {
                 v.retain(|&ts| ts >= cutoff);
+                !v.is_empty()
+            });
+            guard.registrations.retain(|_, v| {
+                v.retain(|&ts| ts >= reg_cutoff);
                 !v.is_empty()
             });
             guard.last_sweep_ms = now;

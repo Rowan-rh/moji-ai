@@ -219,7 +219,7 @@ object BackupAndCsvTransferEngine {
         appearanceSettingsJson: String = AppearanceConfigManager.exportConfigJson()
     ): String {
         val snapshot = MoJiFullBackupSnapshot(
-            schemaVersion = 1,
+            schemaVersion = 3,
             exportedAtMillis = System.currentTimeMillis(),
             ledgers = ledgers.ifEmpty { listOf("默认账本") },
             monthlyBudgetCents = monthlyBudgetCents,

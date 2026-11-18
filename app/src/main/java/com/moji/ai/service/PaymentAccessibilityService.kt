@@ -330,14 +330,19 @@ open class PaymentAccessibilityService : AccessibilityService() {
                 ?.takeIf { it !in systemOverlayPackages }
                 ?: activePackage.ifBlank { "com.tencent.mm" }
 
+            var manualBlockedReason: String? = null
             val capturedByNodes = inspectCurrentScreen(
                 pkg = pkg,
                 eventSource = null,
                 allowAutoOcrFallback = false,
-                forceManual = true
+                forceManual = true,
+                onManualBlocked = { reason -> manualBlockedReason = reason }
             )
+            val blockedReason = manualBlockedReason
             if (capturedByNodes) {
                 onResultMessage?.invoke("已通过页面节点识别账单并保存截图")
+            } else if (blockedReason != null) {
+                onResultMessage?.invoke(blockedReason)
             } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 captureScreenshotAndRunOcr(
                     pkg = pkg,
@@ -431,7 +436,8 @@ open class PaymentAccessibilityService : AccessibilityService() {
         pkg: String,
         eventSource: AccessibilityNodeInfo?,
         allowAutoOcrFallback: Boolean,
-        forceManual: Boolean = false
+        forceManual: Boolean = false,
+        onManualBlocked: ((String) -> Unit)? = null
     ): Boolean {
         val snippets = collectWindowSnippets(pkg, eventSource)
         if (snippets.isEmpty()) {
@@ -443,7 +449,13 @@ open class PaymentAccessibilityService : AccessibilityService() {
 
         val rawJoinedText = snippets.joinToString(" | ")
         val fullPageText = stripEcommerceRecommendationFooter(rawJoinedText)
-        if (!forceManual && !isValidSingleBillOrCompletionPage(pkg, fullPageText)) {
+        if (forceManual) {
+            val blockReason = getManualCaptureBlockReason(fullPageText)
+            if (blockReason != null) {
+                onManualBlocked?.invoke(blockReason)
+                return false
+            }
+        } else if (!isValidSingleBillOrCompletionPage(pkg, fullPageText)) {
             if (isCurrentlyOnBillDetailPage && snippets.size >= 3) {
                 isCurrentlyOnBillDetailPage = false
                 lastDispatchedSignature = ""
@@ -470,6 +482,39 @@ open class PaymentAccessibilityService : AccessibilityService() {
             captureSource = "AI_ACCESSIBILITY",
             forceManual = forceManual
         )
+    }
+
+    /**
+     * 手动识屏安全护栏：即便用户主动点击「默记识屏」磁贴，也严禁将待付款收银台、密码框、多笔订单列表或首页流误入账
+     */
+    private fun getManualCaptureBlockReason(rawText: String): String? {
+        val text = stripEcommerceRecommendationFooter(rawText)
+            .replace(promoNoiseRegex, " ")
+            .replace("加入购物车", " ")
+            .replace("加购物车", " ")
+
+        if (cashierOrPendingBlacklist.any { text.contains(it) }) {
+            return "当前为待付款收银台或密码页，请完成支付后再识屏"
+        }
+        val isEcommerceOrderListTabs = text.contains("待付款") &&
+            text.contains("待收货") &&
+            (text.contains("待发货") || text.contains("待评价") || text.contains("待分享") || text.contains("退款/售后"))
+        if (isEcommerceOrderListTabs) {
+            return "当前为多笔订单列表页，请点进单笔订单详情后再识屏"
+        }
+        if (text.contains("按住 说话") || text.contains("切换到按住说话") ||
+            text.contains("可按住 转文字") || text.contains("切换到发消息")
+        ) {
+            return "当前为消息对话流，请点开单笔账单详情后再识屏"
+        }
+        val isSingleDetailHeader = text.contains("账单详情") ||
+            text.contains("交易详情") ||
+            text.contains("订单详情")
+        val isAlipayHomeHeader = text.contains("扫一扫") && text.contains("收付款")
+        if (isAlipayHomeHeader || (!isSingleDetailHeader && multiBillOrFeedBlacklist.any { text.contains(it) })) {
+            return "当前为账单汇总或应用首页，请进入单笔账单详情后再识屏"
+        }
+        return null
     }
 
     private fun dispatchCapturedText(
@@ -750,13 +795,32 @@ open class PaymentAccessibilityService : AccessibilityService() {
                                         onResultMessage?.invoke("未识别到屏幕文字")
                                         return@addOnSuccessListener
                                     }
-                                    if (!isManualTrigger && !isValidSingleBillOrCompletionPage(pkg, orderedText)) {
+                                    if (isManualTrigger) {
+                                        val blockReason = getManualCaptureBlockReason(orderedText)
+                                        if (blockReason != null) {
+                                            BillScreenshotStorage.deleteIfExists(savedScreenshot?.absolutePath)
+                                            onResultMessage?.invoke(blockReason)
+                                            return@addOnSuccessListener
+                                        }
+                                    } else if (!isValidSingleBillOrCompletionPage(pkg, orderedText)) {
                                         BillScreenshotStorage.deleteIfExists(savedScreenshot?.absolutePath)
                                         return@addOnSuccessListener
                                     }
                                     if (!containsLikelyBillAmount(orderedText)) {
                                         BillScreenshotStorage.deleteIfExists(savedScreenshot?.absolutePath)
                                         onResultMessage?.invoke("屏幕中未检测到有效账单金额")
+                                        return@addOnSuccessListener
+                                    }
+                                    if (!AiAccountingEngine.hasExplicitOccurredTime(orderedText)) {
+                                        BillScreenshotStorage.deleteIfExists(savedScreenshot?.absolutePath)
+                                        if (isManualTrigger && onResultMessage == null) {
+                                            Toast.makeText(
+                                                this@PaymentAccessibilityService,
+                                                "默记：当前页面未包含交易时间，请打开账单详情页再试",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                        onResultMessage?.invoke("当前页面未包含交易时间，请打开账单详情页再试")
                                         return@addOnSuccessListener
                                     }
                                     dispatchCapturedText(
