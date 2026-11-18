@@ -93,7 +93,7 @@ class MoJiApp : Application() {
             if (sp === uiPrefsRef && key != null && key !in SYNCED_UI_PREF_KEYS) {
                 return@OnSharedPreferenceChangeListener
             }
-            if (key == "recent_captured_windows_v1") {
+            if (key == CaptureAppWhitelistManager.KEY_RECENT_WINDOWS_JSON) {
                 return@OnSharedPreferenceChangeListener
             }
             MoJiCloudSyncClient.markPendingAutoPush(this, notifySignal = true)
@@ -176,7 +176,7 @@ class MoJiApp : Application() {
             "moji_tag_catalog_prefs",
             "moji_currency_rate_prefs",
             "moji_category_catalog_prefs",
-            "moji_capture_app_whitelist_prefs"
+            CaptureAppWhitelistManager.PREFS_NAME
         )
         syncedPrefsRefs.clear()
         for (name in prefNames) {

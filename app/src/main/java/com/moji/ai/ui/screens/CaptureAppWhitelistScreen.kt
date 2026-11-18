@@ -777,7 +777,8 @@ private fun SmallTagBadge(
             fontSize = 10.sp,
             fontWeight = FontWeight.SemiBold,
             color = textColor,
-            maxLines = 1
+            maxLines = 1,
+            softWrap = false
         )
     }
 }
@@ -828,7 +829,8 @@ private fun ChannelTogglePill(
             fontSize = 12.sp,
             fontWeight = if (enabled) FontWeight.Bold else FontWeight.Medium,
             color = contentColor,
-            maxLines = 1
+            maxLines = 1,
+            softWrap = false
         )
     }
 }
@@ -1054,10 +1056,13 @@ private fun WindowSmartGuardSectionCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            text = "窗口智能防误触 & 页面屏蔽",
+                            text = "窗口智能防误触",
                             fontSize = 14.sp,
                             fontWeight = FontWeight.Bold,
-                            color = ICostTextPrimary
+                            color = ICostTextPrimary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Surface(
@@ -1069,6 +1074,8 @@ private fun WindowSmartGuardSectionCard(
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = ICostGreenIncome,
+                                maxLines = 1,
+                                softWrap = false,
                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
                         }
@@ -1102,6 +1109,8 @@ private fun WindowSmartGuardSectionCard(
                         fontSize = 11.sp,
                         fontWeight = FontWeight.SemiBold,
                         color = ICostBlueAccent,
+                        maxLines = 1,
+                        softWrap = false,
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                     )
                 }
@@ -1135,17 +1144,23 @@ private fun WindowSmartGuardSectionCard(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "最近自动识屏页面（遇误触可一键屏蔽此类结构）",
+                            text = "最近自动识屏页面（误触可一键屏蔽结构）",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = ICostTextSecondary
+                            color = ICostTextSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
                         )
                         if (recentWindows.isNotEmpty()) {
+                            Spacer(modifier = Modifier.width(8.dp))
                             Text(
                                 text = "清空记录",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Medium,
                                 color = ICostTextMuted,
+                                maxLines = 1,
+                                softWrap = false,
                                 modifier = Modifier.clickable { onClearRecentWindows() }
                             )
                         }
@@ -1271,6 +1286,8 @@ private fun WindowSignatureRowItem(
                     fontSize = 11.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = btnFg,
+                    maxLines = 1,
+                    softWrap = false,
                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
                 )
             }
