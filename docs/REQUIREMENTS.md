@@ -18,7 +18,7 @@
 
 ### 1. 自动触发与无感交互（纯后台静默模式）
 - **三模无感采集（免 Root）**：
-  - **通知栏监听 (`NotificationListenerService`)**：实时捕获微信支付、支付宝、云闪付、银行 App 动账通知及 955xx 银行扣款短信。
+  - **通知栏监听 (`NotificationListenerService`) 与应用粒度双通道识账白名单 (`CaptureAppWhitelistManager` & `CaptureAppWhitelistScreen`)**：实时捕获微信支付、支付宝、云闪付、银行 App 动账通知及 955xx 银行扣款短信；提供「设置 › 智能记账 › 监听应用白名单」全屏管理页，将「通知栏监听」与「无障碍自动识屏」按应用包名独立解耦控制（第一梯队核心支付/系统短信/主流银行默认双开，第二梯队京东/淘宝/拼多多/美团等电商外卖默认开通知、关无障碍自动扫屏防误触，第三梯队抖音/小红书/唯品会默认全关，并支持新增自定义 Android 包名、一键恢复默认及 `.mojibackup` / 默记云快照同步；控制中心快捷磁贴手动识屏不受自动白名单限制）。
   - **微信/支付宝及拼多多/抖音/京东等电商无障碍兼容识别 (`SelectToSpeakService` + `PaymentAccessibilityService`)**：通过 `com.google.android.accessibility.selecttospeak.SelectToSpeakService` 兼容入口与 `FLAG_REQUEST_ENHANCED_WEB_ACCESSIBILITY` 突破微信支付与账单详情容器节点限制；仅遍历匹配当前目标应用包名的活跃窗口（深度 50、节点上限 500），配合 `150/450/1000/1800ms` 四阶延迟探测与单笔详情锚点校验，全面支持 **微信支付、支付宝、云闪付、拼多多 (`com.xunmeng.pinduoduo`)、抖音/抖音极速版 (`com.ss.android.ugc.aweme` / `.lite`)、京东 (`com.jingdong.app.mall`)、淘宝 (`com.taobao.taobao`)、天猫 (`com.tmall.wireless`)、美团/美团外卖 (`com.sankuai.meituan`)、饿了么 (`me.ele`)、唯品会 (`com.achievo.vipshop`)、小红书 (`com.xingin.xhs`)** 的「支付成功 / 拼单成功 / 账单详情 / 订单详情」页面结构化提取，并自动过滤账单列表页、订单列表页、购物车结算页与微信支付服务号历史卡片流。
   - **iCost 模板「原价 · 优惠了多少 · 实扣多少」解析与全链路展示 (`AiAccountingEngine.extractPriceBreakdown`)**：自动缝合电商详情页跨节点拆分的整数与小数金额（如 `¥ | 29 | .90`），优先提取 `实付款 / 实付金额 / 实扣 / 应付总额` 作为入账实扣金额 (`amountCents`)，同时提取 `商品总价 / 原价` 与 `已优惠 / 共减 / 百亿补贴 / 店铺优惠 / 平台优惠 / 多多支付立减 / 抖音支付优惠 / 京豆 / 红包` 作为优惠金额 (`discountCents`)，按 **`原价¥X.XX · 优惠¥Y.YY · 实扣¥Z.ZZ | 商品名称 · 支付方式`** 模板格式生成备注，并在流体云胶囊、首页账单列表标签与账单详情页同步展示。
   - **Android 11+ 免 Root 截屏端侧 OCR 兜底与快捷设置磁贴 (`OcrTileService`)**：当目标支付/账单窗口节点缺失金额或用户下拉控制中心点击「默记识屏记账」磁贴时，调用 `AccessibilityService.takeScreenshot` 与内置离线中文 OCR（按 Y 轴行聚类与 X 轴排序还原左右分栏键值）完成识账。

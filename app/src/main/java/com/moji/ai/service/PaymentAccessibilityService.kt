@@ -18,6 +18,7 @@ import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 import com.moji.ai.MoJiApp
 import com.moji.ai.ai.AiAccountingEngine
+import com.moji.ai.ai.CaptureAppWhitelistManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -68,28 +69,6 @@ open class PaymentAccessibilityService : AccessibilityService() {
             """(?:实付款|实付金额|合计实付|实扣|实付|应付总额|应付金额|应付款|需付款|合计|到手价|到手|支出|收入|付款|收款)\s*(?:[:：,，\s]|\|)*\s*(?:¥|￥)?\s*\d{1,7}(?:\.\d{1,2})?\s*[元)）]?|[-+−]?\d{1,7}\.\d{1,2}"""
         )
     }
-
-    private val targetFinancialPackages = setOf(
-        "com.tencent.mm",                   // 微信 / 微信支付
-        "com.eg.android.AlipayGphone",      // 支付宝
-        "com.unionpay",                     // 云闪付
-        "com.xunmeng.pinduoduo",            // 拼多多 / 多多支付
-        "com.jingdong.app.mall",            // 京东 / 京东支付 / 京东白条
-        "com.ss.android.ugc.aweme",         // 抖音 / 抖音支付 / 抖音商城
-        "com.ss.android.ugc.aweme.lite",    // 抖音极速版 / 抖音支付
-        "com.ss.android.ugc.live",          // 抖音火山版
-        "com.taobao.taobao",                // 淘宝
-        "com.tmall.wireless",               // 天猫
-        "com.sankuai.meituan",              // 美团 / 美团月付
-        "com.sankuai.meituan.takeoutnew",   // 美团外卖
-        "me.ele",                           // 饿了么
-        "com.achievo.vipshop",              // 唯品会
-        "com.xingin.xhs",                   // 小红书商城
-        "cmb.pb",                           // 招商银行
-        "com.chinamworld.main",             // 建设银行
-        "com.icbc",                         // 工商银行
-        "com.android.mms"                   // 短信
-    )
 
     private val systemOverlayPackages = setOf(
         "com.android.systemui",
@@ -228,8 +207,8 @@ open class PaymentAccessibilityService : AccessibilityService() {
             }
             if (pkg.isBlank() || pkg in systemOverlayPackages) return
 
-            if (pkg !in targetFinancialPackages) {
-                // 确认前台确实切出了目标金融应用（如回到桌面 Launcher 或切到其他 App）
+            if (!CaptureAppWhitelistManager.isAccessibilityAllowed(pkg, this)) {
+                // 确认前台确实切出了白名单应用（如回到桌面 Launcher 或切到未启用自动识屏的 App）
                 if (!rawCls.startsWith("android.widget.") && !rawCls.startsWith("android.view.")) {
                     activePackage = pkg
                     lastWechatActiveMillis = 0L
@@ -270,25 +249,50 @@ open class PaymentAccessibilityService : AccessibilityService() {
         }
 
         // 对于 TYPE_WINDOW_CONTENT_CHANGED / TYPE_WINDOWS_CHANGED：
-        // 1. 绝不用非目标包名（如桌面手势条或悬浮球）覆盖 activePackage 或清空微信/支付宝探测队列；
-        // 2. 若用户从多任务切换回已打开的支付宝/微信（此时可能仅触发 TYPE_WINDOWS_CHANGED 且 rawPkg 为空），主动解析当前焦点应用窗口包名！
-        val pkg = when {
-            rawPkg in targetFinancialPackages -> {
-                activePackage = rawPkg
-                rawPkg
-            }
-            activePackage in targetFinancialPackages -> activePackage
-            else -> {
-                val focused = if (eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED || rawPkg.isBlank()) {
-                    resolveFocusedApplicationPackage()
-                } else {
-                    null
-                }
-                if (focused != null && focused in targetFinancialPackages) {
+        // 1. 多窗口切换（TYPE_WINDOWS_CHANGED）时主动解析当前焦点应用：若已切到非白名单应用（如手势横滑切到抖音/桌面），立即停止旧探测；
+        // 2. 内容变更（TYPE_WINDOW_CONTENT_CHANGED）若携带明确的非白名单包名，直接忽略；仅当 rawPkg 为空（如 WebView 虚拟子节点）时才继承白名单内的 activePackage。
+        val pkg = if (eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+            val focused = resolveFocusedApplicationPackage()?.takeIf { it !in systemOverlayPackages }
+            when {
+                focused != null && CaptureAppWhitelistManager.isAccessibilityAllowed(focused, this) -> {
                     activePackage = focused
                     focused
-                } else {
+                }
+                focused != null -> {
+                    activePackage = focused
+                    lastWechatActiveMillis = 0L
+                    isCurrentlyOnBillDetailPage = false
+                    lastDispatchedSignature = ""
+                    clearScheduledProbes()
                     return
+                }
+                rawPkg.isNotBlank() && CaptureAppWhitelistManager.isAccessibilityAllowed(rawPkg, this) -> {
+                    activePackage = rawPkg
+                    rawPkg
+                }
+                rawPkg.isBlank() && CaptureAppWhitelistManager.isAccessibilityAllowed(activePackage, this) -> {
+                    activePackage
+                }
+                else -> return
+            }
+        } else {
+            when {
+                rawPkg.isNotBlank() -> {
+                    if (!CaptureAppWhitelistManager.isAccessibilityAllowed(rawPkg, this)) {
+                        return
+                    }
+                    activePackage = rawPkg
+                    rawPkg
+                }
+                CaptureAppWhitelistManager.isAccessibilityAllowed(activePackage, this) -> activePackage
+                else -> {
+                    val focused = resolveFocusedApplicationPackage()?.takeIf { it !in systemOverlayPackages }
+                    if (focused != null && CaptureAppWhitelistManager.isAccessibilityAllowed(focused, this)) {
+                        activePackage = focused
+                        focused
+                    } else {
+                        return
+                    }
                 }
             }
         }
@@ -411,6 +415,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
             val isLastProbe = idx == delays.lastIndex
             val task = Runnable {
                 if (RecognitionBanner.isAnimatingNow()) return@Runnable
+                if (!CaptureAppWhitelistManager.isAccessibilityAllowed(pkg, this@PaymentAccessibilityService)) return@Runnable
                 inspectCurrentScreen(
                     pkg = pkg,
                     eventSource = null,
@@ -664,7 +669,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
 
     private fun shouldAttemptAutoOcr(pkg: String, partialText: String): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
-        if (pkg !in targetFinancialPackages) return false
+        if (!CaptureAppWhitelistManager.isAccessibilityAllowed(pkg, this)) return false
         val now = System.currentTimeMillis()
         if (now - lastAutoOcrMillis < OCR_COOLDOWN_MS) return false
 
@@ -707,6 +712,9 @@ open class PaymentAccessibilityService : AccessibilityService() {
         RecognitionBanner.dismissImmediate()
 
         mainHandler.postDelayed({
+            if (!isManualTrigger && !CaptureAppWhitelistManager.isAccessibilityAllowed(pkg, this@PaymentAccessibilityService)) {
+                return@postDelayed
+            }
             try {
                 takeScreenshot(
                     Display.DEFAULT_DISPLAY,

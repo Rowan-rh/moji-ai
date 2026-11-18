@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import com.moji.ai.ai.AiAccountingEngine
 import com.moji.ai.ai.AiConfigManager
+import com.moji.ai.ai.CaptureAppWhitelistManager
 import com.moji.ai.ai.MerchantMemoryManager
 import com.moji.ai.ai.SmartRuleEngine
 import com.moji.ai.data.backup.MoJiCloudSyncClient
@@ -74,6 +75,7 @@ class MoJiApp : Application() {
         AppLockManager.init(this)
         ReminderConfigManager.init(this)
         AppearanceConfigManager.init(this)
+        CaptureAppWhitelistManager.init(this)
         BillScreenshotStorage.init(this)
         MoJiCloudSyncClient.init(this)
         database = AppDatabase.getInstance(this)

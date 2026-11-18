@@ -12,15 +12,36 @@
         <package android:name="com.tencent.mm" />
         <package android:name="com.eg.android.AlipayGphone" />
         <package android:name="com.unionpay" />
+        <package android:name="com.android.mms" />
+        <package android:name="com.google.android.apps.messaging" />
+        <package android:name="com.oplus.mms" />
+        <package android:name="com.coloros.mms" />
+        <package android:name="com.huawei.message" />
+        <package android:name="com.hihonor.mms" />
+        <package android:name="com.samsung.android.messaging" />
+        <package android:name="cmb.pb" />
+        <package android:name="com.cmblife" />
+        <package android:name="com.icbc" />
+        <package android:name="com.chinamworld.main" />
+        <package android:name="com.abchina.ebank" />
+        <package android:name="com.chinamworld.bocmbci" />
+        <package android:name="com.bankcomm.Bankcomm" />
+        <package android:name="com.yitong.mbank.psbc" />
+        <package android:name="com.pingan.paces.ccms" />
+        <package android:name="com.citiccard.mobilebank" />
+        <package android:name="com.spdbccc.app" />
         <package android:name="com.xunmeng.pinduoduo" />
         <package android:name="com.jingdong.app.mall" />
         <package android:name="com.ss.android.ugc.aweme" />
         <package android:name="com.ss.android.ugc.aweme.lite" />
+        <package android:name="com.ss.android.ugc.live" />
         <package android:name="com.taobao.taobao" />
         <package android:name="com.tmall.wireless" />
         <package android:name="com.sankuai.meituan" />
         <package android:name="com.sankuai.meituan.takeoutnew" />
         <package android:name="me.ele" />
+        <package android:name="com.xingin.xhs" />
+        <package android:name="com.achievo.vipshop" />
     </queries>
 
     <application

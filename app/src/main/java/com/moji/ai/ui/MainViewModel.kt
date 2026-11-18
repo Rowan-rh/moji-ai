@@ -8,6 +8,9 @@ import com.moji.ai.MoJiApp
 import com.moji.ai.ai.AgentBillTriageEngine
 import com.moji.ai.ai.AgentTriageReport
 import com.moji.ai.ai.AiConfig
+import com.moji.ai.ai.CaptureAppGroup
+import com.moji.ai.ai.CaptureAppWhitelistEntry
+import com.moji.ai.ai.CaptureAppWhitelistManager
 import com.moji.ai.ai.MerchantMemoryEntry
 import com.moji.ai.ai.ProposedCategoryItem
 import com.moji.ai.ai.ProposedMemoryItem
@@ -595,6 +598,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val reminderSettingsConfig: StateFlow<ReminderSettingsConfig> = ReminderConfigManager.configFlow
 
     val appearanceSettingsConfig: StateFlow<AppearanceSettingsConfig> = AppearanceConfigManager.configFlow
+
+    val captureWhitelistEntries: StateFlow<List<CaptureAppWhitelistEntry>> = CaptureAppWhitelistManager.entriesFlow
 
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = app.captureCoordinator.observabilityLogs
 
@@ -1199,7 +1204,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             installmentPlans = _installmentPlans.value,
             customCurrencyRates = CurrencyRateManager.customRates,
             reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
-            appearanceSettingsJson = AppearanceConfigManager.exportConfigJson()
+            appearanceSettingsJson = AppearanceConfigManager.exportConfigJson(),
+            captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson()
         )
     }
 
@@ -1220,7 +1226,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             installmentPlans = _installmentPlans.value,
             customCurrencyRates = CurrencyRateManager.customRates,
             reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
-            appearanceSettingsJson = AppearanceConfigManager.exportConfigJson()
+            appearanceSettingsJson = AppearanceConfigManager.exportConfigJson(),
+            captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson()
         )
     }
 
@@ -1382,6 +1389,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (snapshot.appearanceSettingsJson.isNotBlank()) {
                 AppearanceConfigManager.restoreFromBackupJson(snapshot.appearanceSettingsJson)
+            }
+            if (snapshot.captureWhitelistJson.isNotBlank()) {
+                CaptureAppWhitelistManager.restoreFromBackupJson(snapshot.captureWhitelistJson)
             }
             txCount
         } finally {
@@ -2240,6 +2250,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun resetAppearanceDefaults() {
         AppearanceConfigManager.resetToDefaults()
         postMessage("已恢复默认外观显示设置")
+    }
+
+    fun setCaptureAppChannelEnabled(
+        packageName: String,
+        enableNotification: Boolean? = null,
+        enableAccessibility: Boolean? = null
+    ) {
+        CaptureAppWhitelistManager.setChannelEnabled(
+            packageName = packageName,
+            enableNotification = enableNotification,
+            enableAccessibility = enableAccessibility
+        )
+    }
+
+    fun setCaptureGroupChannelEnabled(
+        group: CaptureAppGroup,
+        enableNotification: Boolean? = null,
+        enableAccessibility: Boolean? = null
+    ) {
+        CaptureAppWhitelistManager.setGroupChannelEnabled(
+            group = group,
+            enableNotification = enableNotification,
+            enableAccessibility = enableAccessibility
+        )
+    }
+
+    fun addCustomCaptureApp(
+        rawPackageName: String,
+        rawAppName: String,
+        enableNotification: Boolean,
+        enableAccessibility: Boolean,
+        onDone: (Result<CaptureAppWhitelistEntry>) -> Unit = {}
+    ) {
+        val result = CaptureAppWhitelistManager.addCustomApp(
+            rawPackageName = rawPackageName,
+            rawAppName = rawAppName,
+            enableNotification = enableNotification,
+            enableAccessibility = enableAccessibility
+        )
+        result.onSuccess { entry ->
+            postMessage("已添加「${entry.appName}」到识账白名单")
+        }
+        onDone(result)
+    }
+
+    fun removeCustomCaptureApp(packageName: String) {
+        val target = CaptureAppWhitelistManager.currentEntries.firstOrNull { it.isCustom && it.packageName == packageName }
+        if (CaptureAppWhitelistManager.removeCustomApp(packageName) && target != null) {
+            postMessage("已移除自定义应用「${target.appName}」")
+        }
+    }
+
+    fun resetCaptureWhitelistDefaults() {
+        CaptureAppWhitelistManager.resetToDefaults()
+        postMessage("已恢复默认识账应用白名单")
     }
 
     fun openAgentTriageSheet() {

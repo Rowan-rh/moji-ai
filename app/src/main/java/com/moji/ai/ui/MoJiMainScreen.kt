@@ -130,6 +130,7 @@ import androidx.compose.ui.unit.sp
 import com.moji.ai.BuildConfig
 import com.moji.ai.ai.AiConfig
 import com.moji.ai.ai.AiProviderType
+import com.moji.ai.ai.CaptureAppWhitelistManager
 import com.moji.ai.ai.MerchantMemoryEntry
 import com.moji.ai.ai.SmartConditionRule
 import com.moji.ai.data.backup.BackupAndCsvTransferEngine
@@ -159,6 +160,7 @@ import com.moji.ai.ui.components.MonthlyCalendarSheet
 import com.moji.ai.ui.components.TransactionDetailSheet
 import com.moji.ai.ui.screens.AppLockUnlockOverlay
 import com.moji.ai.ui.screens.AppearanceManagementScreen
+import com.moji.ai.ui.screens.CaptureAppWhitelistScreen
 import com.moji.ai.ui.screens.CategoryManagementScreen
 import com.moji.ai.ui.screens.CurrencyManagementScreen
 import com.moji.ai.ui.screens.ICostAssetsScreen
@@ -236,6 +238,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val isAppSessionLocked by viewModel.isAppSessionLocked.collectAsState()
     val reminderSettingsConfig by viewModel.reminderSettingsConfig.collectAsState()
     val appearanceSettingsConfig by viewModel.appearanceSettingsConfig.collectAsState()
+    val captureWhitelistEntries by viewModel.captureWhitelistEntries.collectAsState()
     val pendingOpenBookkeepingSheet by viewModel.pendingOpenBookkeepingSheet.collectAsState()
     val triageReport by viewModel.triageReport.collectAsState()
     val isTriaging by viewModel.isTriaging.collectAsState()
@@ -288,6 +291,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var showPasswordProtectionPage by rememberSaveable { mutableStateOf(false) }
     var showReminderManagementPage by rememberSaveable { mutableStateOf(false) }
     var showAppearanceManagementPage by rememberSaveable { mutableStateOf(false) }
+    var showCaptureAppWhitelistPage by rememberSaveable { mutableStateOf(false) }
     var isAssetSubpageOpen by rememberSaveable { mutableStateOf(false) }
     val settingsListState = rememberLazyListState()
     val appearanceListState = rememberLazyListState()
@@ -303,6 +307,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         showPasswordProtectionPage ||
         showReminderManagementPage ||
         showAppearanceManagementPage ||
+        showCaptureAppWhitelistPage ||
         isAssetSubpageOpen
 
     LaunchedEffect(pendingTemplateDraftForCalc) {
@@ -354,6 +359,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             showPasswordProtectionPage = false
             showReminderManagementPage = false
             showAppearanceManagementPage = false
+            showCaptureAppWhitelistPage = false
             calendarMonthTxs = null
             showCalculatorSheet = false
             editingTx = null
@@ -381,6 +387,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         showPasswordProtectionPage = false
         showReminderManagementPage = false
         showAppearanceManagementPage = false
+        showCaptureAppWhitelistPage = false
         calendarMonthTxs = null
         inspectingTx = null
         editingTx = null
@@ -948,6 +955,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onOpenAiModelConfig = { showAiSettingsSheet = true },
                 onOpenAiSandbox = { showAiSandboxSheet = true },
                 onOpenKeepAliveGuide = { showKeepAliveGuideSheet = true },
+                captureWhitelistSummary = CaptureAppWhitelistManager.settingsTrailingSummary(captureWhitelistEntries),
+                onOpenCaptureWhitelist = { showCaptureAppWhitelistPage = true },
                 smartRules = smartRules,
                 onToggleSmartRule = { id, enabled -> viewModel.toggleSmartRule(id, enabled) },
                 onAddSmartRule = { rule -> viewModel.upsertSmartRule(rule) },
@@ -959,6 +968,36 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onClearLogs = { viewModel.clearObservabilityLogs() },
                 onOpenAgentTriage = { viewModel.openAgentTriageSheet() },
                 onBack = { showSmartBookkeepingPage = false }
+            )
+        }
+
+        // 全屏「监听应用白名单」管理页面（位于「智能记账」之上，支持三级侧滑推入与返回）
+        AnimatedVisibility(
+            visible = showCaptureAppWhitelistPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            CaptureAppWhitelistScreen(
+                entries = captureWhitelistEntries,
+                onToggleChannel = { pkg, notif, access ->
+                    viewModel.setCaptureAppChannelEnabled(pkg, notif, access)
+                },
+                onAddCustomApp = { pkg, name, notif, access, onDone ->
+                    viewModel.addCustomCaptureApp(pkg, name, notif, access, onDone)
+                },
+                onRemoveCustomApp = { pkg ->
+                    viewModel.removeCustomCaptureApp(pkg)
+                },
+                onResetDefaults = {
+                    viewModel.resetCaptureWhitelistDefaults()
+                },
+                onBack = { showCaptureAppWhitelistPage = false }
             )
         }
 
@@ -1800,6 +1839,8 @@ private fun ICostSmartBookkeepingFullScreen(
     onOpenAiModelConfig: () -> Unit,
     onOpenAiSandbox: () -> Unit,
     onOpenKeepAliveGuide: () -> Unit = {},
+    captureWhitelistSummary: String = "",
+    onOpenCaptureWhitelist: () -> Unit = {},
     smartRules: List<SmartConditionRule> = emptyList(),
     onToggleSmartRule: (Long, Boolean) -> Unit = { _, _ -> },
     onAddSmartRule: (SmartConditionRule) -> Unit = {},
@@ -1922,6 +1963,12 @@ private fun ICostSmartBookkeepingFullScreen(
                                     context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                                 }
                             }
+                        )
+                        HorizontalDivider(color = ICostDivider)
+                        SmartArrowRow(
+                            title = "监听应用白名单",
+                            trailing = captureWhitelistSummary,
+                            onClick = onOpenCaptureWhitelist
                         )
                         HorizontalDivider(color = ICostDivider)
                         SmartArrowRow(

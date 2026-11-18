@@ -4,6 +4,7 @@ import android.app.Notification
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import com.moji.ai.MoJiApp
+import com.moji.ai.ai.CaptureAppWhitelistManager
 
 /**
  * 通知栏监听服务：
@@ -27,6 +28,7 @@ class PaymentNotificationListenerService : NotificationListenerService() {
 
         val app = applicationContext as? MoJiApp ?: return
         if (!app.aiConfigManager.getConfig().enableNotificationCapture) return
+        if (!CaptureAppWhitelistManager.isNotificationAllowed(pkg, this)) return
 
         val extras = sbn.notification?.extras ?: return
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()

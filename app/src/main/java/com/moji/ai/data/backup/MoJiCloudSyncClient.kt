@@ -5,6 +5,7 @@ import android.os.Build
 import android.provider.Settings
 import com.moji.ai.BuildConfig
 import com.moji.ai.MoJiApp
+import com.moji.ai.ai.CaptureAppWhitelistManager
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
@@ -385,7 +386,8 @@ object MoJiCloudSyncClient {
                 installmentPlans = installments,
                 customCurrencyRates = CurrencyRateManager.customRates,
                 reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
-                appearanceSettingsJson = AppearanceConfigManager.exportConfigJson()
+                appearanceSettingsJson = AppearanceConfigManager.exportConfigJson(),
+                captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson()
             )
             snapshotJson to enrichedTxs
         }
