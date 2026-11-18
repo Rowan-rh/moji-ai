@@ -67,7 +67,11 @@ import androidx.compose.ui.unit.sp
 import com.moji.ai.ai.CaptureAppGroup
 import com.moji.ai.ai.CaptureAppWhitelistEntry
 import com.moji.ai.ai.CaptureAppWhitelistManager
+import com.moji.ai.ai.WindowPageSignature
 import com.moji.ai.data.model.AppearanceConfigManager
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import com.moji.ai.ui.components.ICostConfirmDialog
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAssetImage
@@ -93,6 +97,8 @@ import com.moji.ai.ui.theme.iCostUnifiedSwitchColors
 @Composable
 fun CaptureAppWhitelistScreen(
     entries: List<CaptureAppWhitelistEntry>,
+    blockedWindows: List<WindowPageSignature> = emptyList(),
+    recentWindows: List<WindowPageSignature> = emptyList(),
     onToggleChannel: (packageName: String, enableNotification: Boolean?, enableAccessibility: Boolean?) -> Unit,
     onAddCustomApp: (
         rawPackageName: String,
@@ -102,6 +108,9 @@ fun CaptureAppWhitelistScreen(
         onDone: (Result<CaptureAppWhitelistEntry>) -> Unit
     ) -> Unit,
     onRemoveCustomApp: (packageName: String) -> Unit,
+    onBlockWindow: (WindowPageSignature) -> Unit = {},
+    onUnblockWindow: (signatureKey: String) -> Unit = {},
+    onClearRecentWindows: () -> Unit = {},
     onResetDefaults: () -> Unit,
     onBack: () -> Unit
 ) {
@@ -247,6 +256,17 @@ fun CaptureAppWhitelistScreen(
                     notifCount = notifEnabledCount,
                     accessCount = accessEnabledCount,
                     onAddCustomClick = { showAddCustomSheet = true }
+                )
+            }
+
+            // 1.5 窗口级智能防误触门禁与页面结构指纹一键屏蔽卡片
+            item {
+                WindowSmartGuardSectionCard(
+                    blockedWindows = blockedWindows,
+                    recentWindows = recentWindows,
+                    onBlockWindow = onBlockWindow,
+                    onUnblockWindow = onUnblockWindow,
+                    onClearRecentWindows = onClearRecentWindows
                 )
             }
 
@@ -994,4 +1014,266 @@ private fun resolveInstalledLabelIfVisible(context: Context, pkg: String): Strin
         val appInfo = pm.getApplicationInfo(pkg, 0)
         pm.getApplicationLabel(appInfo)?.toString()?.trim().orEmpty()
     }.getOrDefault("")
+}
+
+@Composable
+private fun WindowSmartGuardSectionCard(
+    blockedWindows: List<WindowPageSignature>,
+    recentWindows: List<WindowPageSignature>,
+    onBlockWindow: (WindowPageSignature) -> Unit,
+    onUnblockWindow: (signatureKey: String) -> Unit,
+    onClearRecentWindows: () -> Unit
+) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val blockedKeys = remember(blockedWindows) {
+        blockedWindows.mapTo(HashSet(blockedWindows.size)) { it.signatureKey }
+    }
+
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = ICostCardWhite,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { expanded = !expanded }
+                    ),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "窗口智能防误触 & 页面屏蔽",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ICostTextPrimary
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = ICostGreenIncome.copy(alpha = 0.12f)
+                        ) {
+                            Text(
+                                text = "5 重门禁生效中",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = ICostGreenIncome,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(3.dp))
+                    Text(
+                        text = buildString {
+                            append("自动拦截聊天/朋友圈/相册/商品详情/带输入框与关闭态窗口")
+                            if (blockedWindows.isNotEmpty()) {
+                                append(" · 已手动屏蔽 ${blockedWindows.size} 类页面")
+                            }
+                        },
+                        fontSize = 11.sp,
+                        color = ICostTextSecondary,
+                        lineHeight = 15.sp
+                    )
+                }
+
+                Spacer(modifier = Modifier.width(8.dp))
+
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = ICostCellGray
+                ) {
+                    Text(
+                        text = if (expanded) "收起" else if (blockedWindows.isNotEmpty() || recentWindows.isNotEmpty()) {
+                            "管理 (${blockedWindows.size}/${recentWindows.size})"
+                        } else {
+                            "详情"
+                        },
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = ICostBlueAccent,
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
+                }
+            }
+
+            if (expanded || blockedWindows.isNotEmpty()) {
+                HorizontalDivider(color = ICostDivider, thickness = 0.5.dp)
+
+                if (blockedWindows.isNotEmpty()) {
+                    Text(
+                        text = "已屏蔽的页面结构（同骨架页面不再自动识账）",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = ICostTextSecondary
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        blockedWindows.forEach { sig ->
+                            WindowSignatureRowItem(
+                                sig = sig,
+                                isBlocked = true,
+                                onActionClick = { onUnblockWindow(sig.signatureKey) }
+                            )
+                        }
+                    }
+                }
+
+                if (expanded) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "最近自动识屏页面（遇误触可一键屏蔽此类结构）",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = ICostTextSecondary
+                        )
+                        if (recentWindows.isNotEmpty()) {
+                            Text(
+                                text = "清空记录",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = ICostTextMuted,
+                                modifier = Modifier.clickable { onClearRecentWindows() }
+                            )
+                        }
+                    }
+
+                    if (recentWindows.isEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = ICostCellGray.copy(alpha = 0.65f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "暂无自动识屏记录。后续无障碍自动捕获账单窗口后，将在此展示窗口类名与 5 层视图骨架哈希，支持一键精准拉黑误触页面而不影响同应用真实支付页。",
+                                fontSize = 11.sp,
+                                color = ICostTextSecondary,
+                                lineHeight = 16.sp,
+                                modifier = Modifier.padding(12.dp)
+                            )
+                        }
+                    } else {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            recentWindows.forEach { sig ->
+                                val alreadyBlocked = sig.signatureKey in blockedKeys
+                                WindowSignatureRowItem(
+                                    sig = sig,
+                                    isBlocked = alreadyBlocked,
+                                    isRecentRow = true,
+                                    onActionClick = {
+                                        if (alreadyBlocked) {
+                                            onUnblockWindow(sig.signatureKey)
+                                        } else {
+                                            onBlockWindow(sig)
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WindowSignatureRowItem(
+    sig: WindowPageSignature,
+    isBlocked: Boolean,
+    isRecentRow: Boolean = false,
+    onActionClick: () -> Unit
+) {
+    val timeText = remember(sig.createdAtMillis) {
+        if (sig.createdAtMillis > 0L) {
+            SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(Date(sig.createdAtMillis))
+        } else {
+            ""
+        }
+    }
+    val shortFp = sig.structureFingerprint.take(8)
+
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = ICostCellGray.copy(alpha = 0.7f),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "${sig.appName.ifBlank { sig.packageName }} · ${sig.shortActivityName}",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = ICostTextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = buildString {
+                        append("骨架 #").append(shortFp)
+                        if (timeText.isNotEmpty()) append(" · ").append(timeText)
+                        if (sig.sampleSummary.isNotBlank()) append(" · ").append(sig.sampleSummary)
+                    },
+                    fontSize = 11.sp,
+                    color = ICostTextSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(modifier = Modifier.width(10.dp))
+
+            val btnBg = when {
+                isBlocked && !isRecentRow -> ICostBlueAccent.copy(alpha = 0.12f)
+                isBlocked -> ICostTextMuted.copy(alpha = 0.14f)
+                else -> ICostCoralRed.copy(alpha = 0.12f)
+            }
+            val btnFg = when {
+                isBlocked && !isRecentRow -> ICostBlueAccent
+                isBlocked -> ICostTextSecondary
+                else -> ICostCoralRed
+            }
+            val btnLabel = when {
+                isBlocked && !isRecentRow -> "解除"
+                isBlocked -> "已屏蔽"
+                else -> "屏蔽此页面"
+            }
+
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = btnBg,
+                modifier = Modifier.iCostPressScale(pressedScale = 0.94f, onClick = onActionClick)
+            ) {
+                Text(
+                    text = btnLabel,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = btnFg,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                )
+            }
+        }
+    }
 }

@@ -239,6 +239,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val reminderSettingsConfig by viewModel.reminderSettingsConfig.collectAsState()
     val appearanceSettingsConfig by viewModel.appearanceSettingsConfig.collectAsState()
     val captureWhitelistEntries by viewModel.captureWhitelistEntries.collectAsState()
+    val blockedCaptureWindows by viewModel.blockedCaptureWindows.collectAsState()
+    val recentCapturedWindows by viewModel.recentCapturedWindows.collectAsState()
     val pendingOpenBookkeepingSheet by viewModel.pendingOpenBookkeepingSheet.collectAsState()
     val triageReport by viewModel.triageReport.collectAsState()
     val isTriaging by viewModel.isTriaging.collectAsState()
@@ -955,7 +957,10 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onOpenAiModelConfig = { showAiSettingsSheet = true },
                 onOpenAiSandbox = { showAiSandboxSheet = true },
                 onOpenKeepAliveGuide = { showKeepAliveGuideSheet = true },
-                captureWhitelistSummary = CaptureAppWhitelistManager.settingsTrailingSummary(captureWhitelistEntries),
+                captureWhitelistSummary = CaptureAppWhitelistManager.settingsTrailingSummary(
+                    entries = captureWhitelistEntries,
+                    blockedWindows = blockedCaptureWindows
+                ),
                 onOpenCaptureWhitelist = { showCaptureAppWhitelistPage = true },
                 smartRules = smartRules,
                 onToggleSmartRule = { id, enabled -> viewModel.toggleSmartRule(id, enabled) },
@@ -985,6 +990,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         ) {
             CaptureAppWhitelistScreen(
                 entries = captureWhitelistEntries,
+                blockedWindows = blockedCaptureWindows,
+                recentWindows = recentCapturedWindows,
                 onToggleChannel = { pkg, notif, access ->
                     viewModel.setCaptureAppChannelEnabled(pkg, notif, access)
                 },
@@ -993,6 +1000,15 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 },
                 onRemoveCustomApp = { pkg ->
                     viewModel.removeCustomCaptureApp(pkg)
+                },
+                onBlockWindow = { sig ->
+                    viewModel.blockCaptureWindowSignature(sig)
+                },
+                onUnblockWindow = { sigKey ->
+                    viewModel.unblockCaptureWindowSignature(sigKey)
+                },
+                onClearRecentWindows = {
+                    viewModel.clearRecentCapturedWindows()
                 },
                 onResetDefaults = {
                     viewModel.resetCaptureWhitelistDefaults()

@@ -11,6 +11,7 @@ import com.moji.ai.ai.AiConfig
 import com.moji.ai.ai.CaptureAppGroup
 import com.moji.ai.ai.CaptureAppWhitelistEntry
 import com.moji.ai.ai.CaptureAppWhitelistManager
+import com.moji.ai.ai.WindowPageSignature
 import com.moji.ai.ai.MerchantMemoryEntry
 import com.moji.ai.ai.ProposedCategoryItem
 import com.moji.ai.ai.ProposedMemoryItem
@@ -600,6 +601,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val appearanceSettingsConfig: StateFlow<AppearanceSettingsConfig> = AppearanceConfigManager.configFlow
 
     val captureWhitelistEntries: StateFlow<List<CaptureAppWhitelistEntry>> = CaptureAppWhitelistManager.entriesFlow
+
+    val blockedCaptureWindows: StateFlow<List<WindowPageSignature>> = CaptureAppWhitelistManager.blockedWindowsFlow
+
+    val recentCapturedWindows: StateFlow<List<WindowPageSignature>> = CaptureAppWhitelistManager.recentCapturedWindowsFlow
 
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = app.captureCoordinator.observabilityLogs
 
@@ -2305,6 +2310,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun resetCaptureWhitelistDefaults() {
         CaptureAppWhitelistManager.resetToDefaults()
         postMessage("已恢复默认识账应用白名单")
+    }
+
+    fun blockCaptureWindowSignature(signature: WindowPageSignature) {
+        if (CaptureAppWhitelistManager.blockWindowSignature(signature)) {
+            postMessage("已屏蔽「${signature.appName} · ${signature.shortActivityName}」此类页面结构")
+        }
+    }
+
+    fun unblockCaptureWindowSignature(signatureKey: String) {
+        if (CaptureAppWhitelistManager.unblockWindowSignature(signatureKey)) {
+            postMessage("已解除该页面结构的识账屏蔽")
+        }
+    }
+
+    fun clearRecentCapturedWindows() {
+        CaptureAppWhitelistManager.clearRecentCapturedWindows()
+        postMessage("已清空最近识屏页面记录")
     }
 
     fun openAgentTriageSheet() {

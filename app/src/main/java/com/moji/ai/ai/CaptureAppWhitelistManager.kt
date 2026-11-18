@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import java.util.Locale
 
 @Serializable
 enum class CaptureAppGroup(
@@ -43,26 +44,39 @@ data class CaptureAppWhitelistEntry(
     val isCustom: Boolean = false
 )
 
+@Serializable
+private data class CaptureWhitelistBackupEnvelope(
+    val version: Int = 2,
+    val entries: List<CaptureAppWhitelistEntry> = emptyList(),
+    val blockedWindows: List<WindowPageSignature> = emptyList()
+)
+
 /**
- * 应用粒度双通道静默识账白名单管理器：
+ * 应用粒度双通道静默识账白名单与窗口结构签名屏蔽管理器：
  * 1. 将「通知栏自动识账」与「无障碍支付页自动扫屏」按应用包名独立解耦开关；
- * 2. 热路径采用 `@Volatile` 不可变快照集合，O(1) 无锁判准，非白名单应用 0 节点遍历开销；
+ * 2. 热路径采用 `@Volatile` 不可变快照集合，O(1) 无锁判准，非白名单应用与已屏蔽页面结构 0 节点遍历开销；
  * 3. 系统短信代表项 `com.android.mms` 动态兼容各厂商默认短信包名（带 60s 内存缓存避免高频 Binder 调用）；
- * 4. 不限制控制中心「默记识屏记账」快捷设置磁贴的手动强制识屏。
+ * 4. 支持按 `(packageName, activityName, structureFingerprint)` 三元组一键屏蔽误识别页面结构，并随备份/云同步自动迁移；
+ * 5. 不限制控制中心「默记识屏记账」快捷设置磁贴的手动强制识屏。
  */
 object CaptureAppWhitelistManager {
 
     const val PREFS_NAME = "moji_capture_whitelist_prefs"
     const val KEY_WHITELIST_JSON = "capture_app_whitelist_v1"
+    const val KEY_BLOCKED_WINDOWS_JSON = "capture_blocked_window_signatures_v1"
+    const val KEY_RECENT_WINDOWS_JSON = "capture_recent_window_signatures_v1"
     const val SMS_REPRESENTATIVE_PACKAGE = "com.android.mms"
 
     private const val MAX_CUSTOM_APPS = 200
+    private const val MAX_BLOCKED_WINDOWS = 300
+    private const val MAX_RECENT_WINDOWS = 15
     private const val MAX_APP_NAME_LENGTH = 32
     private const val SMS_PACKAGE_CACHE_TTL_MS = 60_000L
 
     private val PACKAGE_NAME_REGEX = Regex(
         """^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$"""
     )
+    private val HEX_FINGERPRINT_REGEX = Regex("""^[0-9a-fA-F]{8,32}$""")
 
     val KNOWN_OEM_SMS_PACKAGES = setOf(
         "com.android.mms",
@@ -162,11 +176,26 @@ object CaptureAppWhitelistManager {
     @Volatile
     private var cachedSystemDefaultSmsAtMs: Long = 0L
 
+    @Volatile
+    private var fastBlockedWindowKeys: Set<String> = emptySet()
+
     private val _entriesFlow = MutableStateFlow(builtInPresets)
     val entriesFlow: StateFlow<List<CaptureAppWhitelistEntry>> = _entriesFlow.asStateFlow()
 
+    private val _blockedWindowsFlow = MutableStateFlow<List<WindowPageSignature>>(emptyList())
+    val blockedWindowsFlow: StateFlow<List<WindowPageSignature>> = _blockedWindowsFlow.asStateFlow()
+
+    private val _recentCapturedWindowsFlow = MutableStateFlow<List<WindowPageSignature>>(emptyList())
+    val recentCapturedWindowsFlow: StateFlow<List<WindowPageSignature>> = _recentCapturedWindowsFlow.asStateFlow()
+
     val currentEntries: List<CaptureAppWhitelistEntry>
         get() = _entriesFlow.value
+
+    val currentBlockedWindows: List<WindowPageSignature>
+        get() = _blockedWindowsFlow.value
+
+    val currentRecentCapturedWindows: List<WindowPageSignature>
+        get() = _recentCapturedWindowsFlow.value
 
     init {
         rebuildFastSnapshots(builtInPresets)
@@ -193,6 +222,23 @@ object CaptureAppWhitelistManager {
     fun init(context: Context) {
         val sp = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs = sp
+
+        val rawBlocked = sp.getString(KEY_BLOCKED_WINDOWS_JSON, null)
+        val decodedBlocked = if (!rawBlocked.isNullOrBlank()) {
+            runCatching { jsonCodec.decodeFromString<List<WindowPageSignature>>(rawBlocked) }.getOrNull().orEmpty()
+        } else {
+            emptyList()
+        }
+        applyBlockedWindows(normalizeWindowSignatures(decodedBlocked, MAX_BLOCKED_WINDOWS), persist = false)
+
+        val rawRecent = sp.getString(KEY_RECENT_WINDOWS_JSON, null)
+        val decodedRecent = if (!rawRecent.isNullOrBlank()) {
+            runCatching { jsonCodec.decodeFromString<List<WindowPageSignature>>(rawRecent) }.getOrNull().orEmpty()
+        } else {
+            emptyList()
+        }
+        _recentCapturedWindowsFlow.value = normalizeWindowSignatures(decodedRecent, MAX_RECENT_WINDOWS)
+
         val raw = sp.getString(KEY_WHITELIST_JSON, null)
         if (raw.isNullOrBlank()) {
             applyAndPersist(builtInPresets)
@@ -215,6 +261,9 @@ object CaptureAppWhitelistManager {
         cachedSystemDefaultSmsPkg = ""
         cachedSystemDefaultSmsAtMs = 0L
         _entriesFlow.value = builtInPresets
+        _blockedWindowsFlow.value = emptyList()
+        _recentCapturedWindowsFlow.value = emptyList()
+        fastBlockedWindowKeys = emptySet()
         rebuildFastSnapshots(builtInPresets)
     }
 
@@ -378,6 +427,85 @@ object CaptureAppWhitelistManager {
         return builtInPresets
     }
 
+    fun resolveAppDisplayName(packageName: String): String {
+        val clean = packageName.trim()
+        val configured = _entriesFlow.value.firstOrNull { it.packageName == clean }?.appName
+        if (!configured.isNullOrBlank()) return configured
+        if (clean in KNOWN_OEM_SMS_PACKAGES) return "系统短信"
+        return clean.substringAfterLast('.').ifBlank { clean }
+    }
+
+    /**
+     * O(1) 无锁检查指定页面的 `(packageName, activityName, structureFingerprint)` 是否已被用户拉黑
+     */
+    fun isWindowSignatureBlocked(
+        packageName: String,
+        activityName: String,
+        structureFingerprint: String
+    ): Boolean {
+        if (structureFingerprint.isBlank()) return false
+        val key = CaptureWindowGuard.buildSignatureKey(packageName, activityName, structureFingerprint)
+        return key in fastBlockedWindowKeys
+    }
+
+    @Synchronized
+    fun blockWindowSignature(signature: WindowPageSignature): Boolean {
+        val normalized = normalizeSingleSignature(signature) ?: return false
+        val key = normalized.signatureKey
+        if (key in fastBlockedWindowKeys) return false
+        val current = _blockedWindowsFlow.value
+        val updated = listOf(normalized) + current.filterNot { it.signatureKey == key }
+        applyBlockedWindows(updated.take(MAX_BLOCKED_WINDOWS), persist = true)
+        return true
+    }
+
+    @Synchronized
+    fun unblockWindowSignature(signatureKey: String): Boolean {
+        val target = signatureKey.trim().lowercase(Locale.ROOT)
+        val before = _blockedWindowsFlow.value
+        val after = before.filterNot { it.signatureKey == target }
+        if (after.size == before.size) return false
+        applyBlockedWindows(after, persist = true)
+        return true
+    }
+
+    @Synchronized
+    fun clearBlockedWindowSignatures() {
+        applyBlockedWindows(emptyList(), persist = true)
+    }
+
+    @Synchronized
+    fun recordRecentCapturedWindow(
+        packageName: String,
+        activityName: String,
+        structureFingerprint: String,
+        rawPageText: String,
+        capturedAtMillis: Long = System.currentTimeMillis()
+    ) {
+        if (structureFingerprint.isBlank()) return
+        val candidate = normalizeSingleSignature(
+            WindowPageSignature(
+                packageName = packageName,
+                activityName = activityName,
+                structureFingerprint = structureFingerprint,
+                appName = resolveAppDisplayName(packageName),
+                sampleSummary = CaptureWindowGuard.summarizeCapturedPage(rawPageText),
+                createdAtMillis = capturedAtMillis
+            )
+        ) ?: return
+        val key = candidate.signatureKey
+        val updated = (listOf(candidate) + _recentCapturedWindowsFlow.value.filterNot { it.signatureKey == key })
+            .take(MAX_RECENT_WINDOWS)
+        _recentCapturedWindowsFlow.value = updated
+        prefs?.edit()?.putString(KEY_RECENT_WINDOWS_JSON, jsonCodec.encodeToString(updated))?.apply()
+    }
+
+    @Synchronized
+    fun clearRecentCapturedWindows() {
+        _recentCapturedWindowsFlow.value = emptyList()
+        prefs?.edit()?.remove(KEY_RECENT_WINDOWS_JSON)?.apply()
+    }
+
     fun enabledCounts(entries: List<CaptureAppWhitelistEntry> = _entriesFlow.value): Pair<Int, Int> {
         var notifCount = 0
         var accessCount = 0
@@ -388,26 +516,97 @@ object CaptureAppWhitelistManager {
         return notifCount to accessCount
     }
 
-    fun settingsTrailingSummary(entries: List<CaptureAppWhitelistEntry> = _entriesFlow.value): String {
+    fun settingsTrailingSummary(
+        entries: List<CaptureAppWhitelistEntry> = _entriesFlow.value,
+        blockedWindows: List<WindowPageSignature> = _blockedWindowsFlow.value
+    ): String {
         val (notifCount, accessCount) = enabledCounts(entries)
-        return "通知 $notifCount · 识屏 $accessCount"
+        return if (blockedWindows.isEmpty()) {
+            "通知 $notifCount · 识屏 $accessCount"
+        } else {
+            "通知 $notifCount · 识屏 $accessCount · 屏蔽页 ${blockedWindows.size}"
+        }
     }
 
     @Synchronized
     fun exportConfigJson(): String {
-        return jsonCodec.encodeToString(_entriesFlow.value)
+        val blocked = _blockedWindowsFlow.value
+        if (blocked.isEmpty()) {
+            return jsonCodec.encodeToString(_entriesFlow.value)
+        }
+        return jsonCodec.encodeToString(
+            CaptureWhitelistBackupEnvelope(
+                version = 2,
+                entries = _entriesFlow.value,
+                blockedWindows = blocked
+            )
+        )
     }
 
     @Synchronized
     fun restoreFromBackupJson(rawJson: String): Boolean {
         val trimmed = rawJson.trim()
         if (trimmed.isEmpty()) return false
+        if (trimmed.startsWith("{")) {
+            val envelope = runCatching {
+                jsonCodec.decodeFromString<CaptureWhitelistBackupEnvelope>(trimmed)
+            }.getOrNull() ?: return false
+            val normalizedEntries = normalizeAndMergeWithPresets(envelope.entries)
+            val normalizedBlocked = normalizeWindowSignatures(envelope.blockedWindows, MAX_BLOCKED_WINDOWS)
+            applyAndPersist(normalizedEntries)
+            applyBlockedWindows(normalizedBlocked, persist = true)
+            return true
+        }
         val decoded = runCatching {
             jsonCodec.decodeFromString<List<CaptureAppWhitelistEntry>>(trimmed)
         }.getOrNull() ?: return false
         val normalized = normalizeAndMergeWithPresets(decoded)
         applyAndPersist(normalized)
+        applyBlockedWindows(emptyList(), persist = true)
         return true
+    }
+
+    private fun normalizeWindowSignatures(
+        rawList: List<WindowPageSignature>,
+        limit: Int
+    ): List<WindowPageSignature> {
+        val byKey = LinkedHashMap<String, WindowPageSignature>()
+        for (item in rawList) {
+            val clean = normalizeSingleSignature(item) ?: continue
+            val key = clean.signatureKey
+            if (!byKey.containsKey(key)) {
+                byKey[key] = clean
+            }
+            if (byKey.size >= limit) break
+        }
+        return byKey.values.toList()
+    }
+
+    private fun normalizeSingleSignature(raw: WindowPageSignature): WindowPageSignature? {
+        val pkg = raw.packageName.trim()
+        if (!isValidAndroidPackageFormat(pkg) || isBlockedSystemOrSelfPackage(pkg)) return null
+        val fp = raw.structureFingerprint.trim().lowercase(Locale.ROOT)
+        if (!HEX_FINGERPRINT_REGEX.matches(fp)) return null
+        val act = raw.activityName.trim().take(160)
+        val appLabel = raw.appName.trim().take(MAX_APP_NAME_LENGTH).ifEmpty { resolveAppDisplayName(pkg) }
+        val summary = raw.sampleSummary.trim().take(48)
+        val ts = if (raw.createdAtMillis > 0L) raw.createdAtMillis else System.currentTimeMillis()
+        return WindowPageSignature(
+            packageName = pkg,
+            activityName = act,
+            structureFingerprint = fp,
+            appName = appLabel,
+            sampleSummary = summary,
+            createdAtMillis = ts
+        )
+    }
+
+    private fun applyBlockedWindows(list: List<WindowPageSignature>, persist: Boolean) {
+        _blockedWindowsFlow.value = list
+        fastBlockedWindowKeys = list.mapTo(HashSet(list.size)) { it.signatureKey }
+        if (persist) {
+            prefs?.edit()?.putString(KEY_BLOCKED_WINDOWS_JSON, jsonCodec.encodeToString(list))?.apply()
+        }
     }
 
     internal fun normalizeAndMergeWithPresets(
