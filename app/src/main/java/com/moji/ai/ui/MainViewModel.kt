@@ -1405,10 +1405,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     incomeList = snapshot.customIncomeCategories
                 )
             }
+            val historyTagStrings = backupTxs.map { it.tags } +
+                snapshot.quickTemplates.map { it.tags } +
+                snapshot.smartRules.map { it.appendTag }
             if (snapshot.customTags.isNotEmpty() || snapshot.schemaVersion >= 3) {
                 TagCatalog.replaceAllTags(
                     customList = snapshot.customTags,
-                    allowEmpty = snapshot.schemaVersion >= 3
+                    allowEmpty = snapshot.schemaVersion >= 3,
+                    historicalTagStrings = if (snapshot.schemaVersion >= 3) historyTagStrings else emptyList()
                 )
             }
             persistTemplates(snapshot.quickTemplates)
@@ -1418,11 +1422,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _installmentPlans.value = snapshot.installmentPlans
             uiPrefs.edit().putString("saved_installments_json", jsonCodec.encodeToString(snapshot.installmentPlans)).apply()
             CurrencyRateManager.replaceAllCustomRates(snapshot.customCurrencyRates)
-            TagCatalog.syncDiscoveredTagsFromHistory(
-                backupTxs.map { it.tags } +
-                    snapshot.quickTemplates.map { it.tags } +
-                    snapshot.smartRules.map { it.appendTag }
-            )
+            if (snapshot.schemaVersion < 3) {
+                TagCatalog.syncDiscoveredTagsFromHistory(historyTagStrings)
+            }
             app.merchantMemoryManager.replaceAllMemories(snapshot.merchantMemories)
             val restoredLedgers = (snapshot.ledgers + backupTxs.map { it.ledgerName })
                 .map { sanitizeLedgerName(it) }
@@ -1445,7 +1447,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (snapshot.appearanceSettingsJson.isNotBlank()) {
                 AppearanceConfigManager.restoreFromBackupJson(snapshot.appearanceSettingsJson)
             }
-            MoJiCloudSyncClient.recordRestoredRoomSignature(restoredSig)
+            MoJiCloudSyncClient.recordRestoredState(restoredSig)
             txCount
         } finally {
             MoJiCloudSyncClient.endRestoreSuppression()

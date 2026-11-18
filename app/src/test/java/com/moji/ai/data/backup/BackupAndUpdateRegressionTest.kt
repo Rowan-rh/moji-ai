@@ -221,13 +221,19 @@ class BackupAndUpdateRegressionTest {
         // v1/v2 缺省空列表不覆盖现有标签
         TagCatalog.replaceAllTags(emptyList(), allowEmpty = false)
         assertEquals(1, TagCatalog.tags.size)
-        // v3 显式空列表精确清空自定义标签
-        TagCatalog.replaceAllTags(emptyList(), allowEmpty = parsed.third.schemaVersion >= 3)
+        // v3 显式空列表精确清空自定义标签，且静默屏蔽存量历史标签，防止冷启动重扫把已删标签复活
+        TagCatalog.replaceAllTags(
+            customList = emptyList(),
+            allowEmpty = parsed.third.schemaVersion >= 3,
+            historicalTagStrings = listOf("出差,餐饮", "#聚餐")
+        )
+        assertTrue(TagCatalog.tags.isEmpty())
+        TagCatalog.syncDiscoveredTagsFromHistory(listOf("出差,餐饮", "#聚餐"))
         assertTrue(TagCatalog.tags.isEmpty())
     }
 
     @Test
-    fun isValidWebpBytes_validatesRiffWebpMagicHeader() {
+    fun isValidWebpBytes_and_computeFileSha256IfSafe_rejectNonWebpFiles() {
         val validHeader = byteArrayOf(
             'R'.code.toByte(), 'I'.code.toByte(), 'F'.code.toByte(), 'F'.code.toByte(),
             0x20, 0x00, 0x00, 0x00,
@@ -236,5 +242,22 @@ class BackupAndUpdateRegressionTest {
         )
         assertTrue(BillScreenshotStorage.isValidWebpBytes(validHeader))
         assertFalse(BillScreenshotStorage.isValidWebpBytes("{\"error\":\"server\"}".toByteArray()))
+
+        val tmpDir = java.nio.file.Files.createTempDirectory("moji_ss_test").toFile()
+        try {
+            val ssDir = java.io.File(tmpDir, "files/bill_screenshots").apply { mkdirs() }
+            val badFile = java.io.File(ssDir, "corrupt.webp").apply {
+                writeBytes("not-a-webp-payload".toByteArray())
+            }
+            val goodFile = java.io.File(ssDir, "valid.webp").apply {
+                writeBytes(validHeader)
+            }
+            assertEquals(null, BillScreenshotStorage.computeFileSha256IfSafe(badFile, null))
+            val goodSha = BillScreenshotStorage.computeFileSha256IfSafe(goodFile, null)
+            assertNotNull(goodSha)
+            assertEquals(64, goodSha!!.length)
+        } finally {
+            tmpDir.deleteRecursively()
+        }
     }
 }

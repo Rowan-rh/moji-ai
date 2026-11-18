@@ -226,7 +226,7 @@ object BillScreenshotStorage {
         if (file.length() !in 1L..MAX_SAFE_SCREENSHOT_BYTES) return null
         return runCatching {
             val bytes = file.readBytes()
-            if (bytes.isEmpty()) null else sha256Hex(bytes)
+            if (!isValidWebpBytes(bytes)) null else sha256Hex(bytes)
         }.getOrNull()
     }
 

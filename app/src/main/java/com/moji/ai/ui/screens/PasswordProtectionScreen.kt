@@ -613,25 +613,27 @@ private fun PinHintEditorBottomSheet(
     } else {
         null
     }
+    val needsAsyncValidation = trimmedLength in 4..AppLockManager.MAX_PIN_HINT_LENGTH
     var asyncHintError by remember(currentHint) { mutableStateOf<String?>(null) }
-    var isValidatingHint by remember(currentHint) { mutableStateOf(false) }
+    var validatedInput by remember(currentHint) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(hintInput) {
         asyncHintError = null
-        val trimmed = hintInput.trim()
+        val snapshot = hintInput
+        val trimmed = snapshot.trim()
         if (trimmed.length > AppLockManager.MAX_PIN_HINT_LENGTH || trimmed.length < 4) {
-            isValidatingHint = false
+            validatedInput = snapshot
             return@LaunchedEffect
         }
-        isValidatingHint = true
         delay(160L)
         val validation = withContext(Dispatchers.Default) {
-            AppLockManager.validatePinHint(hintInput)
+            AppLockManager.validatePinHint(snapshot)
         }
         asyncHintError = validation.exceptionOrNull()?.message
-        isValidatingHint = false
+        validatedInput = snapshot
     }
 
+    val isValidatingHint = needsAsyncValidation && validatedInput != hintInput
     val errorText = immediateLengthError ?: asyncHintError
 
     ICostSmoothBottomSheet(

@@ -142,7 +142,7 @@ object MoJiCloudSyncClient {
     private var suppressAutoSyncUntilNano: Long = 0L
 
     @Volatile
-    private var lastRestoredRoomSignature: Triple<Long, Long, Long>? = null
+    private var lastRestoredState: Pair<Triple<Long, Long, Long>, Long>? = null
 
     fun init(context: Context) {
         _configFlow.value = loadConfig(context)
@@ -169,40 +169,52 @@ object MoJiCloudSyncClient {
         return isRestoringFlag || (System.nanoTime() - suppressAutoSyncUntilNano < 0L)
     }
 
+    private fun mix64(value: Long): Long {
+        var z = value + -0x61c8864680b583ebL
+        z = (z xor (z ushr 30)) * -0x40a7b892e31b1a47L
+        z = (z xor (z ushr 27)) * -0x6b2fb644ecceee15L
+        return z xor (z ushr 31)
+    }
+
     fun computeRoomSignature(
         wallets: List<WalletEntity>,
         txs: List<TransactionEntity>,
         rules: List<RecurringRuleEntity>
     ): Triple<Long, Long, Long> {
-        var walletHash = wallets.size.toLong()
+        var walletHash = mix64(wallets.size.toLong())
         for (w in wallets) {
-            val h = ((w.id * 31L + w.balanceCents) * 31L + w.updatedAtMillis) xor (w.name.hashCode().toLong())
-            walletHash += h xor (h ushr 32)
+            walletHash += mix64((w.id * 31L) xor w.hashCode().toLong())
         }
-        var txHash = txs.size.toLong()
+        var txHash = mix64(txs.size.toLong())
         for (t in txs) {
-            val h = ((t.id * 31L + t.amountCents) * 31L + t.updatedAtMillis) * 31L + t.syncRevision
-            txHash += h xor (h ushr 32)
+            val normalizedCode = if (t.screenshotSha256.isEmpty()) {
+                t.hashCode()
+            } else {
+                t.copy(screenshotSha256 = "").hashCode()
+            }
+            txHash += mix64((t.id * 31L) xor normalizedCode.toLong())
         }
-        var ruleHash = rules.size.toLong()
+        var ruleHash = mix64(rules.size.toLong())
         for (r in rules) {
-            val h = r.id * 31L + r.updatedAtMillis
-            ruleHash += h xor (h ushr 32)
+            ruleHash += mix64((r.id * 31L) xor r.hashCode().toLong())
         }
         return Triple(walletHash, txHash, ruleHash)
     }
 
-    fun recordRestoredRoomSignature(signature: Triple<Long, Long, Long>?) {
-        lastRestoredRoomSignature = signature
+    fun recordRestoredState(
+        signature: Triple<Long, Long, Long>?,
+        mutationSeq: Long = _localMutationSignal.value
+    ) {
+        lastRestoredState = signature?.let { it to mutationSeq }
     }
 
-    fun consumeIfMatchesRestoredSignature(signature: Triple<Long, Long, Long>): Boolean {
-        val expected = lastRestoredRoomSignature ?: return false
-        if (expected == signature) {
-            lastRestoredRoomSignature = null
-            return true
-        }
-        return false
+    fun consumeIfMatchesRestoredState(
+        signature: Triple<Long, Long, Long>,
+        mutationSeq: Long
+    ): Boolean {
+        val expected = lastRestoredState ?: return false
+        lastRestoredState = null
+        return expected.first == signature && expected.second == mutationSeq
     }
 
     fun hasPendingAutoPush(context: Context): Boolean {
@@ -217,6 +229,7 @@ object MoJiCloudSyncClient {
             prefs.edit().putBoolean(KEY_PENDING_AUTO_PUSH, true).apply()
         }
         if (notifySignal) {
+            lastRestoredState = null
             _localMutationSignal.value += 1L
         }
     }

@@ -472,8 +472,12 @@ class AiAccountingEngine(
             ?: (localFallback?.sourceWalletId?.takeIf { it in validWalletIds })
         val resolvedTargetWalletId = (finalResult.targetWalletId?.takeIf { it in validWalletIds })
             ?: (localFallback?.targetWalletId?.takeIf { it in validWalletIds })
-        val resolvedRelatedExpenseId = finalResult.relatedExpenseId?.takeIf { it in validExpenseIds }
-            ?: localFallback?.relatedExpenseId?.takeIf { it in validExpenseIds }
+        val resolvedRelatedExpenseId = if (txType == TransactionType.REFUND_OFFSET) {
+            finalResult.relatedExpenseId?.takeIf { it in validExpenseIds }
+                ?: localFallback?.relatedExpenseId?.takeIf { it in validExpenseIds }
+        } else {
+            null
+        }
         val resolvedDiscountCents = maxOf(finalResult.discountCents, localFallback?.discountCents ?: 0L)
 
         val dedupKey = when {

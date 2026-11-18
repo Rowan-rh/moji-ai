@@ -111,7 +111,7 @@ class MoJiCloudSyncClientTest {
     }
 
     @Test
-    fun `restored room signature is consumed once to suppress restore echo without dropping subsequent edits`() {
+    fun `restored state suppresses late restore echo without dropping prefs or metadata edits`() {
         val wallets = emptyList<com.moji.ai.data.local.WalletEntity>()
         val rules = emptyList<com.moji.ai.data.local.RecurringRuleEntity>()
         val tx1 = com.moji.ai.data.local.TransactionEntity(
@@ -127,20 +127,30 @@ class MoJiCloudSyncClientTest {
             updatedAtMillis = 1_762_574_400_000L
         )
         val restoredSig = MoJiCloudSyncClient.computeRoomSignature(wallets, listOf(tx1), rules)
-        MoJiCloudSyncClient.recordRestoredRoomSignature(restoredSig)
 
-        // 首次匹配的恢复回声精确消费并拦截
-        assertTrue(MoJiCloudSyncClient.consumeIfMatchesRestoredSignature(restoredSig))
-        // 消费后不残留，后续状态正常放行
-        assertFalse(MoJiCloudSyncClient.consumeIfMatchesRestoredSignature(restoredSig))
+        // 场景 1：迟到的 Room 恢复回声（roomSig 与 mutationSeq 均未变）精确消费一次并拦截
+        MoJiCloudSyncClient.recordRestoredState(restoredSig, mutationSeq = 10L)
+        assertTrue(MoJiCloudSyncClient.consumeIfMatchesRestoredState(restoredSig, mutationSeq = 10L))
+        assertFalse(MoJiCloudSyncClient.consumeIfMatchesRestoredState(restoredSig, mutationSeq = 10L))
 
-        // 若恢复后立刻新增了另一笔账单，签名不同，绝不误吞真实改动
-        MoJiCloudSyncClient.recordRestoredRoomSignature(restoredSig)
-        val editedSig = MoJiCloudSyncClient.computeRoomSignature(
+        // 场景 2：Room 在恢复期间已被上游抑制，随后用户仅修改了 SharedPreferences（mutationSeq 递增但 roomSig 不变）
+        // 绝不能把用户的真实偏好修改误吞为恢复回声！
+        MoJiCloudSyncClient.recordRestoredState(restoredSig, mutationSeq = 10L)
+        assertFalse(MoJiCloudSyncClient.consumeIfMatchesRestoredState(restoredSig, mutationSeq = 11L))
+
+        // 场景 3：仅修改备注/分类（即使 updatedAtMillis 未刷新），Room 签名必须变化；而内部回填 screenshotSha256 不变签名
+        val noteEditedSig = MoJiCloudSyncClient.computeRoomSignature(
             wallets,
-            listOf(tx1, tx1.copy(id = 2L, amountCents = 3500L)),
+            listOf(tx1.copy(note = "补充发票号")),
             rules
         )
-        assertFalse(MoJiCloudSyncClient.consumeIfMatchesRestoredSignature(editedSig))
+        assertNotEquals(restoredSig, noteEditedSig)
+
+        val shaBackfilledSig = MoJiCloudSyncClient.computeRoomSignature(
+            wallets,
+            listOf(tx1.copy(screenshotSha256 = "a".repeat(64))),
+            rules
+        )
+        assertEquals(restoredSig, shaBackfilledSig)
     }
 }

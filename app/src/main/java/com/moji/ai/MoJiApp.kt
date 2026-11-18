@@ -86,7 +86,7 @@ class MoJiApp : Application() {
 
     private val syncedPrefsChangeListener =
         SharedPreferences.OnSharedPreferenceChangeListener { sp, key ->
-            if (!startupMaintenanceCompleted || MoJiCloudSyncClient.shouldSuppressAutoSync()) {
+            if (!startupMaintenanceCompleted || MoJiCloudSyncClient.isRestoringNow()) {
                 return@OnSharedPreferenceChangeListener
             }
             if (sp === uiPrefsRef && key != null && key !in SYNCED_UI_PREF_KEYS) {
@@ -207,9 +207,9 @@ class MoJiApp : Application() {
             }
                 .distinctUntilChanged()
                 .drop(1)
-                .filter { (roomSig, _) ->
+                .filter { (roomSig, mutationSeq) ->
                     !MoJiCloudSyncClient.isRestoringNow() &&
-                        !MoJiCloudSyncClient.consumeIfMatchesRestoredSignature(roomSig)
+                        !MoJiCloudSyncClient.consumeIfMatchesRestoredState(roomSig, mutationSeq)
                 }
                 .onEach {
                     MoJiCloudSyncClient.markPendingAutoPush(this@MoJiApp, notifySignal = false)
