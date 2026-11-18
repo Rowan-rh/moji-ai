@@ -1,6 +1,7 @@
 package com.moji.ai.notification
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -10,6 +11,9 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.widget.Toast
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -304,25 +308,35 @@ class SilentBookkeepingNotifier(private val context: Context) {
             }
         }
 
+        val subTextLabel = if (BuildConfig.IS_QA_BUILD) {
+            "默记 QA"
+        } else if (isOnePlus) {
+            "流体云 · 默记"
+        } else {
+            "默记 AI"
+        }
+        val publicNotification = NotificationCompat.Builder(context, activeChannelId)
+            .setSmallIcon(R.drawable.ic_fluid_cloud_moji)
+            .setColor(0xFF0EA5E9.toInt())
+            .setSubText(subTextLabel)
+            .setContentTitle("默记已自动入账 1 笔")
+            .setContentText("解锁手机后查看账单详情与操作选项")
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .build()
+
         val builder = NotificationCompat.Builder(context, activeChannelId)
             .setSmallIcon(R.drawable.ic_fluid_cloud_moji)
             .setColor(0xFF0EA5E9.toInt())
-            .setSubText(
-                if (BuildConfig.IS_QA_BUILD) {
-                    "默记 QA"
-                } else if (isOnePlus) {
-                    "流体云 · 默记"
-                } else {
-                    "默记 AI"
-                }
-            )
+            .setSubText(subTextLabel)
             .setContentTitle(title)
             .setContentText(bodyText)
             .setStyle(NotificationCompat.BigTextStyle().bigText(expandedDetails))
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicNotification)
             .setAutoCancel(true)
             .setContentIntent(openPending)
             .addExtras(fluidExtras)
@@ -440,25 +454,35 @@ class SilentBookkeepingNotifier(private val context: Context) {
             }
         }
 
+        val dupSubTextLabel = if (BuildConfig.IS_QA_BUILD) {
+            "默记 QA"
+        } else if (isOnePlus) {
+            "流体云 · 防重保护"
+        } else {
+            "默记防重"
+        }
+        val publicDupNotification = NotificationCompat.Builder(context, activeChannelId)
+            .setSmallIcon(R.drawable.ic_fluid_cloud_moji)
+            .setColor(0xFFF59E0B.toInt())
+            .setSubText(dupSubTextLabel)
+            .setContentTitle("检测到疑似重复账单")
+            .setContentText("默认未重复录入 · 解锁手机后查看详情")
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .build()
+
         val builder = NotificationCompat.Builder(context, activeChannelId)
             .setSmallIcon(R.drawable.ic_fluid_cloud_moji)
             .setColor(0xFFF59E0B.toInt())
-            .setSubText(
-                if (BuildConfig.IS_QA_BUILD) {
-                    "默记 QA"
-                } else if (isOnePlus) {
-                    "流体云 · 防重保护"
-                } else {
-                    "默记防重"
-                }
-            )
+            .setSubText(dupSubTextLabel)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(publicDupNotification)
             .setAutoCancel(true)
             .setContentIntent(openPending)
             .addExtras(fluidExtras)
@@ -545,12 +569,28 @@ class TransactionActionReceiver : BroadcastReceiver() {
         val txId = intent.getLongExtra(SilentBookkeepingNotifier.EXTRA_TRANSACTION_ID, -1L)
         val candidateId = intent.getLongExtra(SilentBookkeepingNotifier.EXTRA_CANDIDATE_ID, -1L)
         val notifId = intent.getIntExtra(SilentBookkeepingNotifier.EXTRA_NOTIFICATION_ID, -1)
+        val action = intent.action
+
+        val mutatingActions = setOf(
+            SilentBookkeepingNotifier.ACTION_FORCE_RECORD_DUPLICATE,
+            SilentBookkeepingNotifier.ACTION_UNDO_TRANSACTION,
+            SilentBookkeepingNotifier.ACTION_CYCLE_CATEGORY,
+            SilentBookkeepingNotifier.ACTION_MARK_REIMBURSABLE,
+            SilentBookkeepingNotifier.ACTION_CLEAR_ALL_TRANSACTIONS
+        )
+        val isDeviceLocked = context.getSystemService(KeyguardManager::class.java)?.isDeviceLocked == true
+        if (isDeviceLocked && action in mutatingActions) {
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(context.applicationContext, "请先解锁手机后再操作账单", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
 
         val pendingResult = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val app = context.applicationContext as MoJiApp
-                when (intent.action) {
+                when (action) {
                     SilentBookkeepingNotifier.ACTION_FORCE_RECORD_DUPLICATE -> {
                         if (notifId > 0) {
                             NotificationManagerCompat.from(context).cancel(notifId)

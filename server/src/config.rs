@@ -16,7 +16,9 @@ pub struct ServerConfig {
     pub token_secret: Vec<u8>,
     /// 每个用户保留的历史快照回滚版本上限
     pub max_history_revisions: usize,
-    /// 是否信任来自本机或容器内网反向代理的 X-Real-IP / X-Forwarded-For 头
+    /// 允许注册的最大账号数量（0 表示不设上限）
+    pub max_users: usize,
+    /// 是否信任来自受控反向代理的 X-Real-IP / X-Forwarded-For 头
     pub trust_proxy_headers: bool,
 }
 
@@ -44,6 +46,12 @@ impl ServerConfig {
             .unwrap_or(10)
             .clamp(1, 50);
 
+        let max_users = env::var("MOJI_MAX_USERS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(0)
+            .min(100_000);
+
         let trust_proxy_headers = env::var("MOJI_TRUST_PROXY_HEADERS")
             .ok()
             .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
@@ -55,6 +63,7 @@ impl ServerConfig {
             server_access_code,
             token_secret,
             max_history_revisions,
+            max_users,
             trust_proxy_headers,
         })
     }
@@ -68,6 +77,7 @@ impl ServerConfig {
             server_access_code: access_code.map(|s| s.to_string()),
             token_secret: b"0123456789abcdef0123456789abcdef".to_vec(),
             max_history_revisions: 3,
+            max_users: 0,
             trust_proxy_headers: false,
         }
     }

@@ -709,7 +709,40 @@ class LedgerRepository(private val db: AppDatabase) {
 
     suspend fun updateWallet(wallet: WalletEntity) = db.walletDao().updateWallet(wallet)
 
-    suspend fun deleteWallet(wallet: WalletEntity) = db.walletDao().deleteWallet(wallet)
+    suspend fun deleteWallet(wallet: WalletEntity) = db.withTransaction {
+        val now = System.currentTimeMillis()
+        val ruleDao = db.recurringRuleDao()
+        val relatedRules = ruleDao.getAllRules().filter {
+            it.walletId == wallet.id || it.targetWalletId == wallet.id
+        }
+        for (rule in relatedRules) {
+            val clearedTarget = if (rule.targetWalletId == wallet.id) null else rule.targetWalletId
+            val shouldDisable = rule.walletId == wallet.id ||
+                (rule.targetWalletId == wallet.id &&
+                    (rule.type == TransactionType.TRANSFER || rule.type == TransactionType.REPAYMENT))
+            ruleDao.updateRule(
+                rule.copy(
+                    enabled = if (shouldDisable) false else rule.enabled,
+                    targetWalletId = clearedTarget,
+                    updatedAtMillis = now,
+                    syncDirty = true
+                )
+            )
+        }
+        db.walletDao().deleteWallet(wallet)
+    }
+
+    suspend fun backfillTransactionScreenshotHashes(updates: List<Pair<Long, String>>) {
+        if (updates.isEmpty()) return
+        db.withTransaction {
+            val txDao = db.transactionDao()
+            for ((txId, sha) in updates) {
+                if (txId > 0L && sha.length == 64) {
+                    txDao.updateScreenshotSha256ById(txId, sha)
+                }
+            }
+        }
+    }
 
     /**
      * 1:1 同步 iCost 全部 11 个资产账户（7 个信用账户 + 4 个资金账户）及余额、总额度、尾号与还款日，
@@ -1107,9 +1140,34 @@ class LedgerRepository(private val db: AppDatabase) {
                     }
                 }
                 tx.relatedTransactionId?.let { parentId ->
+                    var remainingToRevert = tx.amountCnyCents.coerceAtLeast(0L)
                     txDao.getTransactionById(parentId)?.let { parent ->
-                        val restoredRefund = (parent.refundedAmountCents - tx.amountCnyCents).coerceAtLeast(0L)
-                        txDao.updateTransaction(parent.copy(refundedAmountCents = restoredRefund))
+                        val deductParent = minOf(parent.refundedAmountCents.coerceAtLeast(0L), remainingToRevert)
+                        if (deductParent > 0L) {
+                            txDao.updateTransaction(parent.copy(refundedAmountCents = parent.refundedAmountCents - deductParent))
+                            remainingToRevert -= deductParent
+                        }
+                    }
+                    if (remainingToRevert > 0L) {
+                        val queue = ArrayDeque<Long>()
+                        val visited = HashSet<Long>()
+                        queue.addLast(parentId)
+                        visited.add(parentId)
+                        while (queue.isNotEmpty() && remainingToRevert > 0L) {
+                            val currentParent = queue.removeFirst()
+                            val splitChildren = txDao.getSplitChildrenOfExpense(currentParent)
+                            for (child in splitChildren) {
+                                if (!visited.add(child.id)) continue
+                                val deductChild = minOf(child.refundedAmountCents.coerceAtLeast(0L), remainingToRevert)
+                                if (deductChild > 0L) {
+                                    txDao.updateTransaction(
+                                        child.copy(refundedAmountCents = child.refundedAmountCents - deductChild)
+                                    )
+                                    remainingToRevert -= deductChild
+                                }
+                                queue.addLast(child.id)
+                            }
+                        }
                     }
                 }
             }

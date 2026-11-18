@@ -270,7 +270,7 @@ private fun netExpenseOf(tx: TransactionEntity): Long = (tx.amountCnyCents - tx.
  * 单笔账单对「计入净资产」账户的资产 / 负债影响（本位币分），与账务引擎记账时的余额变动方向一致。
  * 返回 (资产变化, 负债变化)。账户已删除或不计入净资产时无影响。
  */
-private fun netWorthImpact(
+internal fun netWorthImpact(
     tx: TransactionEntity,
     walletMap: Map<Long, WalletEntity>,
     requireNetWorthFlag: Boolean = true
@@ -292,7 +292,13 @@ private fun netWorthImpact(
         if (w.type.isLiability) dL -= cents else dA += cents
     }
     when (tx.type) {
-        TransactionType.EXPENSE, TransactionType.LOAN_OUT -> outflow(included(tx.sourceWalletId), amount + fee)
+        TransactionType.EXPENSE -> {
+            outflow(included(tx.sourceWalletId), amount + fee)
+            if (tx.reimbursed) {
+                inflow(included(tx.targetWalletId ?: tx.sourceWalletId), netExpenseOf(tx))
+            }
+        }
+        TransactionType.LOAN_OUT -> outflow(included(tx.sourceWalletId), amount + fee)
         TransactionType.INCOME, TransactionType.LOAN_IN -> inflow(included(tx.targetWalletId ?: tx.sourceWalletId), amount - fee)
         TransactionType.TRANSFER, TransactionType.REPAYMENT -> {
             outflow(included(tx.sourceWalletId), amount + fee)

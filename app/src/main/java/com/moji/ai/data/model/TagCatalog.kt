@@ -396,9 +396,24 @@ object TagCatalog {
     }
 
     @Synchronized
-    fun replaceAllTags(customList: List<TagDef>) {
+    fun replaceAllTags(
+        customList: List<TagDef>,
+        allowEmpty: Boolean = false,
+        historicalTagStrings: Iterable<String> = emptyList()
+    ) {
         val clean = sanitizeTagList(customList)
-        if (clean.isEmpty()) return
+        if (clean.isEmpty() && !allowEmpty) return
+        val activeNames = clean.mapTo(hashSetOf()) { it.name }
+        _mutedTagNames.clear()
+        if (allowEmpty) {
+            for (raw in historicalTagStrings) {
+                for (token in parseTags(raw)) {
+                    if (isValidSanitizedTagName(token) && token !in activeNames) {
+                        _mutedTagNames.add(token)
+                    }
+                }
+            }
+        }
         persist(clean)
     }
 
