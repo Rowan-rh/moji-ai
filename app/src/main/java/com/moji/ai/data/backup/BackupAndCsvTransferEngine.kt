@@ -1,6 +1,7 @@
 package com.moji.ai.data.backup
 
 import android.util.Xml
+import com.moji.ai.ai.CaptureAppWhitelistManager
 import com.moji.ai.ai.MerchantMemoryEntry
 import com.moji.ai.ai.MerchantMemoryManager
 import com.moji.ai.ai.SmartConditionRule
@@ -141,7 +142,8 @@ data class MoJiFullBackupSnapshot(
     val installmentPlans: List<InstallmentPlanItem> = emptyList(),
     val customCurrencyRates: Map<String, Double> = emptyMap(),
     val reminderSettingsJson: String = "",
-    val appearanceSettingsJson: String = ""
+    val appearanceSettingsJson: String = "",
+    val captureWhitelistJson: String = ""
 )
 
 data class CsvParsePreviewResult(
@@ -216,10 +218,11 @@ object BackupAndCsvTransferEngine {
         installmentPlans: List<InstallmentPlanItem> = emptyList(),
         customCurrencyRates: Map<String, Double> = CurrencyRateManager.customRates,
         reminderSettingsJson: String = ReminderConfigManager.exportConfigJson(),
-        appearanceSettingsJson: String = AppearanceConfigManager.exportConfigJson()
+        appearanceSettingsJson: String = AppearanceConfigManager.exportConfigJson(),
+        captureWhitelistJson: String = CaptureAppWhitelistManager.exportConfigJson()
     ): String {
         val snapshot = MoJiFullBackupSnapshot(
-            schemaVersion = 1,
+            schemaVersion = 3,
             exportedAtMillis = System.currentTimeMillis(),
             ledgers = ledgers.ifEmpty { listOf("默认账本") },
             monthlyBudgetCents = monthlyBudgetCents,
@@ -312,7 +315,8 @@ object BackupAndCsvTransferEngine {
             installmentPlans = installmentPlans,
             customCurrencyRates = CurrencyRateManager.sanitizeRatesMap(customCurrencyRates),
             reminderSettingsJson = reminderSettingsJson,
-            appearanceSettingsJson = appearanceSettingsJson
+            appearanceSettingsJson = appearanceSettingsJson,
+            captureWhitelistJson = captureWhitelistJson
         )
         return backupJson.encodeToString(snapshot)
     }

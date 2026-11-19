@@ -8,6 +8,10 @@ import com.moji.ai.MoJiApp
 import com.moji.ai.ai.AgentBillTriageEngine
 import com.moji.ai.ai.AgentTriageReport
 import com.moji.ai.ai.AiConfig
+import com.moji.ai.ai.CaptureAppGroup
+import com.moji.ai.ai.CaptureAppWhitelistEntry
+import com.moji.ai.ai.CaptureAppWhitelistManager
+import com.moji.ai.ai.WindowPageSignature
 import com.moji.ai.ai.MerchantMemoryEntry
 import com.moji.ai.ai.ProposedCategoryItem
 import com.moji.ai.ai.ProposedMemoryItem
@@ -15,9 +19,14 @@ import com.moji.ai.ai.ProposedRuleItem
 import com.moji.ai.ai.SmartConditionRule
 import com.moji.ai.ai.TriageBillItem
 import com.moji.ai.data.backup.BackupAndCsvTransferEngine
+import com.moji.ai.data.backup.CloudSyncConflictException
 import com.moji.ai.data.backup.CsvParsePreviewResult
+import com.moji.ai.data.backup.MoJiCloudConfig
+import com.moji.ai.data.backup.MoJiCloudSyncClient
+import com.moji.ai.data.backup.MoJiFullBackupSnapshot
 import com.moji.ai.data.backup.WebDavConfig
 import com.moji.ai.data.backup.WebDavSyncClient
+import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
@@ -42,11 +51,16 @@ import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.notification.DailyReminderScheduler
+import com.moji.ai.service.BillScreenshotStorage
 import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.update.AppUpdateConfig
 import com.moji.ai.update.ReleaseUpdateInfo
 import com.moji.ai.update.UpdateCheckState
+import java.io.File
+import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -590,6 +604,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val appearanceSettingsConfig: StateFlow<AppearanceSettingsConfig> = AppearanceConfigManager.configFlow
 
+    val captureWhitelistEntries: StateFlow<List<CaptureAppWhitelistEntry>> = CaptureAppWhitelistManager.entriesFlow
+
+    val blockedCaptureWindows: StateFlow<List<WindowPageSignature>> = CaptureAppWhitelistManager.blockedWindowsFlow
+
+    val recentCapturedWindows: StateFlow<List<WindowPageSignature>> = CaptureAppWhitelistManager.recentCapturedWindowsFlow
+
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = app.captureCoordinator.observabilityLogs
 
     val appUpdateConfig: StateFlow<AppUpdateConfig> = app.appUpdateManager.configFlow
@@ -598,6 +618,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _webDavConfig = MutableStateFlow(WebDavSyncClient.loadConfig(application))
     val webDavConfig: StateFlow<WebDavConfig> = _webDavConfig.asStateFlow()
+
+    val mojiCloudConfig: StateFlow<MoJiCloudConfig> = MoJiCloudSyncClient.configFlow
 
     /**
      * 从流体云胶囊或系统通知点击跳转进入 App 时，待直接打开详情页的账单 ID
@@ -1173,13 +1195,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     suspend fun buildFullBackupJson(): String = withContext(Dispatchers.IO) {
         val freshWallets = repository.getAllWallets()
-        val freshTxs = repository.getAllTransactions()
+        val rawTxs = repository.getAllTransactions()
         val freshRules = repository.getAllRecurringRules()
+        val backfilledHashes = ArrayList<Pair<Long, String>>()
+        val enrichedTxs = rawTxs.map { tx ->
+            val existingSha = tx.screenshotSha256.trim().lowercase(Locale.US)
+            if (existingSha.length == 64 && existingSha.all { it in '0'..'9' || it in 'a'..'f' }) {
+                if (existingSha != tx.screenshotSha256 && tx.id > 0L) {
+                    backfilledHashes.add(tx.id to existingSha)
+                }
+                if (existingSha == tx.screenshotSha256) tx else tx.copy(screenshotSha256 = existingSha)
+            } else if (tx.screenshotPath.isNotBlank()) {
+                val computed = BillScreenshotStorage.computeFileSha256IfSafe(File(tx.screenshotPath), app)
+                if (computed != null) {
+                    if (tx.id > 0L) {
+                        backfilledHashes.add(tx.id to computed)
+                    }
+                    tx.copy(screenshotSha256 = computed)
+                } else {
+                    tx
+                }
+            } else {
+                tx
+            }
+        }
+        if (backfilledHashes.isNotEmpty()) {
+            runCatching { repository.backfillTransactionScreenshotHashes(backfilledHashes) }
+        }
         BackupAndCsvTransferEngine.exportFullBackupJson(
             ledgers = _ledgers.value,
             monthlyBudgetCents = _monthlyBudgetCents.value,
             wallets = freshWallets,
-            transactions = freshTxs,
+            transactions = enrichedTxs,
             recurringRules = freshRules,
             merchantMemories = merchantMemories.value,
             customExpenseCategories = CategoryCatalog.expenseCategories,
@@ -1191,7 +1238,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             installmentPlans = _installmentPlans.value,
             customCurrencyRates = CurrencyRateManager.customRates,
             reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
-            appearanceSettingsJson = AppearanceConfigManager.exportConfigJson()
+            appearanceSettingsJson = AppearanceConfigManager.exportConfigJson(),
+            captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson()
         )
     }
 
@@ -1212,7 +1260,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             installmentPlans = _installmentPlans.value,
             customCurrencyRates = CurrencyRateManager.customRates,
             reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
-            appearanceSettingsJson = AppearanceConfigManager.exportConfigJson()
+            appearanceSettingsJson = AppearanceConfigManager.exportConfigJson(),
+            captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson()
         )
     }
 
@@ -1306,8 +1355,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             val (backupWallets, backupTxs, snapshot) = parsed
             val backupRules = BackupAndCsvTransferEngine.toRecurringRuleEntities(snapshot.recurringRules)
-            val txCount = withContext(Dispatchers.IO) {
-                repository.restoreFullSnapshot(backupWallets, backupTxs, backupRules)
+            try {
+                val txCount = withContext(NonCancellable) {
+                    val count = applyRestoredSnapshotInternal(backupWallets, backupTxs, backupRules, snapshot)
+                    MoJiCloudSyncClient.markLocalSnapshotDivergedFromCloud(app)
+                    count
+                }
+                onResult("恢复完成：${backupWallets.size} 个账户、$txCount 笔账单")
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (err: Exception) {
+                onResult("恢复失败：${err.message ?: err.javaClass.simpleName}")
+            }
+        }
+    }
+
+    private suspend fun applyRestoredSnapshotInternal(
+        backupWallets: List<WalletEntity>,
+        backupTxs: List<TransactionEntity>,
+        backupRules: List<RecurringRuleEntity>,
+        snapshot: MoJiFullBackupSnapshot
+    ): Int {
+        MoJiCloudSyncClient.beginRestoreSuppression()
+        return try {
+            val (txCount, restoredSig) = withContext(Dispatchers.IO) {
+                AppDatabase.markInitialWalletsSeeded(app)
+                val sanitizedTxs = backupTxs.map { tx ->
+                    val sha = tx.screenshotSha256.trim().lowercase(Locale.US)
+                    val validSha = sha.length == 64 && sha.all { it in '0'..'9' || it in 'a'..'f' }
+                    val safeLocalPath = when {
+                        tx.screenshotPath.isNotBlank() &&
+                            BillScreenshotStorage.isSafeScreenshotFile(File(tx.screenshotPath), app) -> tx.screenshotPath
+                        validSha -> BillScreenshotStorage.resolveOrSaveCloudScreenshot(
+                            context = app,
+                            expectedSha256Raw = sha,
+                            existingPathHint = tx.screenshotPath,
+                            downloadedWebpBytes = null
+                        ).orEmpty()
+                        else -> ""
+                    }
+                    tx.copy(
+                        screenshotPath = safeLocalPath,
+                        screenshotSha256 = if (validSha) sha else ""
+                    )
+                }
+                val count = repository.restoreFullSnapshot(backupWallets, sanitizedTxs, backupRules)
+                BillScreenshotStorage.cleanupUnreferencedScreenshots(
+                    context = app,
+                    referencedPaths = sanitizedTxs.map { it.screenshotPath }.filter { it.isNotBlank() }.toSet()
+                )
+                val sig = MoJiCloudSyncClient.computeRoomSignature(
+                    wallets = repository.getAllWallets(),
+                    txs = repository.getAllTransactions(),
+                    rules = repository.getAllRecurringRules()
+                )
+                count to sig
             }
             if (snapshot.customExpenseCategories.isNotEmpty() || snapshot.customIncomeCategories.isNotEmpty()) {
                 CategoryCatalog.replaceAllCategories(
@@ -1315,8 +1417,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     incomeList = snapshot.customIncomeCategories
                 )
             }
-            if (snapshot.customTags.isNotEmpty()) {
-                TagCatalog.replaceAllTags(snapshot.customTags)
+            val historyTagStrings = backupTxs.map { it.tags } +
+                snapshot.quickTemplates.map { it.tags } +
+                snapshot.smartRules.map { it.appendTag }
+            if (snapshot.customTags.isNotEmpty() || snapshot.schemaVersion >= 3) {
+                TagCatalog.replaceAllTags(
+                    customList = snapshot.customTags,
+                    allowEmpty = snapshot.schemaVersion >= 3,
+                    historicalTagStrings = if (snapshot.schemaVersion >= 3) historyTagStrings else emptyList()
+                )
             }
             persistTemplates(snapshot.quickTemplates)
             app.smartRuleEngine.replaceAllRules(snapshot.smartRules)
@@ -1325,11 +1434,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _installmentPlans.value = snapshot.installmentPlans
             uiPrefs.edit().putString("saved_installments_json", jsonCodec.encodeToString(snapshot.installmentPlans)).apply()
             CurrencyRateManager.replaceAllCustomRates(snapshot.customCurrencyRates)
-            TagCatalog.syncDiscoveredTagsFromHistory(
-                backupTxs.map { it.tags } +
-                    snapshot.quickTemplates.map { it.tags } +
-                    snapshot.smartRules.map { it.appendTag }
-            )
+            if (snapshot.schemaVersion < 3) {
+                TagCatalog.syncDiscoveredTagsFromHistory(historyTagStrings)
+            }
             app.merchantMemoryManager.replaceAllMemories(snapshot.merchantMemories)
             val restoredLedgers = (snapshot.ledgers + backupTxs.map { it.ledgerName })
                 .map { sanitizeLedgerName(it) }
@@ -1352,7 +1459,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (snapshot.appearanceSettingsJson.isNotBlank()) {
                 AppearanceConfigManager.restoreFromBackupJson(snapshot.appearanceSettingsJson)
             }
-            onResult("恢复完成：${backupWallets.size} 个账户、$txCount 笔账单")
+            if (snapshot.captureWhitelistJson.isNotBlank()) {
+                CaptureAppWhitelistManager.restoreFromBackupJson(snapshot.captureWhitelistJson)
+            }
+            MoJiCloudSyncClient.recordRestoredState(restoredSig)
+            txCount
+        } finally {
+            MoJiCloudSyncClient.endRestoreSuppression()
         }
     }
 
@@ -1445,7 +1558,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) {
         updateWebDavConfig(config)
         viewModelScope.launch {
-            val backupJson = buildFullBackupJson()
+            val backupJson = try {
+                buildFullBackupJson()
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (err: Exception) {
+                onResult("构建本地备份失败：${err.message ?: err.javaClass.simpleName}")
+                return@launch
+            }
             val res = WebDavSyncClient.uploadSnapshot(config, backupJson)
             res.fold(
                 onSuccess = { msg ->
@@ -1473,6 +1593,93 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 },
                 onFailure = { err ->
                     onResult("下载失败：${err.message}")
+                }
+            )
+        }
+    }
+
+    fun updateMoJiCloudConfig(config: MoJiCloudConfig) {
+        MoJiCloudSyncClient.saveConfig(app, config)
+    }
+
+    fun verifyMoJiCloudKey(
+        draftConfig: MoJiCloudConfig,
+        onResult: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val res = MoJiCloudSyncClient.verifyAndBindKey(app, draftConfig)
+            res.fold(
+                onSuccess = { (_, msg) -> onResult(msg) },
+                onFailure = { err -> onResult("验证失败：${err.message}") }
+            )
+        }
+    }
+
+    fun uploadBackupToMoJiCloud(
+        draftConfig: MoJiCloudConfig,
+        forceOverwrite: Boolean = false,
+        onConflict: (String) -> Unit = {},
+        onResult: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val (backupJson, enrichedTxs) = try {
+                MoJiCloudSyncClient.buildSnapshotFromApp(app)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (err: Exception) {
+                onResult("构建本地快照失败：${err.message ?: err.javaClass.simpleName}")
+                return@launch
+            }
+            val res = MoJiCloudSyncClient.uploadSnapshotAndScreenshots(
+                context = app,
+                draftConfig = draftConfig,
+                backupJson = backupJson,
+                localTransactions = enrichedTxs,
+                forceOverwrite = forceOverwrite
+            )
+            res.fold(
+                onSuccess = { (_, msg) -> onResult(msg) },
+                onFailure = { err ->
+                    if (err is CloudSyncConflictException) {
+                        onConflict(err.message)
+                    } else {
+                        onResult("上传失败：${err.message}")
+                    }
+                }
+            )
+        }
+    }
+
+    fun restoreBackupFromMoJiCloud(
+        draftConfig: MoJiCloudConfig,
+        onResult: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val res = MoJiCloudSyncClient.downloadSnapshotAndScreenshots(app, draftConfig)
+            res.fold(
+                onSuccess = { bundle ->
+                    try {
+                        val txCount = withContext(NonCancellable) {
+                            val count = applyRestoredSnapshotInternal(
+                                backupWallets = bundle.wallets,
+                                backupTxs = bundle.transactions,
+                                backupRules = bundle.recurringRules,
+                                snapshot = bundle.snapshot
+                            )
+                            MoJiCloudSyncClient.commitPulledConfigAfterRestore(app, bundle.updatedConfig)
+                            count
+                        }
+                        val ssText = if (bundle.syncedScreenshots > 0) "、拉回 ${bundle.syncedScreenshots} 张账单原图" else ""
+                        val failText = if (bundle.failedScreenshots > 0) "（另有 ${bundle.failedScreenshots} 张原图下载失败，可稍后重新拉取补齐）" else ""
+                        onResult("✅ 已从默记云 v${bundle.revision} 恢复：${bundle.wallets.size} 个账户、$txCount 笔账单$ssText$failText")
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (err: Exception) {
+                        onResult("云端恢复落盘失败：${err.message ?: err.javaClass.simpleName}")
+                    }
+                },
+                onFailure = { err ->
+                    onResult("云端恢复失败：${err.message}")
                 }
             )
         }
@@ -2114,6 +2321,78 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun resetAppearanceDefaults() {
         AppearanceConfigManager.resetToDefaults()
         postMessage("已恢复默认外观显示设置")
+    }
+
+    fun setCaptureAppChannelEnabled(
+        packageName: String,
+        enableNotification: Boolean? = null,
+        enableAccessibility: Boolean? = null
+    ) {
+        CaptureAppWhitelistManager.setChannelEnabled(
+            packageName = packageName,
+            enableNotification = enableNotification,
+            enableAccessibility = enableAccessibility
+        )
+    }
+
+    fun setCaptureGroupChannelEnabled(
+        group: CaptureAppGroup,
+        enableNotification: Boolean? = null,
+        enableAccessibility: Boolean? = null
+    ) {
+        CaptureAppWhitelistManager.setGroupChannelEnabled(
+            group = group,
+            enableNotification = enableNotification,
+            enableAccessibility = enableAccessibility
+        )
+    }
+
+    fun addCustomCaptureApp(
+        rawPackageName: String,
+        rawAppName: String,
+        enableNotification: Boolean,
+        enableAccessibility: Boolean,
+        onDone: (Result<CaptureAppWhitelistEntry>) -> Unit = {}
+    ) {
+        val result = CaptureAppWhitelistManager.addCustomApp(
+            rawPackageName = rawPackageName,
+            rawAppName = rawAppName,
+            enableNotification = enableNotification,
+            enableAccessibility = enableAccessibility
+        )
+        result.onSuccess { entry ->
+            postMessage("已添加「${entry.appName}」到识账白名单")
+        }
+        onDone(result)
+    }
+
+    fun removeCustomCaptureApp(packageName: String) {
+        val target = CaptureAppWhitelistManager.currentEntries.firstOrNull { it.isCustom && it.packageName == packageName }
+        if (CaptureAppWhitelistManager.removeCustomApp(packageName) && target != null) {
+            postMessage("已移除自定义应用「${target.appName}」")
+        }
+    }
+
+    fun resetCaptureWhitelistDefaults() {
+        CaptureAppWhitelistManager.resetToDefaults()
+        postMessage("已恢复默认识账应用白名单")
+    }
+
+    fun blockCaptureWindowSignature(signature: WindowPageSignature) {
+        if (CaptureAppWhitelistManager.blockWindowSignature(signature)) {
+            postMessage("已屏蔽「${signature.appName} · ${signature.shortActivityName}」此类页面结构")
+        }
+    }
+
+    fun unblockCaptureWindowSignature(signatureKey: String) {
+        if (CaptureAppWhitelistManager.unblockWindowSignature(signatureKey)) {
+            postMessage("已解除该页面结构的识账屏蔽")
+        }
+    }
+
+    fun clearRecentCapturedWindows() {
+        CaptureAppWhitelistManager.clearRecentCapturedWindows()
+        postMessage("已清空最近识屏页面记录")
     }
 
     fun openAgentTriageSheet() {

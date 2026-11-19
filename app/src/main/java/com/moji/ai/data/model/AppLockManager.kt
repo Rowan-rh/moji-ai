@@ -154,9 +154,11 @@ object AppLockManager {
         return false to false
     }
 
-    @Synchronized
     fun validatePinHint(rawHint: String, candidatePin: String? = null): Result<String> {
-        if (_isSessionLockedFlow.value && candidatePin == null) {
+        val (locked, saltSnapshot, hashSnapshot) = synchronized(this) {
+            Triple(_isSessionLockedFlow.value, pinSalt, pinHash)
+        }
+        if (locked && candidatePin == null) {
             return Result.failure(IllegalStateException("请先解锁应用后再修改密码提示语"))
         }
         val trimmed = rawHint.trim()
@@ -166,11 +168,14 @@ object AppLockManager {
         if (!candidatePin.isNullOrBlank() && trimmed.contains(candidatePin)) {
             return Result.failure(IllegalArgumentException("密码提示语不能包含当前密码本身"))
         }
-        if (pinSalt.isNotBlank() && pinHash.isNotBlank() && trimmed.length >= 4) {
+        if (saltSnapshot.isNotBlank() && hashSnapshot.isNotBlank() && trimmed.length >= 4) {
+            val checkedCandidates = HashSet<String>()
             for (i in 0..(trimmed.length - 4)) {
                 val sub = trimmed.substring(i, i + 4)
-                if (isValidPinFormat(sub) && matchesStoredPin(sub, pinSalt, pinHash).first) {
-                    return Result.failure(IllegalArgumentException("密码提示语不能包含当前密码本身"))
+                if (isValidPinFormat(sub) && checkedCandidates.add(sub)) {
+                    if (matchesStoredPin(sub, saltSnapshot, hashSnapshot).first) {
+                        return Result.failure(IllegalArgumentException("密码提示语不能包含当前密码本身"))
+                    }
                 }
             }
         }

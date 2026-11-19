@@ -405,10 +405,7 @@ class AiAccountingEngine(
 
         val parsed: AiParsedTransactionResult? = if (
             !shouldSkipNetworkForFastScreenCapture && (
-                config.apiKey.isNotBlank() ||
-                    config.baseUrl.contains("127.0.0.1") ||
-                    config.baseUrl.contains("10.0.2.2") ||
-                    config.baseUrl.contains("localhost")
+                config.apiKey.isNotBlank() || config.allowsEmptyApiKey()
                 )
         ) {
             runCatching {
@@ -475,8 +472,12 @@ class AiAccountingEngine(
             ?: (localFallback?.sourceWalletId?.takeIf { it in validWalletIds })
         val resolvedTargetWalletId = (finalResult.targetWalletId?.takeIf { it in validWalletIds })
             ?: (localFallback?.targetWalletId?.takeIf { it in validWalletIds })
-        val resolvedRelatedExpenseId = finalResult.relatedExpenseId?.takeIf { it in validExpenseIds }
-            ?: localFallback?.relatedExpenseId?.takeIf { it in validExpenseIds }
+        val resolvedRelatedExpenseId = if (txType == TransactionType.REFUND_OFFSET) {
+            finalResult.relatedExpenseId?.takeIf { it in validExpenseIds }
+                ?: localFallback?.relatedExpenseId?.takeIf { it in validExpenseIds }
+        } else {
+            null
+        }
         val resolvedDiscountCents = maxOf(finalResult.discountCents, localFallback?.discountCents ?: 0L)
 
         val dedupKey = when {

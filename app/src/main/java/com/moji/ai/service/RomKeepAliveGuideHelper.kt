@@ -5,10 +5,21 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.service.notification.NotificationListenerService
+import com.google.android.accessibility.selecttospeak.SelectToSpeakService
 import java.util.Locale
+
+enum class AccessibilityHealthState {
+    /** 无障碍服务已授权且实时绑定运行中 */
+    ACTIVE,
+    /** 系统设置中仍处于勾选状态，但服务在后台被系统省电强杀/断连（俗称“假开启/服务故障”） */
+    INTERRUPTED_BY_SYSTEM,
+    /** 无障碍总开关关闭，或默记无障碍开关未开启/被系统自动关闭 */
+    DISABLED
+}
 
 data class RomKeepAliveDiagnosticState(
     val manufacturer: String,
@@ -18,6 +29,7 @@ data class RomKeepAliveDiagnosticState(
     val romDisplayName: String,
     val isNotificationListenerEnabled: Boolean,
     val isAccessibilityEnabled: Boolean,
+    val accessibilityHealth: AccessibilityHealthState = AccessibilityHealthState.DISABLED,
     val isIgnoringBatteryOptimizations: Boolean,
     val requiresAndroid13RestrictedUnlock: Boolean,
     val restrictedSettingSteps: List<String>,
@@ -47,7 +59,8 @@ object RomKeepAliveGuideHelper {
         val combined = "$manufacturer $brand".lowercase(Locale.ROOT)
 
         val isNotifGranted = checkNotificationListenerEnabled(context)
-        val isAccessGranted = checkAccessibilityServiceEnabled(context)
+        val accessHealth = inspectAccessibilityHealth(context)
+        val isAccessGranted = accessHealth == AccessibilityHealthState.ACTIVE
         val isBatteryIgnored = checkBatteryOptimizationIgnored(context)
 
         val (romName, steps) = when {
@@ -102,8 +115,9 @@ object RomKeepAliveGuideHelper {
             romDisplayName = romName,
             isNotificationListenerEnabled = isNotifGranted,
             isAccessibilityEnabled = isAccessGranted,
+            accessibilityHealth = accessHealth,
             isIgnoringBatteryOptimizations = isBatteryIgnored,
-            requiresAndroid13RestrictedUnlock = sdkInt >= 33 && !isAccessGranted,
+            requiresAndroid13RestrictedUnlock = sdkInt >= 33 && accessHealth == AccessibilityHealthState.DISABLED,
             restrictedSettingSteps = restrictedSteps,
             romKeepAliveSteps = steps
         )
@@ -111,19 +125,81 @@ object RomKeepAliveGuideHelper {
 
     fun checkNotificationListenerEnabled(context: Context): Boolean {
         val flat = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners") ?: return false
+        val expected = ComponentName(context.packageName, PaymentNotificationListenerService::class.java.name)
         return flat.split(':').any { token ->
-            ComponentName.unflattenFromString(token.trim())?.packageName == context.packageName
+            val parsed = ComponentName.unflattenFromString(token.trim()) ?: return@any false
+            parsed.packageName.equals(expected.packageName, ignoreCase = true) &&
+                parsed.className == expected.className
         }
     }
 
-    fun checkAccessibilityServiceEnabled(context: Context): Boolean {
-        if (PaymentAccessibilityService.instance != null) return true
+    /**
+     * 检查系统设置层是否勾选了默记的无障碍服务（同时核验 ACCESSIBILITY_ENABLED 总开关与精确服务组件名）
+     */
+    fun isAccessibilitySettingChecked(context: Context): Boolean {
+        val masterEnabled = runCatching {
+            Settings.Secure.getInt(context.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 0) == 1
+        }.getOrDefault(false)
+        if (!masterEnabled) return false
+
         val flat = Settings.Secure.getString(
             context.contentResolver,
             Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
         ) ?: return false
+        val expected = ComponentName(context.packageName, SelectToSpeakService::class.java.name)
         return flat.split(':').any { token ->
-            ComponentName.unflattenFromString(token.trim())?.packageName?.equals(context.packageName, ignoreCase = true) == true
+            val parsed = ComponentName.unflattenFromString(token.trim()) ?: return@any false
+            parsed.packageName.equals(expected.packageName, ignoreCase = true) &&
+                parsed.className == expected.className
+        }
+    }
+
+    /**
+     * 综合实时服务连接态与系统设置项，精准区分「正常运行」「被系统杀后台假开启断连」「未开启/已被系统关闭」
+     */
+    fun inspectAccessibilityHealth(context: Context): AccessibilityHealthState {
+        if (PaymentAccessibilityService.instance != null) {
+            return AccessibilityHealthState.ACTIVE
+        }
+        return if (isAccessibilitySettingChecked(context)) {
+            AccessibilityHealthState.INTERRUPTED_BY_SYSTEM
+        } else {
+            AccessibilityHealthState.DISABLED
+        }
+    }
+
+    fun checkAccessibilityServiceEnabled(context: Context): Boolean {
+        return inspectAccessibilityHealth(context) == AccessibilityHealthState.ACTIVE
+    }
+
+    fun buildAccessibilitySettingsIntent(context: Context, highlightService: Boolean = true): Intent {
+        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        if (highlightService) {
+            val componentKey = ComponentName(
+                context.packageName,
+                SelectToSpeakService::class.java.name
+            ).flattenToString()
+            val bundle = Bundle().apply {
+                putString(":settings:fragment_args_key", componentKey)
+            }
+            intent.putExtra(":settings:fragment_args_key", componentKey)
+            intent.putExtra(":settings:show_fragment_args", bundle)
+        }
+        return intent
+    }
+
+    /**
+     * 跳转系统无障碍设置并自动定位高亮「默记」服务项（兼容 AOSP / ColorOS / HyperOS / OneUI，不支持的机型平滑回退至无障碍列表）
+     */
+    fun openAccessibilitySettingsForMoJi(context: Context) {
+        try {
+            context.startActivity(buildAccessibilitySettingsIntent(context, highlightService = true))
+        } catch (_: Exception) {
+            runCatching {
+                context.startActivity(buildAccessibilitySettingsIntent(context, highlightService = false))
+            }
         }
     }
 

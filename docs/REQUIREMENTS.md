@@ -18,8 +18,8 @@
 
 ### 1. 自动触发与无感交互（纯后台静默模式）
 - **三模无感采集（免 Root）**：
-  - **通知栏监听 (`NotificationListenerService`)**：实时捕获微信支付、支付宝、云闪付、银行 App 动账通知及 955xx 银行扣款短信。
-  - **微信/支付宝及拼多多/抖音/京东等电商无障碍兼容识别 (`SelectToSpeakService` + `PaymentAccessibilityService`)**：通过 `com.google.android.accessibility.selecttospeak.SelectToSpeakService` 兼容入口与 `FLAG_REQUEST_ENHANCED_WEB_ACCESSIBILITY` 突破微信支付与账单详情容器节点限制；仅遍历匹配当前目标应用包名的活跃窗口（深度 50、节点上限 500），配合 `150/450/1000/1800ms` 四阶延迟探测与单笔详情锚点校验，全面支持 **微信支付、支付宝、云闪付、拼多多 (`com.xunmeng.pinduoduo`)、抖音/抖音极速版 (`com.ss.android.ugc.aweme` / `.lite`)、京东 (`com.jingdong.app.mall`)、淘宝 (`com.taobao.taobao`)、天猫 (`com.tmall.wireless`)、美团/美团外卖 (`com.sankuai.meituan`)、饿了么 (`me.ele`)、唯品会 (`com.achievo.vipshop`)、小红书 (`com.xingin.xhs`)** 的「支付成功 / 拼单成功 / 账单详情 / 订单详情」页面结构化提取，并自动过滤账单列表页、订单列表页、购物车结算页与微信支付服务号历史卡片流。
+  - **通知栏监听 (`NotificationListenerService`) 与应用粒度双通道识账白名单 (`CaptureAppWhitelistManager` & `CaptureAppWhitelistScreen`)**：实时捕获微信支付、支付宝、云闪付、银行 App 动账通知及 955xx 银行扣款短信；提供「设置 › 智能记账 › 监听应用白名单」全屏管理页，将「通知栏监听」与「无障碍自动识屏」按应用包名独立解耦控制（第一梯队核心支付/系统短信/主流银行默认双开，第二梯队京东/淘宝/拼多多/美团等电商外卖默认开通知、关无障碍自动扫屏防误触，第三梯队抖音/小红书/唯品会默认全关，并支持新增自定义 Android 包名、一键恢复默认及 `.mojibackup` / 默记云快照同步；控制中心快捷磁贴手动识屏不受自动白名单限制）。
+  - **微信/支付宝及电商窗口级智能识别与骨架指纹防误触 (`SelectToSpeakService` + `PaymentAccessibilityService` + `CaptureWindowGuard`)**：通过 `com.google.android.accessibility.selecttospeak.SelectToSpeakService` 兼容入口与 `FLAG_REQUEST_ENHANCED_WEB_ACCESSIBILITY` 突破微信支付与账单详情容器节点限制；深度融合花有谱、蓝鲸记账与钱迹自动记账的窗口识别机制，构建 **5 重窗口门禁**：① 仅锁定非画中画最顶层焦点 `TYPE_APPLICATION` 窗口并仅读取 `isVisibleToUser` 节点，杜绝多窗口与后台 Fragment 串台；② 使用 `PackageManager.getActivityInfo` 核验真实 Activity（防止 `FrameLayout` / `BottomSheet` 伪类名覆盖），对微信聊天/朋友圈/相册看图/扫码及电商商品详情/购物车/订单列表容器在遍历前硬拦截；③ 检测可见 `isPassword` / `isEditable` 节点，一票否决密码核身页、聊天会话框、搜索框与评论输入页；④ 拦截交易关闭/取消/失败、退款处理中、零钱/余额宝资产页、商品导购页（剔除将「百亿补贴/退换无忧」当账单锚点的误判）及超过 15 分钟的无单号旧截图；⑤ 提取前 5 层可见控件拓扑生成 16 位视图骨架指纹 (`StructureFingerprint`)，在「监听应用白名单」页展示最近自动识屏页面并支持按 `(packageName, activityName, structureFingerprint)` 一键屏蔽误触页面结构（随 `.mojibackup` 与默记云快照自动同步）。
   - **iCost 模板「原价 · 优惠了多少 · 实扣多少」解析与全链路展示 (`AiAccountingEngine.extractPriceBreakdown`)**：自动缝合电商详情页跨节点拆分的整数与小数金额（如 `¥ | 29 | .90`），优先提取 `实付款 / 实付金额 / 实扣 / 应付总额` 作为入账实扣金额 (`amountCents`)，同时提取 `商品总价 / 原价` 与 `已优惠 / 共减 / 百亿补贴 / 店铺优惠 / 平台优惠 / 多多支付立减 / 抖音支付优惠 / 京豆 / 红包` 作为优惠金额 (`discountCents`)，按 **`原价¥X.XX · 优惠¥Y.YY · 实扣¥Z.ZZ | 商品名称 · 支付方式`** 模板格式生成备注，并在流体云胶囊、首页账单列表标签与账单详情页同步展示。
   - **Android 11+ 免 Root 截屏端侧 OCR 兜底与快捷设置磁贴 (`OcrTileService`)**：当目标支付/账单窗口节点缺失金额或用户下拉控制中心点击「默记识屏记账」磁贴时，调用 `AccessibilityService.takeScreenshot` 与内置离线中文 OCR（按 Y 轴行聚类与 X 轴排序还原左右分栏键值）完成识账。
 - **核心四要素留存、双规则重复判定（默认不录入 + 弹窗点“录入”才入账）与一加流体云实况胶囊**：
@@ -38,8 +38,8 @@
 - **纯后台静默入账 + 系统通知栏三键快捷操作**：
   - 付款后无需人工点击确认弹窗，后台直接完成解析与入账，并推送一条系统通知提醒。
   - 通知栏自带 **「撤销入账」「切换分类（同步写入商户记忆库）」「标为待报销」** 三个快捷按钮，无需打开 App 即可在通知栏一键完成回滚、改分类或打报销标记。
-- **国产 ROM 后台保活与 Android 13+ 受限设置一键诊断 (`RomKeepAliveGuideHelper`)**：
-  - 自动检测机型厂商（ColorOS / HyperOS / OriginOS / HarmonyOS），提供 `NotificationListenerService.requestRebind` 一键重连、Android 13+「应用详情 ➔ 允许受限设置」一键跳转与后台电池白名单诊断。
+- **国产 ROM 后台保活、无障碍状态自动检测提醒与 Android 13+ 受限设置一键诊断 (`RomKeepAliveGuideHelper`)**：
+  - 自动检测机型厂商（ColorOS / HyperOS / OriginOS / HarmonyOS），结合 `PaymentAccessibilityService.isConnectedFlow` 实时绑定态与 `Settings.Secure.ACCESSIBILITY_ENABLED / ENABLED_ACCESSIBILITY_SERVICES` 精准区分 **`ACTIVE`（正常运行）**、**`INTERRUPTED_BY_SYSTEM`（系统杀后台导致设置仍勾选但服务未绑定的“假开启”状态）** 与 **`DISABLED`（未启用或已被系统关闭）**；在进入「设置 › 智能记账」或打开识账开关时自动检测并弹窗提示（支持「去开启」携带 `:settings:fragment_args_key` 自动高亮跳转至默记无障碍项与「暂不处理」），同时提供 `NotificationListenerService.requestRebind` 一键重连、Android 13+「应用详情 ➔ 允许受限设置」一键跳转与后台电池白名单诊断。
 
 ### 2. AI 智能识别引擎（多模型兼容 + 商户记忆自学习 + 本地加权兜底）
 - **通用大模型接入**：
@@ -80,6 +80,10 @@
 - **报销闭环与批量核销 (`reimbursable -> reimbursed` & `batchSettleReimbursements`)**：支持将消费账单标记为「待报销」，并在「批量报销核销中心」多选待报销账单后一键批量结算入账、恢复指定收款账户余额；对已报销账单执行删除、修改金额或取消已报销状态时，自动联动回退/同步报销收款流水的入账余额，确保账务守恒。
 - **单笔分拆账单 (`splitExpenseTransaction`)**：支持在账单详情页将单笔消费（如超市综合采购）拆分为多个独立分类与金额的子账单，同时保持原付款账户总扣款金额严格不变（并拒绝直接分拆已关联冲销/报销到账的复杂账单，防止关联引用断裂）。
 - **可视化条件规则引擎 (`SmartRuleEngine`, `When -> Then`)**：支持按关键词、金额上下限、24 小时时间窗组合条件，自动改写分类/账本/附加标签、自动标为待报销或静默拦截非账单通知。
+- **默记自托管云存储服务与免登录专属密钥同步 (`MoJiCloudSyncClient` + Rust `server/moji-cloud-server`)**：
+  - **客户端密码学专属密钥（Sync Key）免登录模型**：手机端通过 `SecureRandom` 生成 80-bit 无歧义专属密钥（正式包 `MOJI-XXXX-XXXX-XXXX-XXXX`，QA 包 `MOJIQA-XXXX-XXXX-XXXX-XXXX` 物理隔离环境），服务端仅存储经 4,096 轮 `SHA-256` 拉伸的密钥摘要与仅保留末 4 位的脱敏提示。不同家庭成员使用各自生成的独立密钥即可天然隔离账本（支持一键复制不含个人密钥的 `moji-pair://` 家人配对口令，仅共享服务器地址与家庭接入码）；本人换新手机时粘贴同一把密钥即可完整拉回账本与原图。
+  - **面向未来微信/手机号登录的零迁移解耦表结构**：Rust 后端（`Axum + Tokio + Rusqlite WAL`）采用 `users (user_id)` $\leftarrow$ `user_identities (provider, identifier_hash, user_id)` 标准表结构，所有同步接口统一校验基于内部 `user_id` 签发的 `HMAC-SHA256` 会话令牌；后期扩展微信开放平台或手机号登录时无需迁移任何存量云端数据。
+  - **乐观并发冲突守卫、历史版本归档与账单原图内容寻址增量同步**：支持 `expected_revision` 版本锁与非空账本防误清空保护（`409 Conflict` 弹窗确认）、服务端自动保留最近 `N` 个历史版本（`.tmp` `fsync` + 原子 `rename`）、`BillScreenshotStorage` WebP 原图 `SHA-256` 增量去重上传与跨设备恢复路径自动重写，以及绑定对齐版本后记账/静默识账 6 秒防抖后台自动推送。
 - **WebDAV 自托管云同步 (`WebDavSyncClient`)**：支持连接坚果云、Nextcloud、群晖 Synology 等标准 WebDAV 服务（公网强制 `HTTPS` 防基础认证凭据明文泄露，仅局域网私有地址允许 `HTTP`），采用 `.tmp` 临时上传 + `MOVE Overwrite: T` 原子替换策略上传或下载恢复 `.mojibackup` 全量快照。
 - **GitHub 私有仓库 / 公开仓库 OTA 自动更新 (`AppUpdateManager`)**：支持通过单仓库只读 Fine-grained PAT（编译期 `local.properties` 注入或设置页动态配置，跨源重定向自动剥离 `Authorization` 头防 Token 泄露）查询 GitHub Releases、按 SemVer 预发布/正式版语义比对版本号、通过 Release Asset API 流式下载 APK（上限 256 MB）、校验 GitHub Release Asset `sha256` 摘要与归档内包名/签名证书和本机已安装版本一致后，通过 `FileProvider` 调起系统安装器一键覆盖升级。
 - **独立包名测试包双包共存与全链路防串数据隔离 (`com.moji.ai.qa`)**：提供 `qa` 构建变体（`./gradlew assembleQa`，输出 `app/build/outputs/apk/qa/app-qa.apk`，使用 debug 签名），包名为 `com.moji.ai.qa`，可与手机上的正式包 `com.moji.ai` 同时安装共存。桌面与设置页采用「默记 QA」名称与晴空青蓝基底 + `QA` 角标专属自适应图标，通知监听/无障碍服务/快捷设置磁贴文案均带 `默记 QA` 标识；隔离沙盒数据库、`FileProvider`（`${applicationId}.fileprovider`）、通知渠道（`moji_silent_bookkeeping_qa_v2` / `moji_fluid_cloud_silent_qa_v2`）与显式包名广播 `PendingIntent`，并在 QA 通知正文附加防采集标记且双向忽略 `com.moji.ai*` 包名；QA 包默认禁用正式版 OTA 自动更新与覆盖安装，WebDAV 默认路径隔离为 `/dav/MoJi-QA/` 与 `moji_qa_latest.mojibackup` 并拦截向正式路径/文件名的上传操作。

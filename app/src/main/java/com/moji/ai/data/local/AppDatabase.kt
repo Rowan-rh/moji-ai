@@ -13,7 +13,9 @@ import androidx.room.TypeConverter
 import androidx.room.TypeConverters
 import androidx.room.Update
 import androidx.room.migration.Migration
+import androidx.room.withTransaction
 import androidx.sqlite.db.SupportSQLiteDatabase
+import com.moji.ai.data.backup.MoJiCloudSyncClient
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.WalletType
@@ -164,6 +166,26 @@ interface TransactionDao {
         newTags: String,
         nowMillis: Long
     )
+
+    @Query(
+        """
+        SELECT * FROM transactions
+        WHERE deletedAtMillis IS NULL
+          AND type = 'EXPENSE'
+          AND relatedTransactionId = :parentId
+        ORDER BY id ASC
+        """
+    )
+    suspend fun getSplitChildrenOfExpense(parentId: Long): List<TransactionEntity>
+
+    @Query(
+        """
+        UPDATE transactions
+        SET screenshotSha256 = :sha256
+        WHERE id = :id AND screenshotSha256 != :sha256
+        """
+    )
+    suspend fun updateScreenshotSha256ById(id: Long, sha256: String)
 
     @Delete
     suspend fun deleteTransaction(tx: TransactionEntity)
@@ -334,6 +356,34 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        private const val SEED_PREFS_NAME = "moji_db_seed_prefs"
+        private const val KEY_INITIAL_WALLETS_SEEDED = "initial_wallets_seeded_v1"
+
+        fun markInitialWalletsSeeded(context: Context) {
+            context.applicationContext
+                .getSharedPreferences(SEED_PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_INITIAL_WALLETS_SEEDED, true)
+                .apply()
+        }
+
+        private suspend fun seedDefaultWalletsIfUntouched(appContext: Context) {
+            if (MoJiCloudSyncClient.shouldSuppressAutoSync()) return
+            val seedPrefs = appContext.getSharedPreferences(SEED_PREFS_NAME, Context.MODE_PRIVATE)
+            if (seedPrefs.getBoolean(KEY_INITIAL_WALLETS_SEEDED, false)) return
+            val database = getInstance(appContext)
+            database.withTransaction {
+                if (MoJiCloudSyncClient.shouldSuppressAutoSync()) return@withTransaction
+                if (seedPrefs.getBoolean(KEY_INITIAL_WALLETS_SEEDED, false)) return@withTransaction
+                val existingWallets = database.walletDao().getAllWallets()
+                val existingTxs = database.transactionDao().getAllTransactions()
+                if (existingWallets.isEmpty() && existingTxs.isEmpty()) {
+                    database.walletDao().insertAll(defaultWallets())
+                }
+                seedPrefs.edit().putBoolean(KEY_INITIAL_WALLETS_SEEDED, true).apply()
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val appContext = context.applicationContext
@@ -347,28 +397,14 @@ abstract class AppDatabase : RoomDatabase() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
                             super.onCreate(db)
                             CoroutineScope(Dispatchers.IO).launch {
-                                val seedPrefs = appContext.getSharedPreferences("moji_db_seed_prefs", Context.MODE_PRIVATE)
-                                val database = getInstance(appContext)
-                                if (database.walletDao().getAllWallets().isEmpty()) {
-                                    database.walletDao().insertAll(defaultWallets())
-                                }
-                                seedPrefs.edit().putBoolean("initial_wallets_seeded_v1", true).apply()
+                                seedDefaultWalletsIfUntouched(appContext)
                             }
                         }
 
                         override fun onOpen(db: SupportSQLiteDatabase) {
                             super.onOpen(db)
                             CoroutineScope(Dispatchers.IO).launch {
-                                val seedPrefs = appContext.getSharedPreferences("moji_db_seed_prefs", Context.MODE_PRIVATE)
-                                if (!seedPrefs.getBoolean("initial_wallets_seeded_v1", false)) {
-                                    val database = getInstance(appContext)
-                                    val existingWallets = database.walletDao().getAllWallets()
-                                    val existingTxs = database.transactionDao().getAllTransactions()
-                                    if (existingWallets.isEmpty() && existingTxs.isEmpty()) {
-                                        database.walletDao().insertAll(defaultWallets())
-                                    }
-                                    seedPrefs.edit().putBoolean("initial_wallets_seeded_v1", true).apply()
-                                }
+                                seedDefaultWalletsIfUntouched(appContext)
                             }
                         }
                     })

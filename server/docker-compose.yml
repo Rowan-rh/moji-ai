@@ -1,0 +1,34 @@
+services:
+  moji-cloud:
+    build: .
+    container_name: moji-cloud-server
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - MOJI_BIND_ADDR=0.0.0.0:8787
+      - MOJI_DATA_DIR=/data
+      - MOJI_TRUST_PROXY_HEADERS=${MOJI_TRUST_PROXY_HEADERS:-false}
+    volumes:
+      - ./data:/data
+    ports:
+      - "127.0.0.1:8787:8787"
+
+  # 可选：配合 Caddy 自动申请并续期 Let's Encrypt HTTPS 证书（将 sync.example.com 替换为你的域名）
+  # caddy:
+  #   image: caddy:2-alpine
+  #   container_name: moji-caddy
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy_data:/data
+  #     - caddy_config:/config
+  #   depends_on:
+  #     - moji-cloud
+
+# volumes:
+#   caddy_data:
+#   caddy_config:

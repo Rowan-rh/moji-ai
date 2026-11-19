@@ -21,6 +21,7 @@ data class SavedScreenshotInfo(
 object BillScreenshotStorage {
 
     private const val SCREENSHOT_DIR_NAME = "bill_screenshots"
+    private const val MAX_SAFE_SCREENSHOT_BYTES = 8L * 1024L * 1024L
 
     @Volatile
     private var screenshotDirCanonicalPrefix: String? = null
@@ -103,6 +104,130 @@ object BillScreenshotStorage {
                 f.delete()
             }
         }
+    }
+
+    /**
+     * 查找或保存从云端拉取的 WebP 账单原图（严格校验 SHA-256 与 RIFF/WEBP 头，防止损坏或篡改数据落盘），
+     * 返回当前设备上可直接访问的安全沙盒绝对路径。
+     */
+    fun resolveOrSaveCloudScreenshot(
+        context: Context,
+        expectedSha256Raw: String,
+        existingPathHint: String? = null,
+        downloadedWebpBytes: ByteArray? = null
+    ): String? {
+        val expectedSha = expectedSha256Raw.trim().lowercase()
+        if (expectedSha.length != 64 || !expectedSha.all { it in '0'..'9' || it in 'a'..'f' }) {
+            return null
+        }
+        return runCatching {
+            val dir = File(context.applicationContext.filesDir, SCREENSHOT_DIR_NAME)
+            if (!dir.exists()) {
+                dir.mkdirs()
+            }
+            if (screenshotDirCanonicalPrefix == null) {
+                screenshotDirCanonicalPrefix = dir.canonicalPath.replace('\\', '/').trimEnd('/') + "/"
+            }
+
+            // 1. 若原路径已在本机存在且 SHA-256 完全匹配，直接复用
+            if (!existingPathHint.isNullOrBlank()) {
+                val hintFile = File(existingPathHint)
+                if (isSafeScreenshotFile(hintFile, context) && hintFile.length() in 1L..MAX_SAFE_SCREENSHOT_BYTES) {
+                    val hintBytes = hintFile.readBytes()
+                    if (sha256Hex(hintBytes) == expectedSha) {
+                        return@runCatching hintFile.absolutePath
+                    }
+                }
+            }
+
+            // 2. 检查本机固定内容寻址缓存文件是否已存在
+            val cloudTarget = File(dir, "bill_cloud_${expectedSha.take(16)}.webp")
+            if (cloudTarget.exists() && cloudTarget.isFile && cloudTarget.length() in 1L..MAX_SAFE_SCREENSHOT_BYTES) {
+                val existingBytes = cloudTarget.readBytes()
+                if (sha256Hex(existingBytes) == expectedSha) {
+                    return@runCatching cloudTarget.absolutePath
+                }
+            }
+
+            // 3. 若传入了云端下载字节流，强校验 WebP 魔数与 SHA-256 后原子落盘
+            val bytes = downloadedWebpBytes ?: return@runCatching null
+            if (!isValidWebpBytes(bytes) || sha256Hex(bytes) != expectedSha) {
+                return@runCatching null
+            }
+
+            val tmpFile = File(dir, ".tmp_${expectedSha.take(16)}_${System.nanoTime()}.webp")
+            try {
+                FileOutputStream(tmpFile).use { fos ->
+                    fos.write(bytes)
+                    fos.fd.sync()
+                }
+                if (!tmpFile.renameTo(cloudTarget)) {
+                    try {
+                        FileOutputStream(cloudTarget).use { fos ->
+                            fos.write(bytes)
+                            fos.fd.sync()
+                        }
+                    } catch (writeErr: Exception) {
+                        cloudTarget.delete()
+                        throw writeErr
+                    }
+                }
+            } finally {
+                if (tmpFile.exists()) {
+                    tmpFile.delete()
+                }
+            }
+            cloudTarget.absolutePath
+        }.getOrNull()
+    }
+
+    fun isValidWebpBytes(bytes: ByteArray): Boolean {
+        if (bytes.size < 16 || bytes.size.toLong() > MAX_SAFE_SCREENSHOT_BYTES) return false
+        return bytes[0] == 'R'.code.toByte() &&
+            bytes[1] == 'I'.code.toByte() &&
+            bytes[2] == 'F'.code.toByte() &&
+            bytes[3] == 'F'.code.toByte() &&
+            bytes[8] == 'W'.code.toByte() &&
+            bytes[9] == 'E'.code.toByte() &&
+            bytes[10] == 'B'.code.toByte() &&
+            bytes[11] == 'P'.code.toByte()
+    }
+
+    /**
+     * 全量恢复快照后清理 `files/bill_screenshots/` 中不再被任何账单引用的孤儿截图，
+     * 防止切换账本密钥或恢复历史备份后在沙盒残留旧私密账单原图。
+     */
+    fun cleanupUnreferencedScreenshots(context: Context, referencedPaths: Set<String>): Int {
+        return runCatching {
+            val dir = File(context.applicationContext.filesDir, SCREENSHOT_DIR_NAME)
+            if (!dir.exists() || !dir.isDirectory) return@runCatching 0
+            val keepCanonical = referencedPaths
+                .filter { it.isNotBlank() }
+                .mapNotNull { p -> runCatching { File(p).canonicalPath.replace('\\', '/') }.getOrNull() }
+                .toSet()
+            val now = System.currentTimeMillis()
+            var deleted = 0
+            dir.listFiles()?.forEach { file ->
+                if (!file.isFile) return@forEach
+                if (file.name.startsWith(".tmp_") && (now - file.lastModified()) < 60_000L) {
+                    return@forEach
+                }
+                val canonical = runCatching { file.canonicalPath.replace('\\', '/') }.getOrNull() ?: return@forEach
+                if (canonical !in keepCanonical && file.delete()) {
+                    deleted++
+                }
+            }
+            deleted
+        }.getOrDefault(0)
+    }
+
+    fun computeFileSha256IfSafe(file: File, context: Context? = null): String? {
+        if (!isSafeScreenshotFile(file, context)) return null
+        if (file.length() !in 1L..MAX_SAFE_SCREENSHOT_BYTES) return null
+        return runCatching {
+            val bytes = file.readBytes()
+            if (!isValidWebpBytes(bytes)) null else sha256Hex(bytes)
+        }.getOrNull()
     }
 
     private fun sha256Hex(bytes: ByteArray): String {

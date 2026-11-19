@@ -339,7 +339,7 @@ class AgentBillTriageEngine(
 
         var usedCloud = false
         val aiCfg = configManager?.getConfig()
-        if (aiCfg != null && aiCfg.apiKey.isNotBlank() && reclassifyItems.isNotEmpty()) {
+        if (aiCfg != null && (aiCfg.apiKey.isNotBlank() || aiCfg.allowsEmptyApiKey()) && reclassifyItems.isNotEmpty()) {
             usedCloud = tryCloudLlmAugmentation(
                 cfg = aiCfg,
                 reclassifyItems = reclassifyItems,
@@ -807,7 +807,7 @@ class AgentBillTriageEngine(
         expenseCategories: List<CategoryDef>,
         incomeCategories: List<CategoryDef>
     ): Boolean {
-        if (cfg.apiKey.isBlank()) return false
+        if (cfg.apiKey.isBlank() && !cfg.allowsEmptyApiKey()) return false
         return runCatching {
             val sampleItems = reclassifyItems.take(8)
             val expSummary = expenseCategories.joinToString("；") { c ->
@@ -899,7 +899,11 @@ class AgentBillTriageEngine(
         }
         val req = Request.Builder()
             .url(url)
-            .addHeader("Authorization", "Bearer ${cfg.apiKey}")
+            .apply {
+                if (cfg.apiKey.isNotBlank()) {
+                    addHeader("Authorization", "Bearer ${cfg.apiKey}")
+                }
+            }
             .post(json.encodeToString(kotlinx.serialization.json.JsonObject.serializer(), bodyJson).toRequestBody("application/json".toMediaType()))
             .build()
         httpClient.newCall(req).execute().use { resp ->
