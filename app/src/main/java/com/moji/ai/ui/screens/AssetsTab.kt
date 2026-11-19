@@ -171,7 +171,7 @@ fun ICostAssetsScreen(
     val observedDedicatedSettings by DedicatedFundManager.settingsFlow.collectAsState()
     val effectiveDedicatedSettings = if (
         dedicatedFundSettings != DedicatedFundSettings()
-    ) dedicatedFundSettings else observedDedicatedSettings{
+    ) dedicatedFundSettings else observedDedicatedSettings
     val observedCustomRates by CurrencyRateManager.customRatesFlow.collectAsState()
     val effectiveCustomRates = if (customCurrencyRates.isNotEmpty()) customCurrencyRates else observedCustomRates
     val assetPagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
@@ -3479,7 +3479,7 @@ private fun DedicatedFundQuickSetupRow(
         WalletEntity(
             id = -1L,
             name = title.removePrefix("+ ").trim(),
-            type = WalletType.E_WALLET,
+            type = WalletType.CASH_OTHER,
             subTypeLabel = "",
             brandCode = brandCode,
             includeInNetWorth = false
@@ -3804,7 +3804,7 @@ private fun DedicatedFundSetupSheet(
                             val walletDraft = WalletEntity(
                                 id = existingWallet?.id ?: 0L,
                                 name = name.trim(),
-                                type = existingWallet?.type ?: WalletType.E_WALLET,
+                                type = existingWallet?.type ?: WalletType.CASH_OTHER,
                                 subTypeLabel = existingWallet?.subTypeLabel?.ifBlank { kind.subTypeLabel } ?: kind.subTypeLabel,
                                 brandCode = kind.brandCode,
                                 currency = existingWallet?.currency ?: "CNY",

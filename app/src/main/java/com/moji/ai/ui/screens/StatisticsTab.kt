@@ -82,6 +82,7 @@ import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
 import com.moji.ai.ui.theme.ICostAssetImage
 import com.moji.ai.ui.theme.ICostAvatarButton
+import com.moji.ai.ui.theme.ICostBlueAccent
 import com.moji.ai.ui.theme.ICostCardWhite
 import com.moji.ai.ui.theme.ICostCategoryBadge
 import com.moji.ai.ui.theme.ICostCellGray
