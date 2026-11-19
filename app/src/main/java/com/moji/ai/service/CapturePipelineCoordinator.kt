@@ -7,6 +7,7 @@ import com.moji.ai.data.local.CaptureEvidenceEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.repository.LedgerRepository
@@ -110,7 +111,7 @@ class CapturePipelineCoordinator(
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = _observabilityLogs.asStateFlow()
 
     private val financialKeywordRegex = Regex(
-        """(支付成功|付款成功|交易成功|账单详情|交易详情|当前状态|交易状态|交易单号|商户单号|转账单号|订单号|支付方式|付款方式|医保支付|医保统筹|医保个账|医保|对方已收钱|已存入零钱|已收钱|消费|扣款|支出|转出|转账|收款|到账|还款|退款|退回|零钱|余额宝|花呗|白条|信用卡|储蓄卡|尾号|¥|￥|RMB|USD|HKD|\$)""",
+        """(支付成功|付款成功|交易成功|账单详情|交易详情|当前状态|交易状态|交易单号|商户单号|转账单号|订单号|支付方式|付款方式|医保支付|医保统筹|医保个账|统筹支付|统筹基金|个账支付|历年账户|家庭共济|医保|对方已收钱|已存入零钱|已收钱|消费|扣款|支出|转出|转账|收款|到账|还款|退款|退回|零钱|余额宝|花呗|白条|信用卡|储蓄卡|尾号|¥|￥|RMB|USD|HKD|\$)""",
         RegexOption.IGNORE_CASE
     )
     private val numberRegex = Regex("""[0-9]+(\.[0-9]{1,2})?""")
@@ -166,7 +167,9 @@ class CapturePipelineCoordinator(
             // (a) 支付成功页（如支付宝碰一下立减）第一帧先录了原价、几秒后立减动画完成又录了实扣价产生的重复原价记录；
             // (b) 没有任何明确支付/交易时间且无订单号的裸完成页脏记录（仅限无障碍/OCR 页面采集，排除通知栏与沙盒测试通道）。
             for (tx in allTxs) {
-                if (tx.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT")) {
+                if (tx.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT") ||
+                    DedicatedFundManager.isCompositeMedicalPersonalChild(tx)
+                ) {
                     continue
                 }
                 if (tx.discountCents == 0L && tx.orderKey.isBlank()) {
@@ -205,7 +208,9 @@ class CapturePipelineCoordinator(
             // 2. 先从 capture_evidences 恢复曾因异步截图覆盖或首帧无时间而缺失的精确支付时间/备注/订单号，并重算旧版拼多多/京东异常记录
             val afterStep1 = repository.getAllTransactions()
             for (tx in afterStep1) {
-                if (tx.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT")) {
+                if (tx.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT") ||
+                    DedicatedFundManager.isCompositeMedicalPersonalChild(tx)
+                ) {
                     continue
                 }
                 val evidences = repository.getEvidencesForTransaction(tx.id)
@@ -349,11 +354,15 @@ class CapturePipelineCoordinator(
             for (i in currentTxs.indices) {
                 val primary = currentTxs[i]
                 if (primary.id in deletedIds) continue
-                if (primary.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT")) continue
+                if (primary.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT") ||
+                    DedicatedFundManager.isCompositeMedicalPersonalChild(primary)
+                ) continue
                 for (j in (i + 1) until currentTxs.size) {
                     val secondary = currentTxs[j]
                     if (secondary.id in deletedIds) continue
-                    if (secondary.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT")) continue
+                    if (secondary.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT") ||
+                        DedicatedFundManager.isCompositeMedicalPersonalChild(secondary)
+                    ) continue
                     val priKey = primary.orderKey.ifBlank { primary.transactionNo }.ifBlank { primary.merchantOrderNo }
                     val secKey = secondary.orderKey.ifBlank { secondary.transactionNo }.ifBlank { secondary.merchantOrderNo }
                     val hasConflictingSameChannelKey = priKey.isNotBlank() &&
@@ -545,8 +554,24 @@ class CapturePipelineCoordinator(
             duplicateSuspected = true,
             updatedAtMillis = System.currentTimeMillis()
         )
-        val newId = repository.recordTransaction(txToRecord)
-        val savedTx = txToRecord.copy(id = newId)
+        val medBreakdown = AiAccountingEngine.extractMedicalBreakdown(txToRecord.rawCapturedText)
+        val savedTx = if (txToRecord.type == TransactionType.EXPENSE &&
+            txToRecord.paymentMethodRaw != "医保支付" &&
+            medBreakdown.totalMedicalCents > 0L &&
+            txToRecord.amountCents > 0L
+        ) {
+            val commercialDisc = (txToRecord.discountCents - medBreakdown.totalMedicalCents).coerceAtLeast(0L)
+            repository.recordCompositeMedicalTransaction(
+                mainTx = txToRecord,
+                poolSubsidyCents = medBreakdown.poolSubsidyCents,
+                personalAccountCents = medBreakdown.personalAccountCents,
+                unspecifiedMedicalCents = medBreakdown.unspecifiedMedicalCents,
+                commercialDiscountCents = commercialDisc
+            ).mainTransaction
+        } else {
+            val newId = repository.recordTransaction(txToRecord)
+            txToRecord.copy(id = newId)
+        }
         saveEvidenceRecord(savedTx, savedTx.captureSource, "user.force.record", savedTx.rawCapturedText)
 
         val wallets = repository.getAllWallets()
@@ -696,13 +721,13 @@ class CapturePipelineCoordinator(
                 amountCents = parsedTx.amountCents,
                 occurredAtMillis = parsedTx.timestamp,
                 toleranceMillis = 24 * 3600_000L
-            )
+            ).filterNot { DedicatedFundManager.isCompositeMedicalPersonalChild(it) }
             val timeOrCapturedCandidates = repository.findTransactionsByAmountAndTimeOrCapturedWindow(
                 amountCents = parsedTx.amountCents,
                 occurredAtMillis = parsedTx.timestamp,
                 capturedAtMillis = capturedAtMillis,
                 toleranceMillis = 65_000L
-            )
+            ).filterNot { DedicatedFundManager.isCompositeMedicalPersonalChild(it) }
             val combinedCandidates = (timeOrCapturedCandidates + sameDayAmountCandidates).distinctBy { it.id }
 
             // 2a. 跨端内嵌订单号匹配（如微信支付商品详情中包含京东/淘宝/美团订单编号）
@@ -802,6 +827,17 @@ class CapturePipelineCoordinator(
             }
         }
 
+        val medBreakdown = AiAccountingEngine.extractMedicalBreakdown(mergedText)
+        val isMixedMedicalExpense = parsedTx.type == TransactionType.EXPENSE &&
+            parsedTx.paymentMethodRaw != "医保支付" &&
+            medBreakdown.totalMedicalCents > 0L &&
+            parsedTx.amountCents > 0L
+
+        if (duplicateMatchedTx != null && DedicatedFundManager.isCompositeMedicalPersonalChild(duplicateMatchedTx)) {
+            duplicateMatchedTx = duplicateMatchedTx.relatedTransactionId?.let { repository.getTransactionById(it) }
+                ?: duplicateMatchedTx
+        }
+
         if (duplicateMatchedTx != null) {
             val matched = duplicateMatchedTx
             val enrichment = buildEnrichedTransactionIfHasNewDetails(
@@ -813,8 +849,53 @@ class CapturePipelineCoordinator(
                 capturedAtMillis = capturedAtMillis
             )
 
-            // 情况 A：点开详情页/点开“更多”补充了新细节（订单号、商户单号、支付方式、商品说明、商户全称、数量、优惠等）-> 自动补全到原账单！
-            if (enrichment != null) {
+            if (isMixedMedicalExpense) {
+                val baseMain = enrichment?.first ?: matched
+                val baseFields = enrichment?.second ?: emptyList()
+                val commercialDisc = (parsedTx.discountCents - medBreakdown.totalMedicalCents).coerceAtLeast(0L)
+                val fusionResult = repository.enrichCompositeMedicalOnExistingTransaction(
+                    existingMainId = matched.id,
+                    enrichedCandidateMain = baseMain,
+                    baseEnrichedFields = baseFields,
+                    poolSubsidyCents = medBreakdown.poolSubsidyCents,
+                    personalAccountCents = medBreakdown.personalAccountCents,
+                    unspecifiedMedicalCents = medBreakdown.unspecifiedMedicalCents,
+                    commercialDiscountCents = commercialDisc
+                )
+                if (fusionResult.wasModified) {
+                    val enrichedTx = fusionResult.updatedMainTransaction
+                    if (screenshotPath.isNotBlank() && screenshotPath != enrichedTx.screenshotPath) {
+                        BillScreenshotStorage.deleteIfExists(screenshotPath)
+                    }
+                    saveEvidenceRecord(enrichedTx, "AI_FUSED", packageName, mergedText)
+                    recentRecordedTransactions[amountTypeFingerprint] = enrichedTx
+                    recentDuplicatePromptCooldown["DUP_${enrichedTx.id}"] = capturedAtMillis
+
+                    val updatedWallets = repository.getAllWallets()
+                    val walletObj = updatedWallets.firstOrNull { it.id == (enrichedTx.sourceWalletId ?: enrichedTx.targetWalletId) }
+                    val walletName = walletObj?.let { w ->
+                        if (!w.cardLast4.isNullOrBlank()) "${w.name}(${w.cardLast4})" else w.name
+                    } ?: "不关联账户"
+
+                    val enrichedSummary = fusionResult.enrichedFields.joinToString("、")
+                    appendLog(
+                        packageName = packageName,
+                        captureSource = "AI_FUSED",
+                        rawText = mergedText.take(140),
+                        outcome = CaptureEventOutcome.FUSED_PATCH,
+                        detailSummary = "认定为同一笔医疗账单 #${enrichedTx.id}（$duplicateReasonLabel），已融合医保明细：$enrichedSummary",
+                        transactionId = enrichedTx.id
+                    )
+
+                    showOverlayBannerForEnrichedTransaction(
+                        tx = enrichedTx,
+                        walletName = walletName,
+                        enrichedFields = fusionResult.enrichedFields
+                    )
+                    return enrichedTx
+                }
+            } else if (enrichment != null) {
+                // 情况 A：点开详情页/点开“更多”补充了新细节（订单号、商户单号、支付方式、商品说明、商户全称、数量、优惠等）-> 自动补全到原账单！
                 val (enrichedTx, enrichedFields) = enrichment
                 if (screenshotPath.isNotBlank() && screenshotPath != enrichedTx.screenshotPath) {
                     BillScreenshotStorage.deleteIfExists(screenshotPath)
@@ -884,7 +965,7 @@ class CapturePipelineCoordinator(
                 screenshotPath = effectiveMatchedScreenshotPath,
                 screenshotSha256 = effectiveMatchedScreenshotSha,
                 duplicateSuspected = true,
-                note = "${parsedTx.note.ifBlank { parsedTx.merchant }} [用户手动确认录入]".trim().take(55)
+                note = "${parsedTx.note.ifBlank { parsedTx.merchant }} [用户手动确认录入]".trim().take(140)
             )
             pendingDuplicateCandidates[candidateId] = candidateTx
 
@@ -928,8 +1009,19 @@ class CapturePipelineCoordinator(
             duplicateSuspected = false
         )
 
-        val newId = repository.recordTransaction(txToRecord)
-        val savedTx = txToRecord.copy(id = newId)
+        val savedTx = if (isMixedMedicalExpense) {
+            val commercialDisc = (txToRecord.discountCents - medBreakdown.totalMedicalCents).coerceAtLeast(0L)
+            repository.recordCompositeMedicalTransaction(
+                mainTx = txToRecord,
+                poolSubsidyCents = medBreakdown.poolSubsidyCents,
+                personalAccountCents = medBreakdown.personalAccountCents,
+                unspecifiedMedicalCents = medBreakdown.unspecifiedMedicalCents,
+                commercialDiscountCents = commercialDisc
+            ).mainTransaction
+        } else {
+            val newId = repository.recordTransaction(txToRecord)
+            txToRecord.copy(id = newId)
+        }
         saveEvidenceRecord(savedTx, captureSource, packageName, mergedText)
 
         recentRecordedTransactions[amountTypeFingerprint] = savedTx
@@ -1447,12 +1539,32 @@ class CapturePipelineCoordinator(
         val amountText = "$sign$symbol$amtStr"
         val merchantPart = tx.merchant.ifBlank { tx.category }
         val occurredShort = SimpleDateFormat("HH:mm", Locale.CHINA).format(Date(tx.timestamp))
-        val discountHint = if (tx.type == TransactionType.EXPENSE && tx.discountCents > 0L) {
-            val origStr = String.format(Locale.US, "%.2f", (tx.amountCents + tx.discountCents) / 100.0)
-            val discStr = String.format(Locale.US, "%.2f", tx.discountCents / 100.0)
-            "原价$symbol$origStr·优惠$symbol$discStr·实扣$symbol$amtStr · "
+        val isCompositeMain = TagCatalog.parseTags(tx.tags).contains("组合支付") &&
+            !DedicatedFundManager.isCompositeMedicalPersonalChild(tx)
+        val parsedMedNote = if (isCompositeMain) {
+            DedicatedFundManager.parseStructuredMedicalNote(tx.note)
         } else {
-            ""
+            null
+        }
+        val discountHint = when {
+            isCompositeMain && parsedMedNote != null && parsedMedNote.personalAccountCents > 0L -> {
+                val origCents = parsedMedNote.originalCostCents.takeIf { it > 0L }
+                    ?: (tx.amountCents + tx.discountCents + parsedMedNote.personalAccountCents)
+                val origStr = String.format(Locale.US, "%.2f", origCents / 100.0)
+                val personalStr = String.format(Locale.US, "%.2f", parsedMedNote.personalAccountCents / 100.0)
+                val poolPart = if (tx.discountCents > 0L) {
+                    "·统筹$symbol${String.format(Locale.US, "%.2f", tx.discountCents / 100.0)}"
+                } else {
+                    ""
+                }
+                "组合双扣·原价$symbol$origStr$poolPart·个账$symbol$personalStr·自付$symbol$amtStr · "
+            }
+            tx.type == TransactionType.EXPENSE && tx.discountCents > 0L -> {
+                val origStr = String.format(Locale.US, "%.2f", (tx.amountCents + tx.discountCents) / 100.0)
+                val discStr = String.format(Locale.US, "%.2f", tx.discountCents / 100.0)
+                "原价$symbol$origStr·优惠$symbol$discStr·实扣$symbol$amtStr · "
+            }
+            else -> ""
         }
         val subtitle = "${discountHint}${tx.category} · $merchantPart · $walletName · $occurredShort"
 
