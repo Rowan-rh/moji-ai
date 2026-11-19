@@ -341,13 +341,17 @@ object WeightedCategoryClassifier {
         ),
         WeightedCategoryRule(
             category = "医疗-买药",
-            strongKeywords = listOf("买药", "药房", "大药房", "药店", "购药"),
-            brandKeywords = listOf("老百姓大药房", "益丰大药房", "一心堂", "大参林", "海王星辰", "京东大药房", "美团买药", "阿里健康大药房"),
+            strongKeywords = listOf("买药", "药房", "大药房", "药店", "购药", "医药", "药业", "药堂"),
+            brandKeywords = listOf(
+                "老百姓大药房", "益丰大药房", "一心堂", "大参林", "海王星辰",
+                "怡康", "怡康医药", "国大药房", "同仁堂", "漱玉平民", "健之佳", "叮当快药",
+                "京东大药房", "美团买药", "阿里健康大药房"
+            ),
             itemKeywords = listOf("感冒灵", "布洛芬", "维生素", "创可贴", "眼药水", "阿莫西林")
         ),
         WeightedCategoryRule(
             category = "医疗-门诊",
-            strongKeywords = listOf("医院", "门诊", "挂号", "体检", "牙科", "口腔", "医保局"),
+            strongKeywords = listOf("医院", "门诊", "挂号", "体检", "牙科", "口腔", "医保局", "诊所", "卫生院", "卫生服务中心", "妇幼"),
             brandKeywords = listOf("协和医院", "华西医院", "瑞尔齿科", "美年大健康", "爱康国宾"),
             itemKeywords = listOf("诊疗费", "化验费", "CT检查", "洗牙", "补牙")
         ),
