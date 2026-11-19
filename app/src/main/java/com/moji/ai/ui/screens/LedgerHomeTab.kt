@@ -1424,9 +1424,9 @@ private fun ICostLedgerRow(
     val targetWallet = tx.targetWalletId?.let { walletMap[it] }
 
     val walletLabel = when (tx.type) {
-        TransactionType.EXPENSE, TransactionType.LOAN_OUT -> formatWalletDisplayName(sourceWallet, "账户余额")
+        TransactionType.EXPENSE, TransactionType.LOAN_OUT -> formatWalletDisplayName(sourceWallet)
         TransactionType.INCOME, TransactionType.REFUND_OFFSET, TransactionType.LOAN_IN ->
-            formatWalletDisplayName(targetWallet ?: sourceWallet, "账户余额")
+            formatWalletDisplayName(targetWallet ?: sourceWallet)
         TransactionType.TRANSFER -> "${sourceWallet?.name ?: "转出"} → ${targetWallet?.name ?: "转入"}"
         TransactionType.REPAYMENT -> "${sourceWallet?.name ?: "储蓄卡"} → ${targetWallet?.name ?: "信用卡"}"
     }

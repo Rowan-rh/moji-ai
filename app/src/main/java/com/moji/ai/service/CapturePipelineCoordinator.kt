@@ -7,6 +7,7 @@ import com.moji.ai.data.local.CaptureEvidenceEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.SilentBookkeepingNotifier
@@ -109,7 +110,7 @@ class CapturePipelineCoordinator(
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = _observabilityLogs.asStateFlow()
 
     private val financialKeywordRegex = Regex(
-        """(支付成功|付款成功|交易成功|账单详情|交易详情|当前状态|交易状态|交易单号|商户单号|转账单号|订单号|支付方式|付款方式|对方已收钱|已存入零钱|已收钱|消费|扣款|支出|转出|转账|收款|到账|还款|退款|退回|零钱|余额宝|花呗|白条|信用卡|储蓄卡|尾号|¥|￥|RMB|USD|HKD|\$)""",
+        """(支付成功|付款成功|交易成功|账单详情|交易详情|当前状态|交易状态|交易单号|商户单号|转账单号|订单号|支付方式|付款方式|医保支付|医保统筹|医保个账|医保|对方已收钱|已存入零钱|已收钱|消费|扣款|支出|转出|转账|收款|到账|还款|退款|退回|零钱|余额宝|花呗|白条|信用卡|储蓄卡|尾号|¥|￥|RMB|USD|HKD|\$)""",
         RegexOption.IGNORE_CASE
     )
     private val numberRegex = Regex("""[0-9]+(\.[0-9]{1,2})?""")
@@ -552,7 +553,7 @@ class CapturePipelineCoordinator(
         val walletObj = wallets.firstOrNull { it.id == (savedTx.sourceWalletId ?: savedTx.targetWalletId) }
         val walletName = walletObj?.let { w ->
             if (!w.cardLast4.isNullOrBlank()) "${w.name}(${w.cardLast4})" else w.name
-        } ?: "默认账户"
+        } ?: "不关联账户"
 
         appendLog(
             packageName = "user.force.record",
@@ -827,7 +828,7 @@ class CapturePipelineCoordinator(
                 val walletObj = updatedWallets.firstOrNull { it.id == (enrichedTx.sourceWalletId ?: enrichedTx.targetWalletId) }
                 val walletName = walletObj?.let { w ->
                     if (!w.cardLast4.isNullOrBlank()) "${w.name}(${w.cardLast4})" else w.name
-                } ?: "默认账户"
+                } ?: "不关联账户"
 
                 val enrichedSummary = enrichedFields.joinToString("、")
                 appendLog(
@@ -875,7 +876,7 @@ class CapturePipelineCoordinator(
             val walletObj = wallets.firstOrNull { it.id == (parsedTx.sourceWalletId ?: parsedTx.targetWalletId) }
             val walletName = walletObj?.let { w ->
                 if (!w.cardLast4.isNullOrBlank()) "${w.name}(${w.cardLast4})" else w.name
-            } ?: "默认账户"
+            } ?: "不关联账户"
 
             val candidateId = candidateIdGenerator.incrementAndGet()
             val candidateTx = parsedTx.copy(
@@ -939,7 +940,7 @@ class CapturePipelineCoordinator(
         val walletObj = wallets.firstOrNull { it.id == (savedTx.sourceWalletId ?: savedTx.targetWalletId) }
         val walletName = walletObj?.let { w ->
             if (!w.cardLast4.isNullOrBlank()) "${w.name}(${w.cardLast4})" else w.name
-        } ?: "默认账户"
+        } ?: "不关联账户"
 
         val keySuffix = if (savedTx.orderKey.isNotBlank()) " · Key:${savedTx.orderKey.takeLast(6)}" else ""
         val qtySuffix = if (savedTx.quantityDesc.isNotBlank()) " · ${savedTx.quantityDesc}" else ""
@@ -1171,7 +1172,7 @@ class CapturePipelineCoordinator(
      * - 从电商订单侧保留：具体店铺名称（如 `百亿补贴·E路驰`）、具体商品标题（如 `便携车载破窗器...`）、原价与优惠明细、电商订单编号（`261029-...`）；
      * - 从支付宝/微信账单侧保留：真实扣款银行卡/花呗账户（如 `招商银行信用卡(3354)` 及对应 `sourceWalletId`）、支付交易单号（`2026102923...`）与商户单号（`XP23...`）。
      */
-    private fun buildEnrichedTransactionIfHasNewDetails(
+    internal fun buildEnrichedTransactionIfHasNewDetails(
         existing: TransactionEntity,
         incoming: TransactionEntity,
         resolvedOrderKey: String,
@@ -1370,6 +1371,18 @@ class CapturePipelineCoordinator(
             existing.timestamp
         }
 
+        val existingTagList = TagCatalog.parseTags(existing.tags)
+        val incomingTagList = TagCatalog.parseTags(incoming.tags)
+        val newTagsAdded = incomingTagList.filter { inc ->
+            existingTagList.none { it.equals(inc, ignoreCase = true) }
+        }
+        val updatedTags = if (newTagsAdded.isNotEmpty()) {
+            enrichedFields.add("标签(${newTagsAdded.joinToString(",")})")
+            TagCatalog.joinTags(existingTagList + incomingTagList)
+        } else {
+            existing.tags
+        }
+
         if (enrichedFields.isEmpty()) {
             return null
         }
@@ -1380,6 +1393,7 @@ class CapturePipelineCoordinator(
             merchant = updatedMerchant,
             category = updatedCategory,
             note = updatedNote,
+            tags = updatedTags,
             sourceWalletId = updatedSourceWalletId,
             targetWalletId = updatedTargetWalletId,
             itemQuantity = updatedQty,
