@@ -287,6 +287,9 @@ fun ICostCalculatorSheet(
             if (editingTransaction != null) editingAccountWalletId(editingTransaction) else initialSourceWalletId
         )
     }
+    var unlinkedWalletSelected by remember {
+        mutableStateOf(editingTransaction != null && editingAccountWalletId(editingTransaction) == null)
+    }
     var targetWalletId by remember {
         mutableStateOf(
             editingTransaction?.targetWalletId ?: initialTargetWalletId
@@ -330,9 +333,11 @@ fun ICostCalculatorSheet(
             }
             val fallbackW = wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull()
             sourceWalletId = (wallets.firstOrNull { it.id == tpl.walletId } ?: fallbackW)?.id
+            unlinkedWalletSelected = false
             targetWalletId = null
         } else {
             sourceWalletId = wallets.firstOrNull { it.id == tpl.walletId }?.id
+            unlinkedWalletSelected = false
             targetWalletId = wallets.firstOrNull { it.id == tpl.targetWalletId }?.id?.takeIf { it != sourceWalletId }
         }
         if (tpl.amountCents > 0L) {
@@ -385,6 +390,7 @@ fun ICostCalculatorSheet(
             } else {
                 initialSourceWalletId
             }
+            unlinkedWalletSelected = editingTransaction != null && editingAccountWalletId(editingTransaction) == null
             targetWalletId = editingTransaction?.targetWalletId ?: initialTargetWalletId
             entryTimestamp = editingTransaction?.timestamp ?: System.currentTimeMillis()
             timeManuallySet = false
@@ -617,8 +623,12 @@ fun ICostCalculatorSheet(
             resolvedTargetId = targetWalletId
         } else {
             val defaultWallet = wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull()
-            // 编辑原本未关联账户的账单时保持不关联，不擅自记到默认账户
-            resolvedSourceId = sourceWalletId ?: if (editingTransaction != null) null else defaultWallet?.id
+            // 编辑原本未关联账户的账单或用户主动点选「不关联账户」时保持 null，不擅自记到默认账户
+            resolvedSourceId = if (unlinkedWalletSelected) {
+                null
+            } else {
+                sourceWalletId ?: if (editingTransaction != null) null else defaultWallet?.id
+            }
             resolvedTargetId = null
         }
         val resolvedSourceWallet = wallets.firstOrNull { it.id == resolvedSourceId }
@@ -824,6 +834,9 @@ fun ICostCalculatorSheet(
                                         preservedSpecialType = null
                                         txType = mode
                                         inlineError = null
+                                        if (mode == TransactionType.TRANSFER) {
+                                            unlinkedWalletSelected = false
+                                        }
                                         if (mode == TransactionType.INCOME) {
                                             selectedMainCategory = CategoryCatalog.incomeCategories.firstOrNull()?.name ?: "工资"
                                             selectedSubCategory = ""
@@ -1339,9 +1352,14 @@ fun ICostCalculatorSheet(
             }
 
             // 3. 快捷属性胶囊栏（选择账户 | 报销 | 优惠 | 标签 + 右侧币种胶囊）
-            // 未手动选择时展示保存时实际会使用的默认账户，避免「显示未选、实际记入某账户」
-            val currentWallet = wallets.firstOrNull { it.id == sourceWalletId }
-                ?: if (isEditing) null else (wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull())
+            // 未手动选择时展示保存时实际会使用的默认账户，避免「显示未选、实际记入某账户」；显式选择「不关联账户」时清晰展示为「不关联账户」
+            val currentWallet = if (unlinkedWalletSelected) {
+                null
+            } else {
+                wallets.firstOrNull { it.id == sourceWalletId }
+                    ?: if (isEditing) null else (wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull())
+            }
+            val isExplicitlyUnlinked = unlinkedWalletSelected || (isEditing && currentWallet == null)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1356,8 +1374,12 @@ fun ICostCalculatorSheet(
                         item {
                             ICostOptionPill(
                                 assetFile = "opt_account.webp",
-                                label = currentWallet?.name ?: "选择账户",
-                                active = sourceWalletId != null,
+                                label = when {
+                                    isExplicitlyUnlinked -> "不关联账户"
+                                    currentWallet != null -> currentWallet.name
+                                    else -> "选择账户"
+                                },
+                                active = sourceWalletId != null || unlinkedWalletSelected,
                                 onClick = { showWalletPickerForTarget = false }
                             )
                         }
@@ -1690,6 +1712,16 @@ fun ICostCalculatorSheet(
     // 账户选择弹窗
     if (showWalletPickerForTarget != null) {
         val pickingTarget = showWalletPickerForTarget == true
+        val allowUnlinkedOption = !pickingTarget && txType != TransactionType.TRANSFER
+        val defaultNonLiabilityId = (wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull())?.id
+        val selectedWalletIdForDialog = when {
+            pickingTarget -> targetWalletId
+            txType == TransactionType.TRANSFER -> sourceWalletId
+            unlinkedWalletSelected -> null
+            sourceWalletId != null -> sourceWalletId
+            isEditing -> null
+            else -> defaultNonLiabilityId
+        }
         AlertDialog(
             onDismissRequest = { showWalletPickerForTarget = null },
             containerColor = ICostCardWhite,
@@ -1705,13 +1737,76 @@ fun ICostCalculatorSheet(
             },
             text = {
                 LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (allowUnlinkedOption) {
+                        val isUnlinkedChecked = selectedWalletIdForDialog == null
+                        item(key = "unlinked_wallet_option") {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(12.dp))
+                                    .background(if (isUnlinkedChecked) ICostBlueAccent.copy(alpha = 0.12f) else Color.Transparent)
+                                    .clickable {
+                                        sourceWalletId = null
+                                        unlinkedWalletSelected = true
+                                        inlineError = null
+                                        showWalletPickerForTarget = null
+                                    }
+                                    .padding(vertical = 10.dp, horizontal = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(CircleShape)
+                                        .background(ICostPillGray),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    ICostAssetImage(
+                                        assetFile = "opt_account.webp",
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        "不关联账户",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 15.sp,
+                                        color = if (isUnlinkedChecked) ICostBlueAccent else ICostTextPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Text(
+                                        "仅记收支明细，不扣减或增加账户余额",
+                                        fontSize = 12.sp,
+                                        color = ICostTextSecondary
+                                    )
+                                }
+                                if (isUnlinkedChecked) {
+                                    Icon(
+                                        Icons.Default.Check,
+                                        contentDescription = "已选中",
+                                        tint = ICostBlueAccent,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
                     items(wallets) { w ->
+                        val isChecked = selectedWalletIdForDialog == w.id
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
+                                .background(if (isChecked) ICostBlueAccent.copy(alpha = 0.12f) else Color.Transparent)
                                 .clickable {
-                                    if (pickingTarget) targetWalletId = w.id else sourceWalletId = w.id
+                                    if (pickingTarget) {
+                                        targetWalletId = w.id
+                                    } else {
+                                        sourceWalletId = w.id
+                                        unlinkedWalletSelected = false
+                                    }
                                     inlineError = null
                                     showWalletPickerForTarget = null
                                 }
@@ -1725,6 +1820,7 @@ fun ICostCalculatorSheet(
                                     formatWalletDisplayName(w),
                                     fontWeight = FontWeight.Bold,
                                     fontSize = 15.sp,
+                                    color = if (isChecked) ICostBlueAccent else ICostTextPrimary,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
@@ -1742,7 +1838,8 @@ fun ICostCalculatorSheet(
                                 },
                                 fontFamily = ICDinFontFamily,
                                 fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                color = if (isChecked) ICostBlueAccent else ICostTextPrimary
                             )
                         }
                     }

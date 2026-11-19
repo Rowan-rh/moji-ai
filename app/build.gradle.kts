@@ -39,8 +39,8 @@ android {
         applicationId = "com.moji.ai"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.1.3"
+        versionCode = 6
+        versionName = "1.1.4"
 
         buildConfigField("Boolean", "IS_QA_BUILD", "false")
         buildConfigField("String", "GITHUB_UPDATE_REPO", "\"${escapeForBuildConfig(githubUpdateRepo)}\"")
