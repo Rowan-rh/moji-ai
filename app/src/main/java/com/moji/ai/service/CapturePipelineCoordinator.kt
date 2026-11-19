@@ -1371,16 +1371,9 @@ class CapturePipelineCoordinator(
             existing.timestamp
         }
 
-        val existingTagList = TagCatalog.parseTags(existing.tags)
-        val incomingTagList = TagCatalog.parseTags(incoming.tags)
-        val newTagsAdded = incomingTagList.filter { inc ->
-            existingTagList.none { it.equals(inc, ignoreCase = true) }
-        }
-        val updatedTags = if (newTagsAdded.isNotEmpty()) {
+        val (updatedTags, newTagsAdded) = mergeEnrichedTags(existing.tags, incoming.tags)
+        if (newTagsAdded.isNotEmpty()) {
             enrichedFields.add("标签(${newTagsAdded.joinToString(",")})")
-            TagCatalog.joinTags(existingTagList + incomingTagList)
-        } else {
-            existing.tags
         }
 
         if (enrichedFields.isEmpty()) {
@@ -1528,6 +1521,19 @@ class CapturePipelineCoordinator(
     }
 
     companion object {
+        internal fun mergeEnrichedTags(existingTags: String, incomingTags: String): Pair<String, List<String>> {
+            val existingTagList = TagCatalog.parseTags(existingTags)
+            val incomingTagList = TagCatalog.parseTags(incomingTags)
+            val newTagsAdded = incomingTagList.filter { inc ->
+                existingTagList.none { it.equals(inc, ignoreCase = true) }
+            }
+            return if (newTagsAdded.isNotEmpty()) {
+                TagCatalog.joinTags(existingTagList + incomingTagList) to newTagsAdded
+            } else {
+                existingTags to emptyList()
+            }
+        }
+
         private fun defaultDiagnosticSeedLogs(): List<CaptureObservabilityLogEntry> {
             val now = System.currentTimeMillis()
             return listOf(

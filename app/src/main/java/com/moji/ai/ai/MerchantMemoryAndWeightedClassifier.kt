@@ -25,15 +25,21 @@ data class MerchantMemoryEntry(
     val updatedAtMillis: Long = System.currentTimeMillis()
 )
 
-class MerchantMemoryManager(context: Context) {
-    private val prefs = context.getSharedPreferences("moji_merchant_memory_prefs", Context.MODE_PRIVATE)
+class MerchantMemoryManager internal constructor(
+    private val prefs: android.content.SharedPreferences? = null,
+    initialEntries: List<MerchantMemoryEntry>? = null
+) {
+    constructor(context: Context) : this(
+        prefs = context.getSharedPreferences("moji_merchant_memory_prefs", Context.MODE_PRIVATE)
+    )
+
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
-    private val _memoriesFlow = MutableStateFlow(loadEntries())
+    private val _memoriesFlow = MutableStateFlow(initialEntries ?: loadEntries())
     val memoriesFlow: StateFlow<List<MerchantMemoryEntry>> = _memoriesFlow.asStateFlow()
 
     private fun loadEntries(): List<MerchantMemoryEntry> {
-        val raw = prefs.getString("merchant_memories_json", null)
+        val raw = prefs?.getString("merchant_memories_json", null)
         if (!raw.isNullOrBlank()) {
             runCatching {
                 return json.decodeFromString<List<MerchantMemoryEntry>>(raw)
@@ -47,7 +53,7 @@ class MerchantMemoryManager(context: Context) {
         val sorted = list.sortedWith(compareByDescending<MerchantMemoryEntry> { it.hitCount }.thenByDescending { it.updatedAtMillis })
             .take(300)
         _memoriesFlow.value = sorted
-        prefs.edit().putString("merchant_memories_json", json.encodeToString(sorted)).apply()
+        prefs?.edit()?.putString("merchant_memories_json", json.encodeToString(sorted))?.apply()
     }
 
     /**

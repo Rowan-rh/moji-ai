@@ -1744,7 +1744,7 @@ fun ICostCalculatorSheet(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(12.dp))
-                                    .background(if (isUnlinkedChecked) Color(0xFFEAF2FF) else Color.Transparent)
+                                    .background(if (isUnlinkedChecked) ICostBlueAccent.copy(alpha = 0.12f) else Color.Transparent)
                                     .clickable {
                                         sourceWalletId = null
                                         unlinkedWalletSelected = true
@@ -1799,7 +1799,7 @@ fun ICostCalculatorSheet(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(12.dp))
-                                .background(if (isChecked) Color(0xFFEAF2FF) else Color.Transparent)
+                                .background(if (isChecked) ICostBlueAccent.copy(alpha = 0.12f) else Color.Transparent)
                                 .clickable {
                                     if (pickingTarget) {
                                         targetWalletId = w.id
