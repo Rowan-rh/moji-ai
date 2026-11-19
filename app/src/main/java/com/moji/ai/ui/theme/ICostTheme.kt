@@ -484,7 +484,7 @@ fun formatSignedExpenseCents(
     return "-$sym${AppearanceConfigManager.formatDisplayAmount(abs(cents) / 100.0)}"
 }
 
-fun formatWalletDisplayName(wallet: WalletEntity?, fallback: String = "账户余额"): String {
+fun formatWalletDisplayName(wallet: WalletEntity?, fallback: String = "不关联账户"): String {
     if (wallet == null) return fallback
     return wallet.name
 }

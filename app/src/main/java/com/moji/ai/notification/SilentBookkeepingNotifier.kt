@@ -207,13 +207,13 @@ class SilentBookkeepingNotifier(private val context: Context) {
         val sourceName = formatWalletWithTail(tx.sourceWalletId?.let { walletMap[it] })
         val targetName = formatWalletWithTail(tx.targetWalletId?.let { walletMap[it] })
         val walletRoute = when (tx.type) {
-            TransactionType.EXPENSE -> "账户：${sourceName ?: "未指定"}"
-            TransactionType.INCOME -> "入账：${targetName ?: sourceName ?: "未指定"}"
+            TransactionType.EXPENSE -> "账户：${sourceName ?: "不关联账户"}"
+            TransactionType.INCOME -> "入账：${targetName ?: sourceName ?: "不关联账户"}"
             TransactionType.TRANSFER -> "${sourceName ?: "转出"} ➔ ${targetName ?: "转入"}"
             TransactionType.REPAYMENT -> "${sourceName ?: "储蓄账户"} ➔ 偿还 ${targetName ?: "信用账户"}"
-            TransactionType.REFUND_OFFSET -> "退回至：${targetName ?: sourceName ?: "原账户"}"
-            TransactionType.LOAN_IN -> "借入至：${targetName ?: sourceName ?: "未指定"}"
-            TransactionType.LOAN_OUT -> "借出自：${sourceName ?: "未指定"}"
+            TransactionType.REFUND_OFFSET -> "退回至：${targetName ?: sourceName ?: "不关联账户"}"
+            TransactionType.LOAN_IN -> "借入至：${targetName ?: sourceName ?: "不关联账户"}"
+            TransactionType.LOAN_OUT -> "借出自：${sourceName ?: "不关联账户"}"
         }
 
         val bodyText = buildString {
@@ -374,7 +374,7 @@ class SilentBookkeepingNotifier(private val context: Context) {
         val sourceWallet = tx.sourceWalletId?.let { walletMap[it] }
         val walletLabel = sourceWallet?.let { w ->
             if (!w.cardLast4.isNullOrBlank()) "${w.name}(${w.cardLast4})" else w.name
-        } ?: "默认账户"
+        } ?: "不关联账户"
 
         val currencySymbol = CurrencyCode.fromCode(tx.currency).symbol
         val amountStr = String.format(Locale.US, "%s%.2f", currencySymbol, tx.amountCents / 100.0)

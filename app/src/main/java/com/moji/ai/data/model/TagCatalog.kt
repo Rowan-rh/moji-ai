@@ -29,7 +29,7 @@ data class TagRemapRecord(
 
 /**
  * 响应式持久化标签中心（对标 iCost 标签管理体系）：
- * - 内置 10 种 iCost 莫奈柔和色卡与 8 个常用預設标签；
+ * - 内置 10 种 iCost 莫奈柔和色卡与 9 个常用预设标签；
  * - 支持自定义标签名称、主题色、所属分组（日常 / 差旅报销 / 生活事件 / 自定义）与排序；
  * - 提供多标签精确 Token 解析、拼接、重映射及表单反例校验；
  * - 支持自动扫描并合并存量历史账单与智能规则中的标签，同时支持对「仅从列表移除但保留在历史账单中」的标签抑制自动重扫。
@@ -67,11 +67,12 @@ object TagCatalog {
     )
 
     /**
-     * 默认预设标签（覆盖日常餐饮、差旅报销、分期与人情场景）
+     * 默认预设标签（覆盖日常餐饮、医保结算、差旅报销、分期与人情场景）
      */
     val defaultTags: List<TagDef> = listOf(
         TagDef(name = "早餐", colorHex = 0xFFF59E0BL, groupName = "日常"),
         TagDef(name = "夜宵", colorHex = 0xFF8B5CF6L, groupName = "日常"),
+        TagDef(name = "医保", colorHex = 0xFF14B8A6L, groupName = "日常"),
         TagDef(name = "差旅交通", colorHex = 0xFF1677FFL, groupName = "差旅报销"),
         TagDef(name = "聚餐", colorHex = 0xFFE65540L, groupName = "日常"),
         TagDef(name = "出差", colorHex = 0xFF14B8A6L, groupName = "差旅报销"),

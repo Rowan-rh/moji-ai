@@ -3384,7 +3384,7 @@ private fun BackupAndCsvTransferSheet(
                                     color = ICostTextSecondary
                                 )
                                 preview.parsedTransactions.take(6).forEach { tx ->
-                                    val acctHint = tx.paymentMethodRaw.ifBlank { "默认账户" }
+                                    val acctHint = tx.paymentMethodRaw.ifBlank { "不关联账户" }
                                     Text(
                                         text = "[${tx.ledgerName}] ${tx.type.displayName} · ${tx.category} · ${tx.merchant} ($acctHint) · ${formatMoneyCents(tx.amountCnyCents, tx.currency)}",
                                         fontSize = 12.sp,
