@@ -66,6 +66,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -3577,10 +3578,16 @@ private fun DedicatedFundSetupSheet(
     var depositDayStr by remember(stateKey) {
         mutableStateOf(existingPlan.depositDayOfMonth.coerceIn(1, 28).toString())
     }
-    var linkedPayrollWalletId by remember(stateKey, regularDebitWallets) {
+    val regularDebitWalletIds = remember(regularDebitWallets) { regularDebitWallets.map { it.id } }
+    var linkedPayrollWalletId by remember(stateKey) {
         mutableStateOf(
-            existingPlan.linkedPayrollWalletId?.takeIf { pid -> regularDebitWallets.any { it.id == pid } }
+            existingPlan.linkedPayrollWalletId?.takeIf { it in regularDebitWalletIds }
         )
+    }
+    LaunchedEffect(regularDebitWalletIds) {
+        if (linkedPayrollWalletId != null && linkedPayrollWalletId !in regularDebitWalletIds) {
+            linkedPayrollWalletId = null
+        }
     }
     var autoCreateMonthlyRule by remember(stateKey) {
         mutableStateOf(existingPlan.autoCreateMonthlyRule)

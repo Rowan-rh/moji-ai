@@ -946,13 +946,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun duplicateTransactionNow(tx: TransactionEntity) {
         viewModelScope.launch {
+            val isCompositeMain = DedicatedFundManager.isCompositeMedicalMain(tx)
+            val isCompositeChild = DedicatedFundManager.isCompositeMedicalPersonalChild(tx)
             val cleanedTags = TagCatalog.joinTags(
                 TagCatalog.parseTags(tx.tags).filterNot { it == "组合支付" }
             )
-            val cleanedNote = if (DedicatedFundManager.isCompositeMedicalPersonalChild(tx)) {
-                tx.note.removePrefix(DedicatedFundManager.COMPOSITE_CHILD_NOTE_PREFIX).trimStart(' ', '·', '|', '：', ':').trim()
-            } else {
-                tx.note
+            val cleanedNote = when {
+                isCompositeChild -> tx.note
+                    .removePrefix(DedicatedFundManager.COMPOSITE_CHILD_NOTE_PREFIX)
+                    .trimStart(' ', '·', '|', '：', ':')
+                    .trim()
+                isCompositeMain && DedicatedFundManager.parseStructuredMedicalNote(tx.note).hasExplicitBreakdown ->
+                    tx.note.substringAfter("|", "").trim()
+                else -> tx.note
             }
             val copyTx = tx.copy(
                 id = 0L,
@@ -962,6 +968,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 transactionNo = "",
                 merchantOrderNo = "",
                 dedupFingerprint = "",
+                discountCents = if (isCompositeMain) 0L else tx.discountCents,
                 tags = cleanedTags,
                 note = cleanedNote,
                 refundedAmountCents = 0L,
