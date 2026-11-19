@@ -233,6 +233,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val expenseCategories by viewModel.expenseCategories.collectAsState()
     val incomeCategories by viewModel.incomeCategories.collectAsState()
     val tags by viewModel.tags.collectAsState()
+    val dedicatedFundSettings by viewModel.dedicatedFundSettings.collectAsState()
     val customCurrencyRates by viewModel.customCurrencyRates.collectAsState()
     val passwordProtectionConfig by viewModel.passwordProtectionConfig.collectAsState()
     val isAppSessionLocked by viewModel.isAppSessionLocked.collectAsState()
@@ -539,7 +540,11 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onAddRecurringRule = { title, amountYuan, currency, category, walletId, frequency ->
                         viewModel.addRecurringRule(title, amountYuan, currency, category, walletId, frequency)
                     },
-                    customCurrencyRates = customCurrencyRates
+                    customCurrencyRates = customCurrencyRates,
+                    dedicatedFundSettings = dedicatedFundSettings,
+                    onSaveDedicatedFundSetup = { kind, walletDraft, planDraft ->
+                        viewModel.saveDedicatedFundSetup(kind, walletDraft, planDraft)
+                    }
             )
         }
 
@@ -1056,7 +1061,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onSplitTransaction = { expId, catA, yuanA, catB, noteB ->
                         viewModel.splitExpenseTransaction(expId, catA, yuanA, catB, noteB)
                     },
-                    onDuplicate = { tx -> viewModel.duplicateTransactionNow(tx) }
+                    onDuplicate = { tx -> viewModel.duplicateTransactionNow(tx) },
+                    allTransactions = transactions,
+                    onInspectRelatedTransaction = { relTx -> inspectingTx = relTx }
                 )
             }
         }
@@ -1086,6 +1093,14 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                         editingTx = null
                         templateDraftForCalc = null
                     }
+                },
+                onSaveCompositeMedicalTransaction = { mainTx, poolCents, personalCents, medWalletId ->
+                    viewModel.saveCompositeManualTransaction(
+                        mainTx = mainTx,
+                        poolSubsidyCents = poolCents,
+                        personalAccountCents = personalCents,
+                        personalMedicalWalletId = medWalletId
+                    )
                 },
                 onOpenAiSandbox = { showAiSandboxSheet = true },
                 onOpenCategoryManagement = { isExpense ->

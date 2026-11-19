@@ -14,6 +14,7 @@ import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.CurrencyRateManager
+import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.ReminderConfigManager
 import com.moji.ai.data.model.TagCatalog
@@ -143,7 +144,8 @@ data class MoJiFullBackupSnapshot(
     val customCurrencyRates: Map<String, Double> = emptyMap(),
     val reminderSettingsJson: String = "",
     val appearanceSettingsJson: String = "",
-    val captureWhitelistJson: String = ""
+    val captureWhitelistJson: String = "",
+    val dedicatedFundSettingsJson: String = ""
 )
 
 data class CsvParsePreviewResult(
@@ -219,7 +221,8 @@ object BackupAndCsvTransferEngine {
         customCurrencyRates: Map<String, Double> = CurrencyRateManager.customRates,
         reminderSettingsJson: String = ReminderConfigManager.exportConfigJson(),
         appearanceSettingsJson: String = AppearanceConfigManager.exportConfigJson(),
-        captureWhitelistJson: String = CaptureAppWhitelistManager.exportConfigJson()
+        captureWhitelistJson: String = CaptureAppWhitelistManager.exportConfigJson(),
+        dedicatedFundSettingsJson: String = DedicatedFundManager.exportConfigJson()
     ): String {
         val snapshot = MoJiFullBackupSnapshot(
             schemaVersion = 3,
@@ -316,7 +319,8 @@ object BackupAndCsvTransferEngine {
             customCurrencyRates = CurrencyRateManager.sanitizeRatesMap(customCurrencyRates),
             reminderSettingsJson = reminderSettingsJson,
             appearanceSettingsJson = appearanceSettingsJson,
-            captureWhitelistJson = captureWhitelistJson
+            captureWhitelistJson = captureWhitelistJson,
+            dedicatedFundSettingsJson = dedicatedFundSettingsJson
         )
         return backupJson.encodeToString(snapshot)
     }
@@ -536,8 +540,12 @@ object BackupAndCsvTransferEngine {
                 val limitYuan = parseCleanMoney(colMap["信用额度"] ?: colMap["额度"] ?: "")
                 val last4Explicit = (colMap["卡号后四位"] ?: colMap["尾号"] ?: "").filter { it.isDigit() }.take(4).ifBlank { null }
                 val repayDay = (colMap["还款日"] ?: colMap["每月还款日"] ?: "").filter { it.isDigit() }.toIntOrNull()?.takeIf { it in 1..31 }
-                val includeNetWorthStr = (colMap["计入净资产"] ?: "是").trim()
-                val includeInNetWorth = includeNetWorthStr !in setOf("否", "false", "False", "0", "不计入")
+                val rawIncludeNetWorth = colMap["计入净资产"]?.trim()
+                val includeInNetWorth = if (rawIncludeNetWorth.isNullOrEmpty()) {
+                    null
+                } else {
+                    rawIncludeNetWorth !in setOf("否", "false", "False", "0", "不计入")
+                }
 
                 val synthesized = inferWalletEntityFromName(
                     rawAccountName = rawName,
@@ -963,7 +971,7 @@ object BackupAndCsvTransferEngine {
         creditLimitCents: Long? = null,
         explicitLast4: String? = null,
         repaymentDay: Int? = null,
-        includeInNetWorth: Boolean = true
+        includeInNetWorth: Boolean? = null
     ): WalletEntity {
         val (cleanName, extractedLast4) = extractAccountNameAndLast4(rawAccountName, explicitLast4)
 
@@ -1030,6 +1038,7 @@ object BackupAndCsvTransferEngine {
             else -> defaultWalletType
         }
 
+        val baseAliases = listOfNotNull(cleanName, extractedLast4).distinct().joinToString(",")
         return WalletEntity(
             id = 0L,
             name = cleanName,
@@ -1040,9 +1049,9 @@ object BackupAndCsvTransferEngine {
             balanceCents = balanceCents,
             creditLimitCents = if (finalType == WalletType.CREDIT) (creditLimitCents ?: 20_000_00L) else null,
             cardLast4 = extractedLast4,
-            aliases = listOfNotNull(cleanName, extractedLast4).distinct().joinToString(","),
+            aliases = DedicatedFundManager.mergeDefaultAliases(brandCode, baseAliases),
             repaymentDay = if (finalType == WalletType.CREDIT) (repaymentDay ?: 15) else null,
-            includeInNetWorth = includeInNetWorth
+            includeInNetWorth = includeInNetWorth ?: DedicatedFundManager.defaultIncludeInNetWorthForBrand(brandCode)
         )
     }
 

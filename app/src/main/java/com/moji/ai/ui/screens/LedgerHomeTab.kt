@@ -87,6 +87,7 @@ import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
@@ -235,6 +236,22 @@ fun ICostLedgerHomeScreen(
     val groupedByDay = remember(monthTransactions) {
         val keyFmt = SimpleDateFormat("yyyy-MM-dd", Locale.CHINA)
         monthTransactions.groupBy { tx -> keyFmt.format(Date(tx.timestamp)) }
+    }
+    val compositeChildSumByParentId = remember(transactions) {
+        val parentCurrencyById = transactions.associate { it.id to it.currency }
+        val sums = HashMap<Long, Long>()
+        for (item in transactions) {
+            val pid = item.relatedTransactionId
+            if (pid != null &&
+                pid > 0L &&
+                item.type == TransactionType.EXPENSE &&
+                DedicatedFundManager.isCompositeMedicalPersonalChild(item) &&
+                parentCurrencyById[pid]?.equals(item.currency, ignoreCase = true) != false
+            ) {
+                sums[pid] = (sums[pid] ?: 0L) + item.amountCents
+            }
+        }
+        sums
     }
     val dayHeaderFmt = remember { SimpleDateFormat("MM/dd EEEE", Locale.CHINA) }
 
@@ -1196,6 +1213,7 @@ fun ICostLedgerHomeScreen(
                                                 tx = tx,
                                                 walletMap = walletMap,
                                                 catalogTags = catalogTags,
+                                                childPersonalSumCents = compositeChildSumByParentId[tx.id] ?: 0L,
                                                 onClick = { onClickTransaction(tx) }
                                             )
                                         }
@@ -1252,10 +1270,21 @@ fun ICostLedgerHomeScreen(
 
     // 侧滑删除确认弹窗
     deletingTx?.let { targetTx ->
+        val linkedChildSum = compositeChildSumByParentId[targetTx.id] ?: 0L
+        val deleteMsg = when {
+            linkedChildSum > 0L ->
+                "「${targetTx.merchant.ifBlank { targetTx.category }}」自付 ${formatMoneyCents(targetTx.amountCents, targetTx.currency)}，" +
+                    "删除后将一并撤销关联的医保个账扣款 ${formatMoneyCents(linkedChildSum, targetTx.currency)}，双账户余额同步恢复。"
+            DedicatedFundManager.isCompositeMedicalPersonalChild(targetTx) ->
+                "「${targetTx.merchant.ifBlank { targetTx.category }}」医保个账扣款 ${formatMoneyCents(targetTx.amountCents, targetTx.currency)}" +
+                    " 删除后，个人医保账户余额会同步恢复。"
+            else ->
+                "「${targetTx.merchant.ifBlank { targetTx.category }}」${formatMoneyCents(targetTx.amountCents, targetTx.currency)}" +
+                    " 删除后，相关账户余额会同步恢复。"
+        }
         ICostConfirmDialog(
             title = "删除这笔账单？",
-            message = "「${targetTx.merchant.ifBlank { targetTx.category }}」${formatMoneyCents(targetTx.amountCents, targetTx.currency)}" +
-                " 删除后，相关账户余额会同步恢复。",
+            message = deleteMsg,
             confirmText = "删除",
             onConfirm = {
                 onDeleteTransaction(targetTx.id)
@@ -1414,6 +1443,7 @@ private fun ICostLedgerRow(
     tx: TransactionEntity,
     walletMap: Map<Long, WalletEntity>,
     catalogTags: List<TagDef>,
+    childPersonalSumCents: Long = 0L,
     onClick: () -> Unit
 ) {
     val timeStr = remember(tx.timestamp) {
@@ -1473,9 +1503,36 @@ private fun ICostLedgerRow(
     val isRefundedExpense = tx.type == TransactionType.EXPENSE && tx.refundedAmountCents > 0L
     val isRefundOffset = tx.type == TransactionType.REFUND_OFFSET
     val netExpenseCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
-    val hasDiscountBreakdown = (tx.type == TransactionType.EXPENSE || isRefundOffset) && tx.discountCents > 0L
+    val medicalBadgeSummary = remember(
+        tx.id,
+        tx.type,
+        tx.amountCents,
+        tx.discountCents,
+        tx.currency,
+        tx.note,
+        tx.tags,
+        tx.orderKey,
+        tx.dedupFingerprint,
+        tx.relatedTransactionId,
+        childPersonalSumCents
+    ) {
+        DedicatedFundManager.buildLedgerMedicalBadgeSummary(
+            tx = tx,
+            childPersonalSumCents = childPersonalSumCents,
+            formatCents = { cents -> formatMoneyCents(cents, tx.currency) }
+        )
+    }
+    val hasDiscountBreakdown = medicalBadgeSummary == null &&
+        (tx.type == TransactionType.EXPENSE || isRefundOffset) &&
+        tx.discountCents > 0L
     val userTags = remember(tx.tags) { TagCatalog.parseTags(tx.tags) }
-    val hasTagsRow = hasDiscountBreakdown || tx.duplicateSuspected || isRefundedExpense || isRefundOffset || tx.reimbursable || userTags.isNotEmpty()
+    val hasTagsRow = medicalBadgeSummary != null ||
+        hasDiscountBreakdown ||
+        tx.duplicateSuspected ||
+        isRefundedExpense ||
+        isRefundOffset ||
+        tx.reimbursable ||
+        userTags.isNotEmpty()
 
     Row(
         modifier = Modifier
@@ -1609,7 +1666,23 @@ private fun ICostLedgerRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    if (hasDiscountBreakdown) {
+                    if (medicalBadgeSummary != null) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (isDark) Color(0xFF14B8A6).copy(alpha = 0.20f) else Color(0xFFEAFBF8)
+                        ) {
+                            Text(
+                                text = medicalBadgeSummary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (isDark) Color(0xFF2DD4BF) else Color(0xFF0F766E),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    } else if (hasDiscountBreakdown) {
                         val origCents = tx.amountCents + tx.discountCents
                         Surface(
                             shape = RoundedCornerShape(6.dp),

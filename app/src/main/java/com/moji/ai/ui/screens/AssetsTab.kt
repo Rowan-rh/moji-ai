@@ -66,6 +66,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -92,6 +93,10 @@ import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.CurrencyRateManager
+import com.moji.ai.data.model.DedicatedFundKind
+import com.moji.ai.data.model.DedicatedFundManager
+import com.moji.ai.data.model.DedicatedFundPlanConfig
+import com.moji.ai.data.model.DedicatedFundSettings
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.WalletType
@@ -160,8 +165,14 @@ fun ICostAssetsScreen(
     onAddInstallmentPlan: (title: String, walletId: Long, totalYuan: Double, feePerPeriodYuan: Double, totalPeriods: Int) -> Unit = { _, _, _, _, _ -> },
     onDeleteInstallmentPlan: (planId: Long) -> Unit = {},
     onAddRecurringRule: (title: String, amountYuan: Double, currency: String, category: String, walletId: Long, frequency: RecurrenceFrequency) -> Unit = { _, _, _, _, _, _ -> },
-    customCurrencyRates: Map<String, Double> = emptyMap()
+    customCurrencyRates: Map<String, Double> = emptyMap(),
+    dedicatedFundSettings: DedicatedFundSettings = DedicatedFundSettings(),
+    onSaveDedicatedFundSetup: (DedicatedFundKind, WalletEntity, DedicatedFundPlanConfig) -> Unit = { _, w, _ -> onSaveWallet(w) }
 ) {
+    val observedDedicatedSettings by DedicatedFundManager.settingsFlow.collectAsState()
+    val effectiveDedicatedSettings = if (
+        dedicatedFundSettings != DedicatedFundSettings()
+    ) dedicatedFundSettings else observedDedicatedSettings
     val observedCustomRates by CurrencyRateManager.customRatesFlow.collectAsState()
     val effectiveCustomRates = if (customCurrencyRates.isNotEmpty()) customCurrencyRates else observedCustomRates
     val assetPagerState = rememberPagerState(initialPage = 0, pageCount = { 2 })
@@ -185,7 +196,18 @@ fun ICostAssetsScreen(
     }
 
     val creditWallets = remember(wallets) { wallets.filter { it.type.isLiability } }
-    val assetWallets = remember(wallets) { wallets.filter { !it.type.isLiability } }
+    val assetWallets = remember(wallets) {
+        wallets.filter { !it.type.isLiability && !DedicatedFundManager.isDedicatedFundWallet(it) }
+    }
+    val dedicatedFundWallets = remember(wallets) {
+        wallets.filter { !it.type.isLiability && DedicatedFundManager.isDedicatedFundWallet(it) }
+    }
+    val personalMedicalWallet = remember(wallets) {
+        DedicatedFundManager.findPersonalMedicalWallet(wallets)
+    }
+    val housingProvidentWallet = remember(wallets) {
+        DedicatedFundManager.findHousingProvidentWallet(wallets)
+    }
     // 分组标题按组内全部账户汇总（含不计入净资产的账户），与列表内容一致
     val creditGroupDebtCnyCents = remember(creditWallets, effectiveCustomRates) {
         creditWallets.sumOf { w ->
@@ -197,9 +219,15 @@ fun ICostAssetsScreen(
             (w.balanceCents * CurrencyRateManager.getEffectiveRateToCny(w.currency)).roundToLong()
         }
     }
+    val dedicatedGroupBalanceCnyCents = remember(dedicatedFundWallets, effectiveCustomRates) {
+        dedicatedFundWallets.sumOf { w ->
+            (w.balanceCents * CurrencyRateManager.getEffectiveRateToCny(w.currency)).roundToLong()
+        }
+    }
 
     var creditExpanded by rememberSaveable { mutableStateOf(true) }
     var assetExpanded by rememberSaveable { mutableStateOf(true) }
+    var dedicatedExpanded by rememberSaveable { mutableStateOf(true) }
     var plansExpanded by rememberSaveable { mutableStateOf(true) }
     var recurringExpanded by rememberSaveable { mutableStateOf(false) }
     var showTopMoreMenu by remember { mutableStateOf(false) }
@@ -208,6 +236,7 @@ fun ICostAssetsScreen(
     var showSelectTypeFullScreen by remember { mutableStateOf(false) }
     var selectedPresetForEditor by remember { mutableStateOf<AccountBrandOption?>(null) }
     var editingWallet by remember { mutableStateOf<WalletEntity?>(null) }
+    var configuringDedicatedSetup by remember { mutableStateOf<Pair<DedicatedFundKind, WalletEntity?>?>(null) }
     var reconcilingWallet by remember { mutableStateOf<WalletEntity?>(null) }
 
     // 删除确认与新增表单弹窗状态
@@ -222,6 +251,7 @@ fun ICostAssetsScreen(
 
     val hasActiveBottomSheet = selectedPresetForEditor != null ||
         editingWallet != null ||
+        configuringDedicatedSetup != null ||
         reconcilingWallet != null ||
         showAddSavingPlan ||
         showAddInstallment ||
@@ -760,6 +790,131 @@ fun ICostAssetsScreen(
                 }
             }
 
+            // 6.2 专项保障账户（医保 / 公积金）：默认隔离日常可支配净资产，支持月度双边缴存配置与工资条三路入账预留
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(22.dp),
+                    colors = CardDefaults.cardColors(containerColor = ICostCardWhite),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        CollapsibleGroupHeaderInsideCard(
+                            title = "专项保障账户（医保/公积金）",
+                            count = dedicatedFundWallets.size,
+                            rightSummary = if (dedicatedFundWallets.isNotEmpty()) {
+                                "专项余额 ${formatMoneyCents(dedicatedGroupBalanceCnyCents, "CNY", hideAmounts)}"
+                            } else {
+                                "默认不计净资产"
+                            },
+                            expanded = dedicatedExpanded,
+                            onToggle = { dedicatedExpanded = !dedicatedExpanded }
+                        )
+
+                        AnimatedVisibility(
+                            visible = dedicatedExpanded,
+                            enter = expandVertically(
+                                animationSpec = spring(dampingRatio = 0.94f, stiffness = 600f)
+                            ) + fadeIn(tween(140)),
+                            exit = shrinkVertically(
+                                animationSpec = spring(dampingRatio = 0.96f, stiffness = 680f)
+                            ) + fadeOut(tween(110))
+                        ) {
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                dedicatedFundWallets.forEachIndexed { idx, w ->
+                                    key(w.id) {
+                                        val resolvedKind = DedicatedFundManager.resolveDedicatedFundKind(w)
+                                        val plan = resolvedKind?.let { effectiveDedicatedSettings.planOf(it) }
+                                        val customSubtitle = buildDedicatedWalletRowSubtitle(w, plan, hideAmounts)
+                                        val dedicatedSwipeActions = buildList {
+                                            if (resolvedKind != null) {
+                                                add(
+                                                    SwipeActionItem(
+                                                        label = "缴存",
+                                                        iconAsset = "tab_save_money.webp",
+                                                        backgroundColor = ICostBlueAccent,
+                                                        onClick = { configuringDedicatedSetup = resolvedKind to w }
+                                                    )
+                                                )
+                                            }
+                                            add(
+                                                SwipeActionItem(
+                                                    label = "核对",
+                                                    iconAsset = "asset_pen.webp",
+                                                    backgroundColor = ICostGreenIncome,
+                                                    onClick = { reconcilingWallet = w }
+                                                )
+                                            )
+                                            add(
+                                                SwipeActionItem(
+                                                    label = "删除",
+                                                    iconAsset = "detail_delete.webp",
+                                                    backgroundColor = ICostCoralRed,
+                                                    onClick = { pendingDeleteWallet = w }
+                                                )
+                                            )
+                                        }
+                                        ICostSwipeActionRow(
+                                            actions = dedicatedSwipeActions,
+                                            actionWidth = 44.dp,
+                                            actionHeight = 42.dp
+                                        ) {
+                                            ICostAccountItemRow(
+                                                wallet = w,
+                                                hideAmounts = hideAmounts,
+                                                subtitleOverride = customSubtitle,
+                                                onClick = { inspectingWallet = w }
+                                            )
+                                        }
+                                        val hasMoreRows = idx < dedicatedFundWallets.lastIndex ||
+                                            personalMedicalWallet == null ||
+                                            housingProvidentWallet == null
+                                        if (hasMoreRows) {
+                                            HorizontalDivider(
+                                                modifier = Modifier.padding(start = 68.dp, end = 16.dp),
+                                                thickness = 0.5.dp,
+                                                color = ICostDivider
+                                            )
+                                        }
+                                    }
+                                }
+
+                                if (personalMedicalWallet == null) {
+                                    DedicatedFundQuickSetupRow(
+                                        title = "+ 设置个人医保账户",
+                                        subtitle = "开启刷医保个账组合双扣 · 配置月度划入与工资条联动",
+                                        brandCode = DedicatedFundKind.MEDICAL_INSURANCE.brandCode,
+                                        accentColor = Color(0xFF14B8A6),
+                                        onClick = {
+                                            configuringDedicatedSetup = DedicatedFundKind.MEDICAL_INSURANCE to null
+                                        }
+                                    )
+                                    if (housingProvidentWallet == null) {
+                                        HorizontalDivider(
+                                            modifier = Modifier.padding(start = 68.dp, end = 16.dp),
+                                            thickness = 0.5.dp,
+                                            color = ICostDivider
+                                        )
+                                    }
+                                }
+
+                                if (housingProvidentWallet == null) {
+                                    DedicatedFundQuickSetupRow(
+                                        title = "+ 设置住房公积金账户",
+                                        subtitle = "记录个人+单位双边月度缴存 · 默认不混入可支配净资产",
+                                        brandCode = DedicatedFundKind.HOUSING_PROVIDENT.brandCode,
+                                        accentColor = ICostBlueAccent,
+                                        onClick = {
+                                            configuringDedicatedSetup = DedicatedFundKind.HOUSING_PROVIDENT to null
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // 6.5 存钱计划与分期：常驻可折叠卡片（空状态 + 新增）
             item {
                 Card(
@@ -1120,7 +1275,12 @@ fun ICostAssetsScreen(
                     },
                     onBack = { inspectingWallet = null },
                     onEditWallet = {
-                        editingWallet = activeWallet
+                        val kind = DedicatedFundManager.resolveDedicatedFundKind(activeWallet)
+                        if (kind != null) {
+                            configuringDedicatedSetup = kind to activeWallet
+                        } else {
+                            editingWallet = activeWallet
+                        }
                     },
                     onReconcileBalance = {
                         reconcilingWallet = activeWallet
@@ -1144,7 +1304,11 @@ fun ICostAssetsScreen(
                         pendingDeleteWallet = activeWallet
                     },
                     onClickTransaction = onSelectTransaction,
-                    hideAmounts = hideAmounts
+                    hideAmounts = hideAmounts,
+                    dedicatedFundSettings = effectiveDedicatedSettings,
+                    onConfigureDedicatedPlan = { kind ->
+                        configuringDedicatedSetup = kind to activeWallet
+                    }
                 )
             }
         }
@@ -1164,7 +1328,33 @@ fun ICostAssetsScreen(
             ICostSelectAccountTypeFullScreen(
                 onBack = { showSelectTypeFullScreen = false },
                 onSelectPreset = { option ->
-                    selectedPresetForEditor = option
+                    when (option.code) {
+                        DedicatedFundKind.MEDICAL_INSURANCE.brandCode -> {
+                            configuringDedicatedSetup = DedicatedFundKind.MEDICAL_INSURANCE to personalMedicalWallet
+                        }
+                        DedicatedFundKind.HOUSING_PROVIDENT.brandCode -> {
+                            configuringDedicatedSetup = DedicatedFundKind.HOUSING_PROVIDENT to housingProvidentWallet
+                        }
+                        else -> {
+                            selectedPresetForEditor = option
+                        }
+                    }
+                }
+            )
+        }
+
+        // 专项保障账户（个人医保 / 住房公积金）一键向导与月度缴存设置抽屉
+        configuringDedicatedSetup?.let { (kind, targetWallet) ->
+            DedicatedFundSetupSheet(
+                kind = kind,
+                existingWallet = targetWallet,
+                existingPlan = effectiveDedicatedSettings.planOf(kind),
+                regularDebitWallets = assetWallets,
+                onDismiss = { configuringDedicatedSetup = null },
+                onConfirm = { draftWallet, draftPlan ->
+                    onSaveDedicatedFundSetup(kind, draftWallet, draftPlan)
+                    configuringDedicatedSetup = null
+                    showSelectTypeFullScreen = false
                 }
             )
         }
@@ -2014,18 +2204,28 @@ private fun CollapsibleGroupHeaderInsideCard(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .padding(end = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
                 text = title,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
-                color = ICostTextSecondary
+                color = ICostTextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
             )
             Spacer(modifier = Modifier.width(4.dp))
             Text(
                 text = "($count)",
                 fontSize = 13.sp,
-                color = ICostTextSecondary
+                color = ICostTextSecondary,
+                maxLines = 1,
+                softWrap = false
             )
         }
 
@@ -2037,7 +2237,7 @@ private fun CollapsibleGroupHeaderInsideCard(
                 maxLines = 1,
                 softWrap = false
             )
-            Spacer(modifier = Modifier.width(2.dp))
+            Spacer(modifier = Modifier.width(4.dp))
             Icon(
                 imageVector = Icons.Default.KeyboardArrowDown,
                 contentDescription = null,
@@ -2054,12 +2254,15 @@ private fun CollapsibleGroupHeaderInsideCard(
 private fun ICostAccountItemRow(
     wallet: WalletEntity,
     hideAmounts: Boolean,
+    subtitleOverride: String? = null,
     onClick: () -> Unit
 ) {
     val fullTitle = wallet.name
 
-    val leftSubtitle = remember(wallet) {
-        if (wallet.type.isLiability) {
+    val leftSubtitle = remember(wallet, subtitleOverride) {
+        if (!subtitleOverride.isNullOrBlank()) {
+            subtitleOverride
+        } else if (wallet.type.isLiability) {
             val sub = wallet.subTypeLabel.ifBlank { wallet.type.displayName }
             if (wallet.repaymentDay != null && wallet.repaymentDay in 1..31) {
                 "[$sub] ${daysUntilRepaymentText(wallet.repaymentDay)}"
@@ -2207,7 +2410,9 @@ private fun ICostWalletDetailFullScreen(
     onAddRecordWithWallet: () -> Unit,
     onDeleteWallet: () -> Unit,
     onClickTransaction: (TransactionEntity) -> Unit,
-    hideAmounts: Boolean = false
+    hideAmounts: Boolean = false,
+    dedicatedFundSettings: DedicatedFundSettings = DedicatedFundSettings(),
+    onConfigureDedicatedPlan: (DedicatedFundKind) -> Unit = {}
 ) {
     BackHandler(onBack = onBack)
 
@@ -2410,6 +2615,61 @@ private fun ICostWalletDetailFullScreen(
                                     fontSize = 13.sp,
                                     color = ICostTextSecondary
                                 )
+                                val resolvedKind = DedicatedFundManager.resolveDedicatedFundKind(wallet)
+                                if (resolvedKind != null) {
+                                    val plan = dedicatedFundSettings.planOf(resolvedKind)
+                                    val payrollName = plan.linkedPayrollWalletId?.let { walletMap[it]?.name }
+                                    Spacer(modifier = Modifier.height(10.dp))
+                                    Surface(
+                                        onClick = { onConfigureDedicatedPlan(resolvedKind) },
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = ICostBgGray,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                                Text(
+                                                    text = if (plan.totalMonthlyDepositCents > 0L) {
+                                                        "每月双边入账 ${formatMoneyCents(plan.totalMonthlyDepositCents, wallet.currency, hideAmounts)} · 每月${plan.depositDayOfMonth}日"
+                                                    } else {
+                                                        "尚未设置月度双边缴存参考"
+                                                    },
+                                                    fontSize = 12.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = ICostTextPrimary
+                                                )
+                                                val subDesc = buildString {
+                                                    if (plan.totalMonthlyDepositCents > 0L) {
+                                                        append("个人 ${formatMoneyCents(plan.employeeMonthlyCents, wallet.currency, hideAmounts)} + 单位 ${formatMoneyCents(plan.employerMonthlyCents, wallet.currency, hideAmounts)}")
+                                                        if (plan.autoCreateMonthlyRule) append(" · 自动入账")
+                                                    } else {
+                                                        append("可配置个人+单位缴存额、自动入账及代发工资卡联动")
+                                                    }
+                                                    if (!payrollName.isNullOrBlank()) {
+                                                        append(" · 工资卡：$payrollName")
+                                                    }
+                                                }
+                                                Text(
+                                                    text = subDesc,
+                                                    fontSize = 11.sp,
+                                                    color = ICostTextSecondary,
+                                                    maxLines = 2,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                            Text(
+                                                text = "配置缴存",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = ICostBlueAccent
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -2800,8 +3060,16 @@ private fun WalletEditorSheet(
     }
     var repaymentDayStr by remember(stateKey) { mutableStateOf((existing?.repaymentDay ?: 15).toString()) }
     var last4 by remember(stateKey) { mutableStateOf(existing?.cardLast4 ?: "") }
-    var aliases by remember(stateKey) { mutableStateOf(existing?.aliases ?: "") }
-    var includeInNetWorth by remember(stateKey) { mutableStateOf(existing?.includeInNetWorth ?: true) }
+    var aliases by remember(stateKey) {
+        mutableStateOf(
+            existing?.aliases ?: DedicatedFundManager.defaultAliasesForBrand(brandCode)
+        )
+    }
+    var includeInNetWorth by remember(stateKey) {
+        mutableStateOf(
+            existing?.includeInNetWorth ?: DedicatedFundManager.defaultIncludeInNetWorthForBrand(brandCode)
+        )
+    }
 
     // 输入校验：资金账户不支持负余额，信用账户支持负数以表达溢缴款（多还款）
     val balanceValue = parseYuanInput(balanceStr)
@@ -3021,7 +3289,7 @@ private fun WalletEditorSheet(
                                     balanceCents = balCents,
                                     creditLimitCents = limCents,
                                     cardLast4 = last4.trim().takeIf { it.isNotEmpty() },
-                                    aliases = aliases.trim(),
+                                    aliases = DedicatedFundManager.mergeDefaultAliases(brandCode, aliases.trim()),
                                     repaymentDay = if (isCreditAccount) repaymentDay else existing?.repaymentDay,
                                     includeInNetWorth = includeInNetWorth,
                                     colorHex = existing?.colorHex ?: 0xFFE65540
@@ -3189,6 +3457,420 @@ private fun WalletBalanceReconcileSheet(
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp
                     )
+                }
+            }
+        }
+    }
+}
+
+private fun buildDedicatedWalletRowSubtitle(
+    wallet: WalletEntity,
+    plan: DedicatedFundPlanConfig?,
+    hideAmounts: Boolean
+): String {
+    val netWorthTag = if (wallet.includeInNetWorth) "计入净资产" else "不计净资产"
+    if (plan != null && plan.totalMonthlyDepositCents > 0L) {
+        val monthlyText = formatMoneyCents(plan.totalMonthlyDepositCents, wallet.currency, hideAmounts)
+        val autoTag = if (plan.autoCreateMonthlyRule) "自动入账" else "参考入账"
+        return "月缴存 $monthlyText · 每月${plan.depositDayOfMonth}日$autoTag · $netWorthTag"
+    }
+    val sub = wallet.subTypeLabel.ifBlank { wallet.type.displayName }
+    return "$sub · $netWorthTag · 左滑配置月度缴存"
+}
+
+@Composable
+private fun DedicatedFundQuickSetupRow(
+    title: String,
+    subtitle: String,
+    brandCode: String,
+    accentColor: Color,
+    onClick: () -> Unit
+) {
+    val previewWallet = remember(brandCode) {
+        WalletEntity(
+            id = -1L,
+            name = title.removePrefix("+ ").trim(),
+            type = WalletType.CASH_OTHER,
+            subTypeLabel = "",
+            brandCode = brandCode,
+            includeInNetWorth = false
+        )
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        WalletBrandAvatar(wallet = previewWallet, size = 38.dp)
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(
+                text = title,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = accentColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = subtitle,
+                fontSize = 11.sp,
+                color = ICostTextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = accentColor.copy(alpha = 0.12f)
+        ) {
+            Text(
+                text = "去设置",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = accentColor,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@Composable
+private fun DedicatedFundSetupSheet(
+    kind: DedicatedFundKind,
+    existingWallet: WalletEntity?,
+    existingPlan: DedicatedFundPlanConfig,
+    regularDebitWallets: List<WalletEntity>,
+    onDismiss: () -> Unit,
+    onConfirm: (WalletEntity, DedicatedFundPlanConfig) -> Unit
+) {
+    val stateKey = "${kind.name}_${existingWallet?.id ?: 0L}"
+    var name by remember(stateKey) {
+        mutableStateOf(existingWallet?.name ?: kind.defaultName)
+    }
+    var balanceStr by remember(stateKey) {
+        mutableStateOf(
+            existingWallet?.let { String.format(Locale.US, "%.2f", it.balanceCents / 100.0) } ?: "0.00"
+        )
+    }
+    var employeeStr by remember(stateKey) {
+        mutableStateOf(
+            if (existingPlan.employeeMonthlyCents > 0L) {
+                String.format(Locale.US, "%.2f", existingPlan.employeeMonthlyCents / 100.0)
+            } else {
+                ""
+            }
+        )
+    }
+    var employerStr by remember(stateKey) {
+        mutableStateOf(
+            if (existingPlan.employerMonthlyCents > 0L) {
+                String.format(Locale.US, "%.2f", existingPlan.employerMonthlyCents / 100.0)
+            } else {
+                ""
+            }
+        )
+    }
+    var depositDayStr by remember(stateKey) {
+        mutableStateOf(existingPlan.depositDayOfMonth.coerceIn(1, 28).toString())
+    }
+    val regularDebitWalletIds = remember(regularDebitWallets) { regularDebitWallets.map { it.id } }
+    var linkedPayrollWalletId by remember(stateKey) {
+        mutableStateOf(
+            existingPlan.linkedPayrollWalletId?.takeIf { it in regularDebitWalletIds }
+        )
+    }
+    LaunchedEffect(regularDebitWalletIds) {
+        if (linkedPayrollWalletId != null && linkedPayrollWalletId !in regularDebitWalletIds) {
+            linkedPayrollWalletId = null
+        }
+    }
+    var autoCreateMonthlyRule by remember(stateKey) {
+        mutableStateOf(existingPlan.autoCreateMonthlyRule)
+    }
+    var includeInNetWorth by remember(stateKey) {
+        mutableStateOf(existingWallet?.includeInNetWorth ?: false)
+    }
+
+    val balanceValue = parseYuanInput(balanceStr)
+    val employeeValue = if (employeeStr.isBlank()) 0.0 else parseYuanInput(employeeStr)
+    val employerValue = if (employerStr.isBlank()) 0.0 else parseYuanInput(employerStr)
+    val depositDay = depositDayStr.toIntOrNull()
+
+    val nameError = if (name.isBlank()) "请输入账户名称" else null
+    val balanceError = when {
+        balanceValue == null -> "请输入有效余额"
+        balanceValue < 0.0 -> "余额不能小于 0"
+        else -> null
+    }
+    val employeeError = when {
+        employeeValue == null -> "格式有误"
+        employeeValue < 0.0 -> "不能为负数"
+        else -> null
+    }
+    val employerError = when {
+        employerValue == null -> "格式有误"
+        employerValue < 0.0 -> "不能为负数"
+        else -> null
+    }
+    val depositDayError = if (depositDay == null || depositDay !in 1..28) "请输入 1–28" else null
+
+    val employeeCents = ((employeeValue ?: 0.0).coerceAtLeast(0.0) * 100.0).roundToLong()
+    val employerCents = ((employerValue ?: 0.0).coerceAtLeast(0.0) * 100.0).roundToLong()
+    val totalMonthlyCents = employeeCents + employerCents
+    val canSave = nameError == null && balanceError == null &&
+        employeeError == null && employerError == null && depositDayError == null
+
+    val isMedical = kind == DedicatedFundKind.MEDICAL_INSURANCE
+    val sheetTitle = if (existingWallet == null) {
+        if (isMedical) "设置个人医保账户" else "设置住房公积金账户"
+    } else {
+        if (isMedical) "个人医保账户与月度划入" else "住房公积金与月度缴存"
+    }
+
+    ICostSmoothBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = ICostBgGray,
+        showDragHandle = false
+    ) { requestDismiss ->
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+        ) {
+            ICostSheetHeader(
+                title = sheetTitle,
+                subtitle = if (isMedical) {
+                    "开启刷医保个账组合双扣 · 默认不混入日常净资产"
+                } else {
+                    "记录个人+单位双边缴存 · 预留工资条三路入账"
+                },
+                onClose = requestDismiss
+            )
+
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                contentPadding = PaddingValues(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                item {
+                    ICostFormCard {
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            ICostFormField(
+                                value = name,
+                                onValueChange = { name = it },
+                                label = "账户名称",
+                                placeholder = kind.defaultName,
+                                isError = nameError != null,
+                                supportingText = nameError,
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                            ICostFormField(
+                                value = balanceStr,
+                                onValueChange = { balanceStr = sanitizeAmountInput(it) },
+                                label = "当前账户余额（元）",
+                                placeholder = "0.00",
+                                isError = balanceError != null,
+                                supportingText = balanceError,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text("计入日常净资产", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = ICostTextPrimary)
+                                Text(
+                                    text = "专项保障资金支取受限，默认关闭以免虚增日常可支配资产",
+                                    fontSize = 11.sp,
+                                    color = ICostTextSecondary
+                                )
+                            }
+                            Switch(
+                                checked = includeInNetWorth,
+                                onCheckedChange = { includeInNetWorth = it },
+                                colors = iCostUnifiedSwitchColors()
+                            )
+                        }
+                    }
+                }
+
+                item {
+                    ICostFormCard {
+                        Text(
+                            text = "月度双边缴存参考（选填 · 预留工资条联动）",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ICostTextPrimary
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            ICostFormField(
+                                value = employeeStr,
+                                onValueChange = { employeeStr = sanitizeAmountInput(it) },
+                                label = if (isMedical) "个人月扣缴/划入（元）" else "个人月缴存（元）",
+                                placeholder = "如 300.00",
+                                isError = employeeError != null,
+                                supportingText = employeeError,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                            ICostFormField(
+                                value = employerStr,
+                                onValueChange = { employerStr = sanitizeAmountInput(it) },
+                                label = if (isMedical) "单位月划入（元）" else "单位月配缴（元）",
+                                placeholder = "如 300.00",
+                                isError = employerError != null,
+                                supportingText = employerError,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                        }
+
+                        ICostFormField(
+                            value = depositDayStr,
+                            onValueChange = { v -> depositDayStr = v.filter { it.isDigit() }.take(2) },
+                            label = "预计每月入账日（1–28 日）",
+                            placeholder = "15",
+                            isError = depositDayError != null,
+                            supportingText = depositDayError,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = ICostBlueAccent.copy(alpha = 0.08f),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = if (totalMonthlyCents > 0L) {
+                                    "每月双边合计入账：${formatMoneyCents(totalMonthlyCents, "CNY")}（个人 ${formatMoneyCents(employeeCents, "CNY")} + 单位 ${formatMoneyCents(employerCents, "CNY")}）"
+                                } else {
+                                    "填写个人与单位月缴存额后，可一键开启每月自动入账规则"
+                                },
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = ICostBlueAccent,
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                            )
+                        }
+
+                        if (regularDebitWallets.isNotEmpty()) {
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                FieldLabel("关联代发工资储蓄卡（工资条实发路由）")
+                                PillChooserRow {
+                                    ICostChoicePill(
+                                        label = "暂不关联",
+                                        selected = linkedPayrollWalletId == null,
+                                        onClick = { linkedPayrollWalletId = null }
+                                    )
+                                    regularDebitWallets.forEach { w ->
+                                        ICostChoicePill(
+                                            label = w.name,
+                                            selected = linkedPayrollWalletId == w.id,
+                                            onClick = { linkedPayrollWalletId = w.id }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalDivider(color = ICostDivider)
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                Text("自动生成月度入账周期规则", fontSize = 14.sp, fontWeight = FontWeight.Medium, color = ICostTextPrimary)
+                                Text(
+                                    text = "开启后每到设定入账日自动为该账户记入一笔双边缴存收入",
+                                    fontSize = 11.sp,
+                                    color = ICostTextSecondary
+                                )
+                            }
+                            Switch(
+                                checked = autoCreateMonthlyRule,
+                                onCheckedChange = { autoCreateMonthlyRule = it },
+                                enabled = totalMonthlyCents > 0L || autoCreateMonthlyRule,
+                                colors = iCostUnifiedSwitchColors()
+                            )
+                        }
+                    }
+                }
+
+                item {
+                    Button(
+                        onClick = {
+                            if (!canSave || balanceValue == null || depositDay == null) return@Button
+                            val balCents = (balanceValue * 100.0).roundToLong().coerceAtLeast(0L)
+                            val mergedAliases = DedicatedFundManager.mergeDefaultAliases(
+                                kind.brandCode,
+                                existingWallet?.aliases.orEmpty()
+                            )
+                            val walletDraft = existingWallet?.copy(
+                                name = name.trim(),
+                                subTypeLabel = existingWallet.subTypeLabel.ifBlank { kind.subTypeLabel },
+                                brandCode = kind.brandCode,
+                                balanceCents = balCents,
+                                aliases = mergedAliases,
+                                includeInNetWorth = includeInNetWorth
+                            ) ?: WalletEntity(
+                                id = 0L,
+                                name = name.trim(),
+                                type = WalletType.CASH_OTHER,
+                                subTypeLabel = kind.subTypeLabel,
+                                brandCode = kind.brandCode,
+                                currency = "CNY",
+                                balanceCents = balCents,
+                                creditLimitCents = null,
+                                cardLast4 = null,
+                                aliases = mergedAliases,
+                                repaymentDay = null,
+                                includeInNetWorth = includeInNetWorth,
+                                colorHex = kind.defaultColorHex
+                            )
+                            val planDraft = DedicatedFundPlanConfig(
+                                enabled = totalMonthlyCents > 0L || linkedPayrollWalletId != null,
+                                employeeMonthlyCents = employeeCents,
+                                employerMonthlyCents = employerCents,
+                                depositDayOfMonth = depositDay.coerceIn(1, 28),
+                                linkedPayrollWalletId = linkedPayrollWalletId,
+                                autoCreateMonthlyRule = autoCreateMonthlyRule && totalMonthlyCents > 0L,
+                                linkedRecurringRuleId = existingPlan.linkedRecurringRuleId
+                            )
+                            onConfirm(walletDraft, planDraft)
+                            requestDismiss()
+                        },
+                        enabled = canSave,
+                        colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                        shape = RoundedCornerShape(16.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                    ) {
+                        Text(
+                            text = if (existingWallet == null) "创建并保存设置" else "保存设置",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 15.sp
+                        )
+                    }
                 }
             }
         }
