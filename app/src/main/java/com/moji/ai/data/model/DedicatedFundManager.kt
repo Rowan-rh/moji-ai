@@ -465,6 +465,61 @@ object DedicatedFundManager {
         val cleanTail = tailSummary.trim()
         return if (cleanTail.isNotEmpty()) "$prefix | $cleanTail" else prefix
     }
+
+    /**
+     * 账本列表行（`ICostLedgerRow`）医保结构化费用胶囊文案生成：
+     * - 对 `#MED_PERSONAL` 医保个账关联子单返回 `null`（子单本身已带 `#医保 #医保个账 #组合支付` 标签，不重复挂总费胶囊）；
+     * - 对包含结构化医保拆解（统筹 / 个账 / 医保基金汇总）或存在关联 `#MED_PERSONAL` 子单的主单，输出与账单详情页一致的口径，
+     *   例如：`总费¥100.00 · 统筹¥50.00 · 个账¥30.00`（若同时存在商家优惠则追加 ` · 优惠¥X.XX`）；
+     * - 对普通非医保商品立减单返回 `null`，由列表继续走原有 `原价¥X · 优惠¥Y` 橙色胶囊。
+     */
+    fun buildLedgerMedicalBadgeSummary(
+        tx: TransactionEntity,
+        childPersonalSumCents: Long = 0L,
+        formatCents: (Long) -> String = { cents ->
+            "¥" + String.format(Locale.US, "%.2f", cents.coerceAtLeast(0L) / 100.0)
+        }
+    ): String? {
+        if (tx.type != TransactionType.EXPENSE && tx.type != TransactionType.REFUND_OFFSET) return null
+        if (isCompositeMedicalPersonalChild(tx)) return null
+
+        val parsed = parseStructuredMedicalNote(tx.note)
+        val cleanChildPersonal = childPersonalSumCents.coerceAtLeast(0L)
+        val effectivePersonalCents = if (cleanChildPersonal > 0L) {
+            cleanChildPersonal
+        } else {
+            parsed.personalAccountCents
+        }
+        val hasMedicalBreakdown = parsed.poolSubsidyCents > 0L ||
+            effectivePersonalCents > 0L ||
+            parsed.unspecifiedMedicalCents > 0L
+        if (!hasMedicalBreakdown) return null
+
+        val effectiveOrigCents = parsed.originalCostCents.takeIf { it > 0L }
+            ?: (tx.amountCents + tx.discountCents + cleanChildPersonal)
+        val commercialDiscountCents = if (cleanChildPersonal > 0L) {
+            (tx.discountCents - parsed.poolSubsidyCents - parsed.unspecifiedMedicalCents).coerceAtLeast(0L)
+        } else {
+            (tx.discountCents - parsed.poolSubsidyCents - parsed.personalAccountCents - parsed.unspecifiedMedicalCents)
+                .coerceAtLeast(0L)
+        }
+
+        val parts = buildList {
+            add("总费${formatCents(effectiveOrigCents)}")
+            if (parsed.poolSubsidyCents > 0L) {
+                add("统筹${formatCents(parsed.poolSubsidyCents)}")
+            } else if (parsed.unspecifiedMedicalCents > 0L) {
+                add("医保${formatCents(parsed.unspecifiedMedicalCents)}")
+            }
+            if (effectivePersonalCents > 0L) {
+                add("个账${formatCents(effectivePersonalCents)}")
+            }
+            if (commercialDiscountCents > 0L) {
+                add("优惠${formatCents(commercialDiscountCents)}")
+            }
+        }
+        return parts.joinToString(" · ")
+    }
 }
 
 /**

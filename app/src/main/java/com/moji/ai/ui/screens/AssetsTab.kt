@@ -799,12 +799,12 @@ fun ICostAssetsScreen(
                 ) {
                     Column(modifier = Modifier.fillMaxWidth()) {
                         CollapsibleGroupHeaderInsideCard(
-                            title = "专项保障账户（医保 / 公积金）",
+                            title = "专项保障账户（医保/公积金）",
                             count = dedicatedFundWallets.size,
                             rightSummary = if (dedicatedFundWallets.isNotEmpty()) {
                                 "专项余额 ${formatMoneyCents(dedicatedGroupBalanceCnyCents, "CNY", hideAmounts)}"
                             } else {
-                                "专款专用 · 默认不计净资产"
+                                "默认不计净资产"
                             },
                             expanded = dedicatedExpanded,
                             onToggle = { dedicatedExpanded = !dedicatedExpanded }
@@ -2203,18 +2203,28 @@ private fun CollapsibleGroupHeaderInsideCard(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .padding(end = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text(
                 text = title,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
-                color = ICostTextSecondary
+                color = ICostTextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false)
             )
             Spacer(modifier = Modifier.width(4.dp))
             Text(
                 text = "($count)",
                 fontSize = 13.sp,
-                color = ICostTextSecondary
+                color = ICostTextSecondary,
+                maxLines = 1,
+                softWrap = false
             )
         }
 
@@ -2226,7 +2236,7 @@ private fun CollapsibleGroupHeaderInsideCard(
                 maxLines = 1,
                 softWrap = false
             )
-            Spacer(modifier = Modifier.width(2.dp))
+            Spacer(modifier = Modifier.width(4.dp))
             Icon(
                 imageVector = Icons.Default.KeyboardArrowDown,
                 contentDescription = null,

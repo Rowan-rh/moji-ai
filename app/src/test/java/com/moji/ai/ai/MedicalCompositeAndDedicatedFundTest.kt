@@ -630,4 +630,65 @@ class MedicalCompositeAndDedicatedFundTest {
         assertEquals(300_000L, DedicatedFundManager.currentSettings.providentPlan.totalMonthlyDepositCents)
         assertEquals(20, DedicatedFundManager.currentSettings.providentPlan.depositDayOfMonth)
     }
+
+    /**
+     * 正例 7（QA 回归）：账本列表行医疗结构化胶囊口径与详情页/统计页统一，不漏计已拆出子单的医保个账
+     */
+    @Test
+    fun pos7_ledgerMedicalBadgeSummary_matchesDetailFourDimAndSkipsChildOrPlainDiscount() = runBlocking {
+        val store = InMemoryLedgerStore(listOf(huabeiWallet, personalMedicalWallet))
+        val manualMain = TransactionEntity(
+            type = TransactionType.EXPENSE,
+            amountCents = 2_000L,
+            amountCnyCents = 2_000L,
+            category = "医疗",
+            sourceWalletId = huabeiWallet.id,
+            captureSource = "MANUAL"
+        )
+        val recorded = LedgerRepository.recordCompositeMedicalOnStore(
+            store = store,
+            mainTx = manualMain,
+            poolSubsidyCents = 5_000L,
+            personalAccountCents = 3_000L
+        )
+        val mainBadge = DedicatedFundManager.buildLedgerMedicalBadgeSummary(
+            tx = recorded.mainTransaction,
+            childPersonalSumCents = recorded.childPersonalTransaction!!.amountCents
+        )
+        assertEquals("总费¥100.00 · 统筹¥50.00 · 个账¥30.00", mainBadge)
+
+        // 子单自身不重复挂总费胶囊
+        val childBadge = DedicatedFundManager.buildLedgerMedicalBadgeSummary(
+            tx = recorded.childPersonalTransaction!!
+        )
+        assertNull(childBadge)
+
+        // 无统筹仅「自费 + 医保个账」（discountCents == 0）同样正确展示总费与个账胶囊
+        val noPoolRecorded = LedgerRepository.recordCompositeMedicalOnStore(
+            store = store,
+            mainTx = manualMain,
+            poolSubsidyCents = 0L,
+            personalAccountCents = 3_000L
+        )
+        assertEquals(
+            "总费¥50.00 · 个账¥30.00",
+            DedicatedFundManager.buildLedgerMedicalBadgeSummary(
+                tx = noPoolRecorded.mainTransaction,
+                childPersonalSumCents = noPoolRecorded.childPersonalTransaction!!.amountCents
+            )
+        )
+
+        // 普通商业满减账单返回 null，保留列表原有「原价 · 优惠」胶囊逻辑
+        val plainRetailTx = TransactionEntity(
+            type = TransactionType.EXPENSE,
+            amountCents = 2_500L,
+            amountCnyCents = 2_500L,
+            discountCents = 800L,
+            category = "餐饮",
+            merchant = "美团外卖",
+            note = "原价¥33.00 · 优惠¥8.00 | 麻辣香锅",
+            sourceWalletId = huabeiWallet.id
+        )
+        assertNull(DedicatedFundManager.buildLedgerMedicalBadgeSummary(plainRetailTx))
+    }
 }
