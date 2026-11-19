@@ -98,6 +98,7 @@ import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.CurrencyRateManager
+import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.SubCategoryDef
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
@@ -202,6 +203,7 @@ fun ICostCalculatorSheet(
     initialTargetWalletId: Long? = null,
     onDismiss: () -> Unit,
     onSaveTransaction: (TransactionEntity, keepOpen: Boolean) -> Unit,
+    onSaveCompositeMedicalTransaction: ((mainTx: TransactionEntity, poolSubsidyCents: Long, personalAccountCents: Long, personalMedicalWalletId: Long?) -> Unit)? = null,
     onOpenAiSandbox: () -> Unit = {},
     onOpenCategoryManagement: (isExpense: Boolean) -> Unit = {},
     onOpenTagManagement: () -> Unit = {},
@@ -279,6 +281,8 @@ fun ICostCalculatorSheet(
             } else ""
         )
     }
+    var medicalPoolYuanStr by remember { mutableStateOf("") }
+    var medicalPersonalYuanStr by remember { mutableStateOf("") }
     var tagText by remember { mutableStateOf(editingTransaction?.tags ?: "") }
 
     // 非转账模式下 sourceWalletId 表示「这笔账的账户」；收入类账单把账户存在 targetWalletId
@@ -384,6 +388,8 @@ fun ICostCalculatorSheet(
             feeYuanStr = if ((editingTransaction?.feeCents ?: 0L) > 0L) {
                 String.format(Locale.US, "%.2f", editingTransaction!!.feeCents / 100.0)
             } else ""
+            medicalPoolYuanStr = ""
+            medicalPersonalYuanStr = ""
             tagText = editingTransaction?.tags ?: ""
             sourceWalletId = if (editingTransaction != null) {
                 editingAccountWalletId(editingTransaction)
@@ -446,6 +452,7 @@ fun ICostCalculatorSheet(
 
     var showWalletPickerForTarget by remember { mutableStateOf<Boolean?>(null) } // false = source, true = target
     var showDiscountDialog by remember { mutableStateOf(false) }
+    var showCompositeMedicalDialog by remember { mutableStateOf(false) }
     var showFeeDialog by remember { mutableStateOf(false) }
     var showTagDialog by remember { mutableStateOf(false) }
     var showTemplatePickerSheet by remember { mutableStateOf(false) }
@@ -622,7 +629,9 @@ fun ICostCalculatorSheet(
             resolvedSourceId = sourceWalletId
             resolvedTargetId = targetWalletId
         } else {
-            val defaultWallet = wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull()
+            val defaultWallet = wallets.firstOrNull {
+            !it.type.isLiability && !DedicatedFundManager.isDedicatedFundWallet(it)
+        } ?: wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull()
             // 编辑原本未关联账户的账单或用户主动点选「不关联账户」时保持 null，不擅自记到默认账户
             resolvedSourceId = if (unlinkedWalletSelected) {
                 null
@@ -680,6 +689,22 @@ fun ICostCalculatorSheet(
             entryTimestamp
         }
 
+        val medicalPoolCents = if (editingTransaction == null && actualType == TransactionType.EXPENSE) {
+            parseYuanToCents(medicalPoolYuanStr) ?: 0L
+        } else {
+            0L
+        }
+        val medicalPersonalCents = if (editingTransaction == null && actualType == TransactionType.EXPENSE) {
+            parseYuanToCents(medicalPersonalYuanStr) ?: 0L
+        } else {
+            0L
+        }
+        val personalMedicalWallet = DedicatedFundManager.findPersonalMedicalWallet(wallets)
+        if (medicalPersonalCents > 0L && personalMedicalWallet != null && finalSourceId == personalMedicalWallet.id) {
+            flashError("组合支付的自费主账户不能与个人医保账户相同，请切换自费账户")
+            return
+        }
+
         val normalizedTags = TagCatalog.joinTags(TagCatalog.parseTags(tagText))
 
         // 编辑时基于原账单 copy，保留退款金额、关联账单、原始采集文本、AI 置信度等字段
@@ -720,16 +745,41 @@ fun ICostCalculatorSheet(
             captureSource = "MANUAL"
         )
         inlineError = null
+        val useCompositeSave = editingTransaction == null &&
+            actualType == TransactionType.EXPENSE &&
+            (medicalPoolCents > 0L || medicalPersonalCents > 0L) &&
+            onSaveCompositeMedicalTransaction != null
+
         if (keepOpen && editingTransaction == null) {
-            onSaveTransaction(entity, true)
+            if (useCompositeSave) {
+                onSaveCompositeMedicalTransaction?.invoke(
+                    entity,
+                    medicalPoolCents,
+                    medicalPersonalCents,
+                    personalMedicalWallet?.id
+                )
+            } else {
+                onSaveTransaction(entity, true)
+            }
             expr = ""
             noteText = ""
             discountYuanStr = ""
             feeYuanStr = ""
+            medicalPoolYuanStr = ""
+            medicalPersonalYuanStr = ""
         } else {
             // 先保存（keepOpen = true 让外层不立即隐藏），再走抽屉自身的收起动画
             isSubmitting = true
-            onSaveTransaction(entity, true)
+            if (useCompositeSave) {
+                onSaveCompositeMedicalTransaction?.invoke(
+                    entity,
+                    medicalPoolCents,
+                    medicalPersonalCents,
+                    personalMedicalWallet?.id
+                )
+            } else {
+                onSaveTransaction(entity, true)
+            }
             requestSheetDismiss()
         }
     }
@@ -1353,11 +1403,14 @@ fun ICostCalculatorSheet(
 
             // 3. 快捷属性胶囊栏（选择账户 | 报销 | 优惠 | 标签 + 右侧币种胶囊）
             // 未手动选择时展示保存时实际会使用的默认账户，避免「显示未选、实际记入某账户」；显式选择「不关联账户」时清晰展示为「不关联账户」
+            val fallbackDefaultWallet = wallets.firstOrNull {
+                !it.type.isLiability && !DedicatedFundManager.isDedicatedFundWallet(it)
+            } ?: wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull()
             val currentWallet = if (unlinkedWalletSelected) {
                 null
             } else {
                 wallets.firstOrNull { it.id == sourceWalletId }
-                    ?: if (isEditing) null else (wallets.firstOrNull { !it.type.isLiability } ?: wallets.firstOrNull())
+                    ?: if (isEditing) null else fallbackDefaultWallet
             }
             val isExplicitlyUnlinked = unlinkedWalletSelected || (isEditing && currentWallet == null)
             Row(
@@ -1403,6 +1456,28 @@ fun ICostCalculatorSheet(
                                 active = hasDisc,
                                 onClick = { showDiscountDialog = true }
                             )
+                        }
+                        if (!isEditing && onSaveCompositeMedicalTransaction != null) {
+                            item {
+                                val personalVal = medicalPersonalYuanStr.toDoubleOrNull() ?: 0.0
+                                val poolVal = medicalPoolYuanStr.toDoubleOrNull() ?: 0.0
+                                val hasMed = personalVal > 0.0 || poolVal > 0.0
+                                val medLabel = when {
+                                    personalVal > 0.0 && poolVal > 0.0 ->
+                                        "医保 个账¥$medicalPersonalYuanStr+统筹¥$medicalPoolYuanStr"
+                                    personalVal > 0.0 -> "医保个账 ¥$medicalPersonalYuanStr"
+                                    poolVal > 0.0 -> "医保统筹 ¥$medicalPoolYuanStr"
+                                    else -> "医保组合"
+                                }
+                                ICostOptionPill(
+                                    assetFile = "opt_account.webp",
+                                    label = medLabel,
+                                    active = hasMed,
+                                    activeBg = Color(0xFF14B8A6).copy(alpha = 0.16f),
+                                    activeTextColor = Color(0xFF0F766E),
+                                    onClick = { showCompositeMedicalDialog = true }
+                                )
+                            }
                         }
                     }
                     if (txType == TransactionType.TRANSFER) {
@@ -2012,6 +2087,28 @@ fun ICostCalculatorSheet(
         )
     }
 
+    if (showCompositeMedicalDialog) {
+        val personalMedicalWallet = remember(wallets) { DedicatedFundManager.findPersonalMedicalWallet(wallets) }
+        CompositeMedicalInputDialog(
+            initialPersonalYuan = medicalPersonalYuanStr,
+            initialPoolYuan = medicalPoolYuanStr,
+            personalMedicalWalletName = personalMedicalWallet?.name,
+            onDismiss = { showCompositeMedicalDialog = false },
+            onConfirm = { personalVal, poolVal ->
+                medicalPersonalYuanStr = personalVal
+                medicalPoolYuanStr = poolVal
+                if ((personalVal.isNotBlank() || poolVal.isNotBlank()) &&
+                    expenseCategories.any { it.name == "医疗" } &&
+                    selectedMainCategory == defaultExpName
+                ) {
+                    selectedMainCategory = "医疗"
+                    selectedSubCategory = ""
+                }
+                showCompositeMedicalDialog = false
+            }
+        )
+    }
+
     if (showFeeDialog) {
         MoneyInputDialog(
             title = "设置转账手续费",
@@ -2575,6 +2672,86 @@ private fun MoneyInputDialog(
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
+@Composable
+private fun CompositeMedicalInputDialog(
+    initialPersonalYuan: String,
+    initialPoolYuan: String,
+    personalMedicalWalletName: String?,
+    onDismiss: () -> Unit,
+    onConfirm: (personalYuan: String, poolYuan: String) -> Unit
+) {
+    var personalText by remember { mutableStateOf(initialPersonalYuan) }
+    var poolText by remember { mutableStateOf(initialPoolYuan) }
+    val personalCents = parseYuanToCents(personalText)
+    val poolCents = parseYuanToCents(poolText)
+    val personalErr = personalText.isNotBlank() && personalCents == null
+    val poolErr = poolText.isNotBlank() && poolCents == null
+    val hasError = personalErr || poolErr
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = ICostCardWhite,
+        title = { Text("医保组合支付拆解", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = if (!personalMedicalWalletName.isNullOrBlank()) {
+                        "主键盘输入现金/银行卡自付实扣金额；下方填写的医保个账将自动从「$personalMedicalWalletName」双扣并生成关联子单。"
+                    } else {
+                        "主键盘输入现金自付金额；当前尚未建档个人医保账户，保存后将结构化记录统筹与个账明细供四维透视分析（不双扣）。"
+                    },
+                    fontSize = 12.sp,
+                    color = ICostTextSecondary
+                )
+                ICostFormField(
+                    value = personalText,
+                    onValueChange = { personalText = sanitizeMoneyInput(it) },
+                    label = "个人医保个账扣款（元）",
+                    placeholder = "0.00",
+                    supportingText = if (personalErr) "请输入正确金额" else "刷个人医保卡/共济账户扣减的部分",
+                    isError = personalErr,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                ICostFormField(
+                    value = poolText,
+                    onValueChange = { poolText = sanitizeMoneyInput(it) },
+                    label = "医保统筹报销（元，选填）",
+                    placeholder = "0.00",
+                    supportingText = if (poolErr) "请输入正确金额" else "国家统筹基金直接报销的部分，不扣任何个人账户",
+                    isError = poolErr,
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !hasError,
+                onClick = {
+                    val cleanPersonal = if (personalCents == null || personalCents == 0L) "" else personalText.trimEnd('.')
+                    val cleanPool = if (poolCents == null || poolCents == 0L) "" else poolText.trimEnd('.')
+                    onConfirm(cleanPersonal, cleanPool)
+                }
+            ) { Text("确定", fontWeight = FontWeight.Bold) }
+        },
+        dismissButton = {
+            Row {
+                if (personalText.isNotBlank() || poolText.isNotBlank()) {
+                    TextButton(
+                        onClick = {
+                            onConfirm("", "")
+                        }
+                    ) { Text("清空", color = ICostCoralRed) }
+                }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
         }
     )
 }

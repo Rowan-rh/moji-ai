@@ -80,6 +80,7 @@ import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.ui.screens.ICostColorTagChip
@@ -160,11 +161,42 @@ fun TransactionDetailSheet(
     onDelete: (Long) -> Unit,
     onSaveAsTemplate: (TransactionEntity) -> Unit = {},
     onSplitTransaction: (expenseId: Long, categoryA: String, amountAYuan: Double, categoryB: String, noteB: String) -> Unit = { _, _, _, _, _ -> },
-    onDuplicate: ((TransactionEntity) -> Unit)? = null
+    onDuplicate: ((TransactionEntity) -> Unit)? = null,
+    allTransactions: List<TransactionEntity> = emptyList(),
+    onInspectRelatedTransaction: ((TransactionEntity) -> Unit)? = null
 ) {
     BackHandler(onBack = onDismiss)
 
     val walletMap = remember(wallets) { wallets.associateBy { it.id } }
+    val isCompositeChild = remember(tx) { DedicatedFundManager.isCompositeMedicalPersonalChild(tx) }
+    val linkedCompositeParent = remember(tx, allTransactions, isCompositeChild) {
+        if (isCompositeChild && (tx.relatedTransactionId ?: 0L) > 0L) {
+            allTransactions.firstOrNull { it.id == tx.relatedTransactionId }
+        } else {
+            null
+        }
+    }
+    val linkedCompositeChildren = remember(tx.id, allTransactions, isCompositeChild) {
+        if (!isCompositeChild) {
+            allTransactions.filter {
+                it.relatedTransactionId == tx.id && DedicatedFundManager.isCompositeMedicalPersonalChild(it)
+            }
+        } else {
+            emptyList()
+        }
+    }
+    val parsedMedicalNote = remember(tx.note) { DedicatedFundManager.parseStructuredMedicalNote(tx.note) }
+    val childPersonalSumCents = remember(linkedCompositeChildren) {
+        linkedCompositeChildren.sumOf { it.amountCents }
+    }
+    val hasStructuredMedicalBreakdown = remember(tx, parsedMedicalNote, linkedCompositeChildren, isCompositeChild) {
+        !isCompositeChild && tx.type == TransactionType.EXPENSE && (
+            parsedMedicalNote.poolSubsidyCents > 0L ||
+                parsedMedicalNote.personalAccountCents > 0L ||
+                parsedMedicalNote.unspecifiedMedicalCents > 0L ||
+                linkedCompositeChildren.isNotEmpty()
+            )
+    }
     val sourceWallet = tx.sourceWalletId?.let { walletMap[it] }
     val targetWallet = tx.targetWalletId?.let { walletMap[it] }
     val badgeColor = resolveTransactionBadgeColor(tx.type)
@@ -297,7 +329,47 @@ fun TransactionDetailSheet(
                     color = amountColor
                 )
 
-                if (tx.type == TransactionType.EXPENSE && tx.discountCents > 0L) {
+                if (hasStructuredMedicalBreakdown) {
+                    val effectivePersonalCents = if (childPersonalSumCents > 0L) {
+                        childPersonalSumCents
+                    } else {
+                        parsedMedicalNote.personalAccountCents
+                    }
+                    val effectiveOrigCents = parsedMedicalNote.originalCostCents.takeIf { it > 0L }
+                        ?: (tx.amountCents + tx.discountCents + childPersonalSumCents)
+                    val summaryParts = buildList {
+                        add("总费 ${formatMoneyCents(effectiveOrigCents, tx.currency)}")
+                        if (parsedMedicalNote.poolSubsidyCents > 0L) {
+                            add("统筹 ${formatMoneyCents(parsedMedicalNote.poolSubsidyCents, tx.currency)}")
+                        } else if (parsedMedicalNote.unspecifiedMedicalCents > 0L) {
+                            add("医保 ${formatMoneyCents(parsedMedicalNote.unspecifiedMedicalCents, tx.currency)}")
+                        }
+                        if (effectivePersonalCents > 0L) {
+                            add("个账 ${formatMoneyCents(effectivePersonalCents, tx.currency)}")
+                        }
+                        add("自付 ${formatMoneyCents(tx.amountCents, tx.currency)}")
+                    }
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (AppearanceConfigManager.isDarkThemeActive) {
+                            Color(0xFF14B8A6).copy(alpha = 0.20f)
+                        } else {
+                            Color(0xFFEAFBF8)
+                        }
+                    ) {
+                        Text(
+                            text = summaryParts.joinToString(" · "),
+                            fontSize = 12.sp,
+                            color = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF2DD4BF) else Color(0xFF0F766E),
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+                } else if (tx.type == TransactionType.EXPENSE && tx.discountCents > 0L) {
                     val origCents = tx.amountCents + tx.discountCents
                     Spacer(modifier = Modifier.height(6.dp))
                     Surface(
@@ -355,7 +427,77 @@ fun TransactionDetailSheet(
                     }
                 }
 
-                if (tx.type == TransactionType.EXPENSE && tx.discountCents > 0L) {
+                if (linkedCompositeChildren.isNotEmpty() || linkedCompositeParent != null) {
+                    val isDark = AppearanceConfigManager.isDarkThemeActive
+                    val relatedTarget = linkedCompositeChildren.firstOrNull() ?: linkedCompositeParent
+                    Surface(
+                        onClick = {
+                            if (relatedTarget != null && onInspectRelatedTransaction != null) {
+                                onInspectRelatedTransaction(relatedTarget)
+                            }
+                        },
+                        enabled = relatedTarget != null && onInspectRelatedTransaction != null,
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (isDark) Color(0xFF14B8A6).copy(alpha = 0.16f) else Color(0xFFEAFBF8),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp)
+                    ) {
+                        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                            if (linkedCompositeChildren.isNotEmpty()) {
+                                val firstChild = linkedCompositeChildren.first()
+                                val childWalletName = firstChild.sourceWalletId?.let { walletMap[it]?.name } ?: "个人医保账户"
+                                Text(
+                                    text = "组合支付联动 · 已同步扣减医保个账",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isDark) Color(0xFF2DD4BF) else Color(0xFF0F766E)
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "关联医保个账子单：-${formatMoneyCents(childPersonalSumCents, tx.currency)}（$childWalletName）· 删除主单时自动一并回滚",
+                                    fontSize = 12.sp,
+                                    color = ICostTextSecondary
+                                )
+                            } else if (linkedCompositeParent != null) {
+                                val parentWalletName = linkedCompositeParent.sourceWalletId?.let { walletMap[it]?.name } ?: "自费账户"
+                                Text(
+                                    text = "组合支付子单 · 个人医保个账扣款",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isDark) Color(0xFF2DD4BF) else Color(0xFF0F766E)
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "关联自费主单：-${formatMoneyCents(linkedCompositeParent.amountCents, linkedCompositeParent.currency)}（$parentWalletName）",
+                                    fontSize = 12.sp,
+                                    color = ICostTextSecondary
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (hasStructuredMedicalBreakdown) {
+                    val effectivePersonalCents = if (childPersonalSumCents > 0L) {
+                        childPersonalSumCents
+                    } else {
+                        parsedMedicalNote.personalAccountCents
+                    }
+                    val effectiveOrigCents = parsedMedicalNote.originalCostCents.takeIf { it > 0L }
+                        ?: (tx.amountCents + tx.discountCents + childPersonalSumCents)
+                    DetailKeyValueRow("医疗总费用", formatMoneyCents(effectiveOrigCents, tx.currency), singleLine = true)
+                    if (parsedMedicalNote.poolSubsidyCents > 0L) {
+                        DetailKeyValueRow("医保统筹报销", "-${formatMoneyCents(parsedMedicalNote.poolSubsidyCents, tx.currency)}", singleLine = true)
+                    } else if (parsedMedicalNote.unspecifiedMedicalCents > 0L) {
+                        DetailKeyValueRow("医保基金支付", "-${formatMoneyCents(parsedMedicalNote.unspecifiedMedicalCents, tx.currency)}", singleLine = true)
+                    }
+                    if (effectivePersonalCents > 0L) {
+                        val suffix = if (childPersonalSumCents > 0L) "（独立子单已扣）" else "（未建医保卡·仅明细）"
+                        DetailKeyValueRow("医保个账支出", "-${formatMoneyCents(effectivePersonalCents, tx.currency)}$suffix", singleLine = true)
+                    }
+                    DetailKeyValueRow("个人现金自付", formatMoneyCents(tx.amountCents, tx.currency), singleLine = true)
+                } else if (tx.type == TransactionType.EXPENSE && tx.discountCents > 0L) {
                     val origCents = tx.amountCents + tx.discountCents
                     DetailKeyValueRow("商品原价", formatMoneyCents(origCents, tx.currency), singleLine = true)
                     DetailKeyValueRow("优惠立减", "-${formatMoneyCents(tx.discountCents, tx.currency)}", singleLine = true)
@@ -589,9 +731,14 @@ fun TransactionDetailSheet(
     }
 
     if (showDeleteConfirm) {
+        val deleteMessage = if (linkedCompositeChildren.isNotEmpty()) {
+            "该账单包含关联的个人医保个账扣款子单（-${formatMoneyCents(childPersonalSumCents, tx.currency)}）。删除后将一并撤销关联子单，并同步恢复自费账户与个人医保账户余额。"
+        } else {
+            "删除后，相关账户余额会同步恢复。"
+        }
         ICostConfirmDialog(
             title = "删除这笔账单？",
-            message = "删除后，相关账户余额会同步恢复。",
+            message = deleteMessage,
             confirmText = "删除",
             onConfirm = {
                 showDeleteConfirm = false

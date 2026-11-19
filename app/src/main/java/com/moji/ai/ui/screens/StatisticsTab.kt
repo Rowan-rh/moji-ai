@@ -74,6 +74,8 @@ import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.CurrencyRateManager
+import com.moji.ai.data.model.MedicalExpenseInsights
+import com.moji.ai.data.model.MedicalExpenseInsightsCalculator
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.ui.theme.ICDinFontFamily
@@ -454,6 +456,10 @@ fun ICostStatisticsScreen(
     val settledReimburseCents = remember(filteredTxs) {
         filteredTxs.filter { it.reimbursable && it.reimbursed }.sumOf { netExpenseOf(it) }
     }
+    val medicalInsights = remember(nonAnchorTxs, wallets) {
+        MedicalExpenseInsightsCalculator.compute(nonAnchorTxs, wallets)
+    }
+    var medicalInsightsExpanded by rememberSaveable { mutableStateOf(true) }
 
     val repaymentCents = remember(filteredTxs) {
         filteredTxs.filter { it.type == TransactionType.REPAYMENT }.sumOf { it.amountCnyCents }
@@ -824,6 +830,18 @@ fun ICostStatisticsScreen(
                     "已报销" to formatMoneyCents(settledReimburseCents, "CNY", hideAmounts)
                 )
             )
+        }
+
+        // 6.5 卡片二点五：医疗与医保费用四维透视（当周期内存在医疗/医保账单时自动呈现）
+        if (medicalInsights.hasData) {
+            item {
+                ICostMedicalFourDimCard(
+                    insights = medicalInsights,
+                    hideAmounts = hideAmounts,
+                    expanded = medicalInsightsExpanded,
+                    onToggle = { medicalInsightsExpanded = !medicalInsightsExpanded }
+                )
+            }
         }
 
         // 7. 卡片三：流转统计
@@ -1726,6 +1744,218 @@ private fun StatsEmptyChart(height: androidx.compose.ui.unit.Dp) {
         contentAlignment = Alignment.Center
     ) {
         Text("暂无数据", fontSize = 13.sp, color = ICostTextSecondary)
+    }
+}
+
+/**
+ * 1:1 iCost 2x2 医疗与医保费用四维透视卡片（供「统计页」与「标签管理 #医保 下钻页」复用）
+ */
+@Composable
+fun ICostMedicalFourDimCard(
+    insights: MedicalExpenseInsights,
+    hideAmounts: Boolean = false,
+    embedded: Boolean = false,
+    expanded: Boolean = true,
+    onToggle: () -> Unit = {},
+    modifier: Modifier = Modifier
+) {
+    val tealPoolColor = Color(0xFF14B8A6)
+    val bluePersonalColor = ICostBlueAccent
+    val cashSelfColor = ICostExpenseColor
+
+    val total = insights.totalMedicalCostCents.coerceAtLeast(1L).toFloat()
+    val poolRatio = (insights.poolReimbursedCents.coerceAtLeast(0L).toFloat() / total).coerceIn(0f, 1f)
+    val personalRatio = (insights.personalAccountPaidCents.coerceAtLeast(0L).toFloat() / total).coerceIn(0f, 1f)
+    val selfRatio = (insights.cashOutOfPocketNetCents.coerceAtLeast(0L).toFloat() / total).coerceIn(0f, 1f)
+    val coveredPct = (((insights.poolReimbursedCents + insights.personalAccountPaidCents).toDouble() /
+        insights.totalMedicalCostCents.coerceAtLeast(1L).toDouble()) * 100.0).roundToLong().coerceIn(0L, 100L)
+
+    @Composable
+    fun GridContent() {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                MedicalMetricBentoCell(
+                    label = "医疗总费用",
+                    valueText = formatMoneyCents(insights.totalMedicalCostCents, "CNY", hideAmounts),
+                    valueColor = ICostTextPrimary,
+                    subHint = "${insights.medicalBillCount} 笔就医购药",
+                    modifier = Modifier.weight(1f)
+                )
+                MedicalMetricBentoCell(
+                    label = "医保统筹报销",
+                    valueText = formatMoneyCents(insights.poolReimbursedCents, "CNY", hideAmounts),
+                    valueColor = tealPoolColor,
+                    subHint = "国家统筹基金直报",
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                MedicalMetricBentoCell(
+                    label = "医保个账支出",
+                    valueText = formatMoneyCents(insights.personalAccountPaidCents, "CNY", hideAmounts),
+                    valueColor = bluePersonalColor,
+                    subHint = "个人医保卡/共济账户",
+                    modifier = Modifier.weight(1f)
+                )
+                MedicalMetricBentoCell(
+                    label = "个人现金自付",
+                    valueText = formatMoneyCents(insights.cashOutOfPocketNetCents, "CNY", hideAmounts),
+                    valueColor = cashSelfColor,
+                    subHint = if (!hideAmounts && insights.totalMedicalCostCents > 0L) {
+                        "医保覆盖 $coveredPct%"
+                    } else {
+                        "日常资金账户实扣"
+                    },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            if (!hideAmounts && insights.totalMedicalCostCents > 0L) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(6.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(ICostCellGray)
+                ) {
+                    if (poolRatio > 0.005f) {
+                        Box(
+                            modifier = Modifier
+                                .weight(poolRatio)
+                                .height(6.dp)
+                                .background(tealPoolColor)
+                        )
+                    }
+                    if (personalRatio > 0.005f) {
+                        Box(
+                            modifier = Modifier
+                                .weight(personalRatio)
+                                .height(6.dp)
+                                .background(bluePersonalColor)
+                        )
+                    }
+                    if (selfRatio > 0.005f) {
+                        Box(
+                            modifier = Modifier
+                                .weight(selfRatio)
+                                .height(6.dp)
+                                .background(cashSelfColor)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    if (embedded) {
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = ICostBgGraySafe(),
+            modifier = modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "医疗与医保四维费用透视",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextPrimary
+                    )
+                    Text(
+                        text = "统筹 · 个账 · 现金自付",
+                        fontSize = 11.sp,
+                        color = ICostTextSecondary
+                    )
+                }
+                GridContent()
+            }
+        }
+    } else {
+        Card(
+            modifier = modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(22.dp),
+            colors = CardDefaults.cardColors(containerColor = ICostCardWhite),
+            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                StatsCardHeader(
+                    badgeAsset = "chart_budget_red.webp",
+                    title = "医疗与医保透视",
+                    expanded = expanded,
+                    onToggle = onToggle
+                )
+                AnimatedVisibility(
+                    visible = expanded,
+                    enter = expandVertically(
+                        animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+                    ) + fadeIn(tween(180)),
+                    exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                ) {
+                    Box(modifier = Modifier.padding(top = 12.dp)) {
+                        GridContent()
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ICostBgGraySafe(): Color = ICostCellGray.copy(alpha = 0.55f)
+
+@Composable
+private fun MedicalMetricBentoCell(
+    label: String,
+    valueText: String,
+    valueColor: Color,
+    subHint: String,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(15.dp),
+        color = ICostCellGray,
+        modifier = modifier
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
+            Text(
+                text = label,
+                fontSize = 12.sp,
+                color = ICostTextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = valueText,
+                fontFamily = ICDinFontFamily,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = valueColor,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = subHint,
+                fontSize = 10.sp,
+                color = ICostTextMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }
 

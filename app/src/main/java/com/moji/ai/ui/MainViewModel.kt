@@ -40,6 +40,10 @@ import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CategoryDef
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.CurrencyRateManager
+import com.moji.ai.data.model.DedicatedFundKind
+import com.moji.ai.data.model.DedicatedFundManager
+import com.moji.ai.data.model.DedicatedFundPlanConfig
+import com.moji.ai.data.model.DedicatedFundSettings
 import com.moji.ai.data.model.PasswordProtectionConfig
 import com.moji.ai.data.model.PinVerifyResult
 import com.moji.ai.data.model.RecurrenceFrequency
@@ -593,6 +597,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val incomeCategories: StateFlow<List<CategoryDef>> = CategoryCatalog.incomeCategoriesFlow
 
     val tags: StateFlow<List<TagDef>> = TagCatalog.tagsFlow
+
+    val dedicatedFundSettings: StateFlow<DedicatedFundSettings> = DedicatedFundManager.settingsFlow
 
     val customCurrencyRates: StateFlow<Map<String, Double>> = CurrencyRateManager.customRatesFlow
 
@@ -1160,6 +1166,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun saveCompositeManualTransaction(
+        mainTx: TransactionEntity,
+        poolSubsidyCents: Long,
+        personalAccountCents: Long,
+        personalMedicalWalletId: Long? = null
+    ) {
+        viewModelScope.launch {
+            val result = repository.recordCompositeMedicalTransaction(
+                mainTx = mainTx,
+                poolSubsidyCents = poolSubsidyCents,
+                personalAccountCents = personalAccountCents,
+                commercialDiscountCents = mainTx.discountCents,
+                personalMedicalWalletId = personalMedicalWalletId
+            )
+            app.merchantMemoryManager.learnFromTransaction(result.mainTransaction)
+            if (result.childPersonalTransaction != null) {
+                val personalYuan = String.format(Locale.US, "%.2f", result.childPersonalTransaction.amountCents / 100.0)
+                val selfYuan = String.format(Locale.US, "%.2f", result.mainTransaction.amountCents / 100.0)
+                postMessage(
+                    text = "已记录医保组合支付：自费 ¥$selfYuan + 医保个账 ¥$personalYuan",
+                    undoTransactionId = result.mainTransaction.id
+                )
+            } else {
+                postMessage(
+                    text = "已记录医疗账单",
+                    undoTransactionId = result.mainTransaction.id
+                )
+            }
+        }
+    }
+
     fun upsertMerchantMemory(keyword: String, category: String, preferredWalletId: Long? = null) {
         app.merchantMemoryManager.upsertMemory(keyword, category, preferredWalletId)
     }
@@ -1239,7 +1276,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             customCurrencyRates = CurrencyRateManager.customRates,
             reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
             appearanceSettingsJson = AppearanceConfigManager.exportConfigJson(),
-            captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson()
+            captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson(),
+            dedicatedFundSettingsJson = DedicatedFundManager.exportConfigJson()
         )
     }
 
@@ -1261,7 +1299,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             customCurrencyRates = CurrencyRateManager.customRates,
             reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
             appearanceSettingsJson = AppearanceConfigManager.exportConfigJson(),
-            captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson()
+            captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson(),
+            dedicatedFundSettingsJson = DedicatedFundManager.exportConfigJson()
         )
     }
 
@@ -1461,6 +1500,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (snapshot.captureWhitelistJson.isNotBlank()) {
                 CaptureAppWhitelistManager.restoreFromBackupJson(snapshot.captureWhitelistJson)
+            }
+            if (snapshot.dedicatedFundSettingsJson.isNotBlank()) {
+                DedicatedFundManager.restoreFromBackupJson(snapshot.dedicatedFundSettingsJson)
             }
             MoJiCloudSyncClient.recordRestoredState(restoredSig)
             txCount
@@ -1692,6 +1734,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } else {
                 repository.updateWallet(wallet)
             }
+        }
+    }
+
+    fun saveDedicatedFundSetup(
+        kind: DedicatedFundKind,
+        walletDraft: WalletEntity,
+        planConfig: DedicatedFundPlanConfig
+    ) {
+        viewModelScope.launch {
+            val (savedWallet, finalPlan) = repository.setupOrUpdateDedicatedFund(
+                kind = kind,
+                walletDraft = walletDraft,
+                planConfig = planConfig
+            )
+            val ruleSuffix = if (finalPlan.autoCreateMonthlyRule && finalPlan.totalMonthlyDepositCents > 0L) {
+                " · 已启用每月 ${finalPlan.depositDayOfMonth} 日自动入账"
+            } else {
+                ""
+            }
+            postMessage("已保存「${savedWallet.name}」专项保障账户设置$ruleSuffix")
         }
     }
 
