@@ -38,6 +38,15 @@ object TagCatalog {
     private const val PREFS_NAME = "moji_tag_catalog_prefs"
     private const val KEY_CUSTOM_TAGS_JSON = "custom_tags_json"
     private const val KEY_MUTED_DISCOVERED_TAGS_JSON = "muted_discovered_tags_json"
+    private const val KEY_PRESET_TAG_VERSION = "preset_tag_catalog_version"
+
+    /**
+     * 预设标签代数版本号：
+     * - v1：初代预设标签（部分早期老用户持久化时甚至尚未包含 `医保` / `公积金`）；
+     * - v2：为存量升级用户无感增量补齐 `#医保` 与 `#公积金`（严格尊重 `_mutedTagNames`）。
+     */
+    const val PRESET_TAG_CATALOG_VERSION: Int = 2
+    private val V2_INCREMENTAL_PRESET_TAG_NAMES: List<String> = listOf("医保", "公积金")
 
     const val DEFAULT_TAG_COLOR_HEX: Long = 0xFFE65540L
     const val SYSTEM_BALANCE_ANCHOR_TAG: String = "平账"
@@ -67,12 +76,13 @@ object TagCatalog {
     )
 
     /**
-     * 默认预设标签（覆盖日常餐饮、医保结算、差旅报销、分期与人情场景）
+     * 默认预设标签（覆盖日常餐饮、医保结算、公积金、差旅报销、分期与人情场景）
      */
     val defaultTags: List<TagDef> = listOf(
         TagDef(name = "早餐", colorHex = 0xFFF59E0BL, groupName = "日常"),
         TagDef(name = "夜宵", colorHex = 0xFF8B5CF6L, groupName = "日常"),
         TagDef(name = "医保", colorHex = 0xFF14B8A6L, groupName = "日常"),
+        TagDef(name = "公积金", colorHex = 0xFF1677FFL, groupName = "生活事件"),
         TagDef(name = "差旅交通", colorHex = 0xFF1677FFL, groupName = "差旅报销"),
         TagDef(name = "聚餐", colorHex = 0xFFE65540L, groupName = "日常"),
         TagDef(name = "出差", colorHex = 0xFF14B8A6L, groupName = "差旅报销"),
@@ -125,6 +135,11 @@ object TagCatalog {
     @Synchronized
     fun init(context: Context) {
         val sp = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        initWithPrefs(sp)
+    }
+
+    @Synchronized
+    internal fun initWithPrefs(sp: SharedPreferences) {
         prefs = sp
 
         _mutedTagNames.clear()
@@ -138,14 +153,58 @@ object TagCatalog {
             }
         }
 
+        val storedPresetVersion = sp.getInt(KEY_PRESET_TAG_VERSION, 1)
         val customRaw = sp.getString(KEY_CUSTOM_TAGS_JSON, null)
         if (!customRaw.isNullOrBlank()) {
-            runCatching {
+            val decoded = runCatching {
                 sanitizeTagList(jsonCodec.decodeFromString<List<TagDef>>(customRaw))
-            }.getOrNull()?.let { decoded ->
-                _tagsFlow.value = decoded
+            }.getOrNull()
+            if (decoded != null) {
+                val upgraded = if (storedPresetVersion < PRESET_TAG_CATALOG_VERSION) {
+                    applyIncrementalPresetUpgrade(decoded, _mutedTagNames)
+                } else {
+                    decoded
+                }
+                _tagsFlow.value = upgraded
+                if (storedPresetVersion < PRESET_TAG_CATALOG_VERSION || upgraded != decoded) {
+                    sp.edit()
+                        .putString(KEY_CUSTOM_TAGS_JSON, jsonCodec.encodeToString(upgraded))
+                        .putInt(KEY_PRESET_TAG_VERSION, PRESET_TAG_CATALOG_VERSION)
+                        .apply()
+                }
+            } else {
+                _tagsFlow.value = defaultTags
+            }
+        } else {
+            val freshDefaults = defaultTags.filter { it.name !in _mutedTagNames }
+            _tagsFlow.value = freshDefaults
+            if (storedPresetVersion < PRESET_TAG_CATALOG_VERSION) {
+                sp.edit().putInt(KEY_PRESET_TAG_VERSION, PRESET_TAG_CATALOG_VERSION).apply()
             }
         }
+    }
+
+    internal fun applyIncrementalPresetUpgrade(
+        existing: List<TagDef>,
+        mutedNames: Set<String>
+    ): List<TagDef> {
+        val current = existing.toMutableList()
+        val existingSet = current.mapTo(hashSetOf()) { it.name }
+        for (presetName in V2_INCREMENTAL_PRESET_TAG_NAMES) {
+            if (presetName in existingSet || presetName in mutedNames) continue
+            val presetDef = defaultTags.firstOrNull { it.name == presetName } ?: continue
+            current.add(presetDef)
+            existingSet.add(presetName)
+        }
+        return current
+    }
+
+    @Synchronized
+    internal fun resetForTesting() {
+        prefs = null
+        _mutedTagNames.clear()
+        _tagsFlow.value = defaultTags
+        _remapHistoryFlow.value = emptyList()
     }
 
     @Synchronized
@@ -154,6 +213,7 @@ object TagCatalog {
         prefs?.edit()
             ?.putString(KEY_CUSTOM_TAGS_JSON, jsonCodec.encodeToString(list))
             ?.putString(KEY_MUTED_DISCOVERED_TAGS_JSON, jsonCodec.encodeToString(_mutedTagNames.toList()))
+            ?.putInt(KEY_PRESET_TAG_VERSION, PRESET_TAG_CATALOG_VERSION)
             ?.apply()
     }
 
@@ -387,7 +447,8 @@ object TagCatalog {
         if (!removed) {
             return Result.failure(IllegalArgumentException("未找到标签「$cleanName」"))
         }
-        if (muteDiscoveryIfKeptInHistory) {
+        val isPresetTag = defaultTags.any { it.name == cleanName }
+        if (muteDiscoveryIfKeptInHistory || isPresetTag) {
             _mutedTagNames.add(cleanName)
         } else {
             _mutedTagNames.remove(cleanName)

@@ -12,6 +12,7 @@ import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyRateManager
+import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.ReminderConfigManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.service.BillScreenshotStorage
@@ -491,7 +492,8 @@ object MoJiCloudSyncClient {
                 customCurrencyRates = CurrencyRateManager.customRates,
                 reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
                 appearanceSettingsJson = AppearanceConfigManager.exportConfigJson(),
-                captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson()
+                captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson(),
+                dedicatedFundSettingsJson = DedicatedFundManager.exportConfigJson()
             )
             snapshotJson to enrichedTxs
         }
