@@ -176,10 +176,13 @@ fun TransactionDetailSheet(
             null
         }
     }
-    val linkedCompositeChildren = remember(tx.id, allTransactions, isCompositeChild) {
+    val linkedCompositeChildren = remember(tx.id, tx.currency, allTransactions, isCompositeChild) {
         if (!isCompositeChild) {
             allTransactions.filter {
-                it.relatedTransactionId == tx.id && DedicatedFundManager.isCompositeMedicalPersonalChild(it)
+                it.type == TransactionType.EXPENSE &&
+                    it.relatedTransactionId == tx.id &&
+                    it.currency.equals(tx.currency, ignoreCase = true) &&
+                    DedicatedFundManager.isCompositeMedicalPersonalChild(it)
             }
         } else {
             emptyList()
@@ -709,7 +712,14 @@ fun TransactionDetailSheet(
             )
         }
 
-        if (tx.type == TransactionType.EXPENSE && tx.amountCents >= 2L) {
+        val canSplitExpense = tx.type == TransactionType.EXPENSE &&
+            tx.amountCents >= 2L &&
+            !tx.reimbursed &&
+            !isCompositeChild &&
+            linkedCompositeChildren.isEmpty() &&
+            !DedicatedFundManager.isCompositeMedicalMain(tx) &&
+            !parsedMedicalNote.hasExplicitBreakdown
+        if (canSplitExpense) {
             Spacer(modifier = Modifier.height(10.dp))
             DetailWideActionButton(
                 assetFile = "setting_category.webp",
@@ -718,7 +728,7 @@ fun TransactionDetailSheet(
             )
         }
 
-        if (onDuplicate != null) {
+        if (onDuplicate != null && !isCompositeChild) {
             Spacer(modifier = Modifier.height(10.dp))
             DetailWideActionButton(
                 assetFile = "detail_template.webp",

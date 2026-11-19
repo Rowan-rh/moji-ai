@@ -50,6 +50,7 @@ data class AiParsedTransactionResult(
     val paymentMethodRaw: String = "",          // 账单上显示的原始支付方式（如 "招商银行信用卡(3354)"、"花呗"、"医保支付"）
     val discountCents: Long = 0L,               // 混合支付中的优惠/立减/红包/医保抵扣金额（分）
     val tags: String = "",                      // 自动归类标签（如 "医保"，多标签以英文逗号分隔）
+    val isPureMedicalInsurance: Boolean = false,// 是否为 100% 纯医保支付（个人现金实付为 0）
     val confidence: Float = 0.9f
 )
 
@@ -118,6 +119,28 @@ class AiAccountingEngine(
         fun isMedicalInsuranceWallet(wallet: WalletEntity): Boolean =
             DedicatedFundManager.isMedicalInsuranceWallet(wallet)
 
+        private val MED_PREFIX_TAG_REGEX = Regex("""\[AI_[A-Z_]+\s*\|\s*[^\]]+\]:\s*""")
+        private val MED_SPLIT_CUR_DOT_REGEX = Regex("""(¥|￥)\s*\|?\s*(\d{1,7})\s*\|\s*(\.\d{1,2})""")
+        private val MED_SPLIT_CUR_DOT2_REGEX = Regex("""(¥|￥)\s*\|?\s*(\d{1,7})\.\s*\|\s*(\d{1,2})""")
+        private val MED_SPLIT_NUM_DOT_REGEX = Regex("""(\d{1,7})\s*\|\s*(\.\d{1,2})(?=\s|\||$)""")
+        private val MED_SPLIT_NUM_DOT2_REGEX = Regex("""(\d{1,7})\.\s*\|\s*(\d{1,2})(?=\s|\||$)""")
+        private val MED_SPLIT_CUR_NUM_REGEX = Regex("""(¥|￥)\s*\|\s*(\d{1,7}(?:\.\d{1,2})?)""")
+        private val MED_AMOUNT_VAL_REGEX = Regex(
+            """^(?:[-+−]\s*)?(?:¥|￥|RMB|CNY)?\s*(?:[-+−]\s*)?([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]{1,6}(?:\.[0-9]{1,2})?)\s*元?$"""
+        )
+
+        private fun buildInlineMedicalRegex(labels: Set<String>): Regex {
+            val labelPattern = labels.sortedByDescending { it.length }.joinToString("|") { Regex.escape(it) }
+            // 强制尾边界 (?!\d|[-/年:]) 防止把 "医保支付 | 2026-11-19" 或 "医保支付 | 420000123456" 误识别为金额
+            return Regex(
+                """($labelPattern)\s*(?:[:：,，\s]|\|)*\s*(?:[-−+]\s*)?(?:¥|￥|RMB|CNY)?\s*(?:[-−+]\s*)?([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{1,2})?|[0-9]{1,6}(?:\.[0-9]{1,2})?)(?!\d|[-/年:])\s*元?"""
+            )
+        }
+
+        private val POOLED_MEDICAL_INLINE_REGEX = buildInlineMedicalRegex(POOLED_MEDICAL_LABELS)
+        private val PERSONAL_MEDICAL_INLINE_REGEX = buildInlineMedicalRegex(PERSONAL_MEDICAL_LABELS)
+        private val SUMMARY_MEDICAL_INLINE_REGEX = buildInlineMedicalRegex(SUMMARY_MEDICAL_LABELS)
+
         /**
          * 从原始账单文本或节点列表中提取「统筹 / 个账 / 未细分医保」结构化金额，并严格去重（同时存在总标签与细项时仅取正差额）。
          */
@@ -129,39 +152,40 @@ class AiAccountingEngine(
                 return MedicalInsuranceBreakdown()
             }
             val cleanedText = stripEcommerceRecommendationFooter(rawText)
-                .replace(Regex("""\[AI_[A-Z_]+\s*\|\s*[^\]]+\]:\s*"""), "")
-                .replace(Regex("""(¥|￥)\s*\|?\s*(\d{1,7})\s*\|\s*(\.\d{1,2})"""), "$1$2$3")
-                .replace(Regex("""(¥|￥)\s*\|?\s*(\d{1,7})\.\s*\|\s*(\d{1,2})"""), "$1$2.$3")
-                .replace(Regex("""(\d{1,7})\s*\|\s*(\.\d{1,2})(?=\s|\||$)"""), "$1$2")
-                .replace(Regex("""(\d{1,7})\.\s*\|\s*(\d{1,2})(?=\s|\||$)"""), "$1.$2")
-                .replace(Regex("""(¥|￥)\s*\|\s*(\d{1,7}(?:\.\d{1,2})?)"""), "$1$2")
+                .replace(MED_PREFIX_TAG_REGEX, "")
+                .replace(MED_SPLIT_CUR_DOT_REGEX, "$1$2$3")
+                .replace(MED_SPLIT_CUR_DOT2_REGEX, "$1$2.$3")
+                .replace(MED_SPLIT_NUM_DOT_REGEX, "$1$2")
+                .replace(MED_SPLIT_NUM_DOT2_REGEX, "$1.$2")
+                .replace(MED_SPLIT_CUR_NUM_REGEX, "$1$2")
                 .trim()
             val tokens = preSplitTokens ?: cleanedText
                 .split("|", "\n")
                 .map { it.trim() }
                 .filter { it.isNotEmpty() && it != "---" }
 
-            val amountValRegex = Regex("""^(?:[-+−]\s*)?(?:¥|￥|RMB|CNY)?\s*(?:[-+−]\s*)?([0-9]{1,6}(?:\.[0-9]{1,2})?)\s*元?$""")
-            fun findLabelCents(labels: Set<String>): Long {
+            fun findLabelCents(labels: Set<String>, inlineRegex: Regex): Long {
                 var sum = 0L
                 val matchedLabels = mutableSetOf<String>()
                 for (i in tokens.indices) {
                     val tk = tokens[i].trim().trimEnd(':', '：')
                     if (tk in labels && matchedLabels.add(tk)) {
-                        val nextRaw = tokens.getOrNull(i + 1)?.replace(",", "")?.trim().orEmpty()
-                        val num = amountValRegex.matchEntire(nextRaw)?.groupValues?.getOrNull(1)?.toDoubleOrNull()
+                        val nextRaw = tokens.getOrNull(i + 1)?.trim().orEmpty()
+                        val num = MED_AMOUNT_VAL_REGEX.matchEntire(nextRaw)
+                            ?.groupValues?.getOrNull(1)
+                            ?.replace(",", "")
+                            ?.toDoubleOrNull()
                         if (num != null && num > 0.0 && num < 500000.0) {
                             sum += (num * 100.0).roundToLong()
                         }
                     }
                 }
                 if (sum > 0L) return sum
-                val labelPattern = labels.sortedByDescending { it.length }.joinToString("|") { Regex.escape(it) }
-                val inlineRegex = Regex(
-                    """(?:$labelPattern)\s*(?:[:：,，\s]|\|)*\s*(?:[-−+]\s*)?(?:¥|￥)?\s*(?:[-−+]\s*)?([0-9]{1,6}(?:\.[0-9]{1,2})?)\s*元?"""
-                )
+                val inlineMatchedLabels = mutableSetOf<String>()
                 for (m in inlineRegex.findAll(cleanedText)) {
-                    val v = m.groupValues[1].toDoubleOrNull() ?: continue
+                    val matchedLabel = m.groupValues[1]
+                    if (!inlineMatchedLabels.add(matchedLabel)) continue
+                    val v = m.groupValues[2].replace(",", "").toDoubleOrNull() ?: continue
                     if (v > 0.0 && v < 500000.0) {
                         sum += (v * 100.0).roundToLong()
                     }
@@ -169,9 +193,9 @@ class AiAccountingEngine(
                 return sum
             }
 
-            val poolCents = findLabelCents(POOLED_MEDICAL_LABELS)
-            val personalCents = findLabelCents(PERSONAL_MEDICAL_LABELS)
-            val summaryCents = findLabelCents(SUMMARY_MEDICAL_LABELS)
+            val poolCents = findLabelCents(POOLED_MEDICAL_LABELS, POOLED_MEDICAL_INLINE_REGEX)
+            val personalCents = findLabelCents(PERSONAL_MEDICAL_LABELS, PERSONAL_MEDICAL_INLINE_REGEX)
+            val summaryCents = findLabelCents(SUMMARY_MEDICAL_LABELS, SUMMARY_MEDICAL_INLINE_REGEX)
             val subSum = poolCents + personalCents
             val unspecifiedCents = if (subSum > 0L) {
                 (summaryCents - subSum).coerceAtLeast(0L)
@@ -589,7 +613,11 @@ class AiAccountingEngine(
         val validExpenseIds = recentExpenses.mapTo(hashSetOf()) { it.id }
         val rawResolvedSourceWalletId = (finalResult.sourceWalletId?.takeIf { it in validWalletIds })
             ?: (localFallback?.sourceWalletId?.takeIf { it in validWalletIds })
-        val isPureMedicalBill = localFallback?.paymentMethodRaw == "医保支付" || resolvedPayMethod == "医保支付"
+        val isPureMedicalBill = finalResult.isPureMedicalInsurance ||
+            (localFallback?.isPureMedicalInsurance == true) ||
+            localFallback?.paymentMethodRaw == "医保支付" ||
+            resolvedPayMethod == "医保支付"
+        val normalizedPayMethod = if (isPureMedicalBill) "医保支付" else resolvedPayMethod
         val medBreakdownInRaw = extractMedicalBreakdown(rawText)
         val isPurePoolOnlyBill = isPureMedicalBill && medBreakdownInRaw.isPurePoolOnly
         val isMixedMedicalSelfPayBill = !isPureMedicalBill && medBreakdownInRaw.totalMedicalCents > 0L
@@ -617,6 +645,17 @@ class AiAccountingEngine(
         val resolvedTags = TagCatalog.joinTags(
             TagCatalog.parseTags(finalResult.tags) + TagCatalog.parseTags(localFallback?.tags.orEmpty())
         )
+        // 在线 LLM 通知解析路径若未输出结构化医保前缀，保留本地解析器的结构化医保拆解前缀，确保四维统计与后续多帧融合口径一致
+        val resolvedNote = if (
+            medBreakdownInRaw.totalMedicalCents > 0L &&
+            localFallback != null &&
+            !DedicatedFundManager.parseStructuredMedicalNote(finalResult.note).hasExplicitBreakdown &&
+            DedicatedFundManager.parseStructuredMedicalNote(localFallback.note).hasExplicitBreakdown
+        ) {
+            localFallback.note
+        } else {
+            finalResult.note
+        }
 
         val dedupKey = when {
             resolvedOrderKey.isNotBlank() -> "KEY:${resolvedOrderKey}_$amountCents"
@@ -634,7 +673,7 @@ class AiAccountingEngine(
             quantityDesc = resolvedQuantityDesc,
             category = finalResult.category.ifBlank { defaultCategoryForType(txType) },
             merchant = finalResult.merchant,
-            note = finalResult.note,
+            note = resolvedNote,
             tags = resolvedTags,
             sourceWalletId = resolvedSourceWalletId,
             targetWalletId = resolvedTargetWalletId,
@@ -644,7 +683,7 @@ class AiAccountingEngine(
             orderKey = resolvedOrderKey,
             transactionNo = resolvedTxNo,
             merchantOrderNo = resolvedMerchantNo,
-            paymentMethodRaw = resolvedPayMethod,
+            paymentMethodRaw = normalizedPayMethod,
             dedupFingerprint = dedupKey,
             captureSource = captureMode,
             rawCapturedText = rawText.take(1500),
@@ -1141,7 +1180,7 @@ $recentDesc
         val amount = priceBreakdown.actualPaidCents / 100.0
         if (amount <= 0.0) return null
 
-        val payMethodVal = if (priceBreakdown.isPureMedicalInsurance && combinedPayMethod.isBlank()) {
+        val payMethodVal = if (priceBreakdown.isPureMedicalInsurance) {
             "医保支付"
         } else {
             combinedPayMethod
@@ -1449,6 +1488,7 @@ $recentDesc
             paymentMethodRaw = payMethodVal,
             discountCents = priceBreakdown.discountCents,
             tags = autoTags,
+            isPureMedicalInsurance = priceBreakdown.isPureMedicalInsurance,
             confidence = finalConfidence
         )
     }

@@ -238,10 +238,16 @@ fun ICostLedgerHomeScreen(
         monthTransactions.groupBy { tx -> keyFmt.format(Date(tx.timestamp)) }
     }
     val compositeChildSumByParentId = remember(transactions) {
+        val parentCurrencyById = transactions.associate { it.id to it.currency }
         val sums = HashMap<Long, Long>()
         for (item in transactions) {
             val pid = item.relatedTransactionId
-            if (pid != null && pid > 0L && DedicatedFundManager.isCompositeMedicalPersonalChild(item)) {
+            if (pid != null &&
+                pid > 0L &&
+                item.type == TransactionType.EXPENSE &&
+                DedicatedFundManager.isCompositeMedicalPersonalChild(item) &&
+                parentCurrencyById[pid]?.equals(item.currency, ignoreCase = true) != false
+            ) {
                 sums[pid] = (sums[pid] ?: 0L) + item.amountCents
             }
         }

@@ -168,7 +168,8 @@ class CapturePipelineCoordinator(
             // (b) 没有任何明确支付/交易时间且无订单号的裸完成页脏记录（仅限无障碍/OCR 页面采集，排除通知栏与沙盒测试通道）。
             for (tx in allTxs) {
                 if (tx.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT") ||
-                    DedicatedFundManager.isCompositeMedicalPersonalChild(tx)
+                    DedicatedFundManager.isCompositeMedicalPersonalChild(tx) ||
+                    DedicatedFundManager.isCompositeMedicalMain(tx)
                 ) {
                     continue
                 }
@@ -209,7 +210,8 @@ class CapturePipelineCoordinator(
             val afterStep1 = repository.getAllTransactions()
             for (tx in afterStep1) {
                 if (tx.captureSource in setOf("MANUAL", "RECURRING", "BALANCE_ANCHOR", "CSV_IMPORT") ||
-                    DedicatedFundManager.isCompositeMedicalPersonalChild(tx)
+                    DedicatedFundManager.isCompositeMedicalPersonalChild(tx) ||
+                    DedicatedFundManager.isCompositeMedicalMain(tx)
                 ) {
                     continue
                 }
@@ -555,8 +557,10 @@ class CapturePipelineCoordinator(
             updatedAtMillis = System.currentTimeMillis()
         )
         val medBreakdown = AiAccountingEngine.extractMedicalBreakdown(txToRecord.rawCapturedText)
+        val isSelfPayZeroPureMed = DedicatedFundManager.parseStructuredMedicalNote(txToRecord.note).selfPayZeroExplicit
         val savedTx = if (txToRecord.type == TransactionType.EXPENSE &&
             txToRecord.paymentMethodRaw != "医保支付" &&
+            !isSelfPayZeroPureMed &&
             medBreakdown.totalMedicalCents > 0L &&
             txToRecord.amountCents > 0L
         ) {
@@ -828,8 +832,10 @@ class CapturePipelineCoordinator(
         }
 
         val medBreakdown = AiAccountingEngine.extractMedicalBreakdown(mergedText)
+        val isSelfPayZeroPureMed = DedicatedFundManager.parseStructuredMedicalNote(parsedTx.note).selfPayZeroExplicit
         val isMixedMedicalExpense = parsedTx.type == TransactionType.EXPENSE &&
             parsedTx.paymentMethodRaw != "医保支付" &&
+            !isSelfPayZeroPureMed &&
             medBreakdown.totalMedicalCents > 0L &&
             parsedTx.amountCents > 0L
 
@@ -850,7 +856,15 @@ class CapturePipelineCoordinator(
             )
 
             if (isMixedMedicalExpense) {
-                val baseMain = enrichment?.first ?: matched
+                val rawBaseMain = enrichment?.first ?: matched
+                val baseMain = if (rawBaseMain.screenshotPath.isBlank() && screenshotPath.isNotBlank()) {
+                    rawBaseMain.copy(
+                        screenshotPath = screenshotPath,
+                        screenshotSha256 = screenshotSha256.ifBlank { rawBaseMain.screenshotSha256 }
+                    )
+                } else {
+                    rawBaseMain
+                }
                 val baseFields = enrichment?.second ?: emptyList()
                 val commercialDisc = (parsedTx.discountCents - medBreakdown.totalMedicalCents).coerceAtLeast(0L)
                 val fusionResult = repository.enrichCompositeMedicalOnExistingTransaction(
@@ -1552,12 +1566,19 @@ class CapturePipelineCoordinator(
                     ?: (tx.amountCents + tx.discountCents + parsedMedNote.personalAccountCents)
                 val origStr = String.format(Locale.US, "%.2f", origCents / 100.0)
                 val personalStr = String.format(Locale.US, "%.2f", parsedMedNote.personalAccountCents / 100.0)
-                val poolPart = if (tx.discountCents > 0L) {
-                    "·统筹$symbol${String.format(Locale.US, "%.2f", tx.discountCents / 100.0)}"
+                val poolCents = parsedMedNote.poolSubsidyCents
+                val commercialCents = (tx.discountCents - poolCents).coerceAtLeast(0L)
+                val poolPart = if (poolCents > 0L) {
+                    "·统筹$symbol${String.format(Locale.US, "%.2f", poolCents / 100.0)}"
                 } else {
                     ""
                 }
-                "组合双扣·原价$symbol$origStr$poolPart·个账$symbol$personalStr·自付$symbol$amtStr · "
+                val commercialPart = if (commercialCents > 0L) {
+                    "·优惠$symbol${String.format(Locale.US, "%.2f", commercialCents / 100.0)}"
+                } else {
+                    ""
+                }
+                "组合双扣·原价$symbol$origStr$poolPart$commercialPart·个账$symbol$personalStr·自付$symbol$amtStr · "
             }
             tx.type == TransactionType.EXPENSE && tx.discountCents > 0L -> {
                 val origStr = String.format(Locale.US, "%.2f", (tx.amountCents + tx.discountCents) / 100.0)

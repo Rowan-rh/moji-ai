@@ -3577,8 +3577,10 @@ private fun DedicatedFundSetupSheet(
     var depositDayStr by remember(stateKey) {
         mutableStateOf(existingPlan.depositDayOfMonth.coerceIn(1, 28).toString())
     }
-    var linkedPayrollWalletId by remember(stateKey) {
-        mutableStateOf(existingPlan.linkedPayrollWalletId)
+    var linkedPayrollWalletId by remember(stateKey, regularDebitWallets) {
+        mutableStateOf(
+            existingPlan.linkedPayrollWalletId?.takeIf { pid -> regularDebitWallets.any { it.id == pid } }
+        )
     }
     var autoCreateMonthlyRule by remember(stateKey) {
         mutableStateOf(existingPlan.autoCreateMonthlyRule)
@@ -3811,23 +3813,31 @@ private fun DedicatedFundSetupSheet(
                         onClick = {
                             if (!canSave || balanceValue == null || depositDay == null) return@Button
                             val balCents = (balanceValue * 100.0).roundToLong().coerceAtLeast(0L)
-                            val walletDraft = WalletEntity(
-                                id = existingWallet?.id ?: 0L,
+                            val mergedAliases = DedicatedFundManager.mergeDefaultAliases(
+                                kind.brandCode,
+                                existingWallet?.aliases.orEmpty()
+                            )
+                            val walletDraft = existingWallet?.copy(
                                 name = name.trim(),
-                                type = existingWallet?.type ?: WalletType.CASH_OTHER,
-                                subTypeLabel = existingWallet?.subTypeLabel?.ifBlank { kind.subTypeLabel } ?: kind.subTypeLabel,
+                                subTypeLabel = existingWallet.subTypeLabel.ifBlank { kind.subTypeLabel },
                                 brandCode = kind.brandCode,
-                                currency = existingWallet?.currency ?: "CNY",
+                                balanceCents = balCents,
+                                aliases = mergedAliases,
+                                includeInNetWorth = includeInNetWorth
+                            ) ?: WalletEntity(
+                                id = 0L,
+                                name = name.trim(),
+                                type = WalletType.CASH_OTHER,
+                                subTypeLabel = kind.subTypeLabel,
+                                brandCode = kind.brandCode,
+                                currency = "CNY",
                                 balanceCents = balCents,
                                 creditLimitCents = null,
-                                cardLast4 = existingWallet?.cardLast4,
-                                aliases = DedicatedFundManager.mergeDefaultAliases(
-                                    kind.brandCode,
-                                    existingWallet?.aliases.orEmpty()
-                                ),
+                                cardLast4 = null,
+                                aliases = mergedAliases,
                                 repaymentDay = null,
                                 includeInNetWorth = includeInNetWorth,
-                                colorHex = existingWallet?.colorHex ?: kind.defaultColorHex
+                                colorHex = kind.defaultColorHex
                             )
                             val planDraft = DedicatedFundPlanConfig(
                                 enabled = totalMonthlyCents > 0L || linkedPayrollWalletId != null,

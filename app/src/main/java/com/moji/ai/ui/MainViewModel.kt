@@ -946,9 +946,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun duplicateTransactionNow(tx: TransactionEntity) {
         viewModelScope.launch {
+            val cleanedTags = TagCatalog.joinTags(
+                TagCatalog.parseTags(tx.tags).filterNot { it == "组合支付" }
+            )
+            val cleanedNote = if (DedicatedFundManager.isCompositeMedicalPersonalChild(tx)) {
+                tx.note.removePrefix(DedicatedFundManager.COMPOSITE_CHILD_NOTE_PREFIX).trimStart(' ', '·', '|', '：', ':').trim()
+            } else {
+                tx.note
+            }
             val copyTx = tx.copy(
                 id = 0L,
                 syncUuid = java.util.UUID.randomUUID().toString(),
+                relatedTransactionId = null,
+                orderKey = "",
+                transactionNo = "",
+                merchantOrderNo = "",
+                dedupFingerprint = "",
+                tags = cleanedTags,
+                note = cleanedNote,
                 refundedAmountCents = 0L,
                 reimbursed = false,
                 timestamp = System.currentTimeMillis(),
@@ -1173,26 +1188,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         personalMedicalWalletId: Long? = null
     ) {
         viewModelScope.launch {
-            val result = repository.recordCompositeMedicalTransaction(
-                mainTx = mainTx,
-                poolSubsidyCents = poolSubsidyCents,
-                personalAccountCents = personalAccountCents,
-                commercialDiscountCents = mainTx.discountCents,
-                personalMedicalWalletId = personalMedicalWalletId
-            )
-            app.merchantMemoryManager.learnFromTransaction(result.mainTransaction)
-            if (result.childPersonalTransaction != null) {
-                val personalYuan = String.format(Locale.US, "%.2f", result.childPersonalTransaction.amountCents / 100.0)
-                val selfYuan = String.format(Locale.US, "%.2f", result.mainTransaction.amountCents / 100.0)
-                postMessage(
-                    text = "已记录医保组合支付：自费 ¥$selfYuan + 医保个账 ¥$personalYuan",
-                    undoTransactionId = result.mainTransaction.id
+            try {
+                val result = repository.recordCompositeMedicalTransaction(
+                    mainTx = mainTx,
+                    poolSubsidyCents = poolSubsidyCents,
+                    personalAccountCents = personalAccountCents,
+                    commercialDiscountCents = mainTx.discountCents,
+                    personalMedicalWalletId = personalMedicalWalletId
                 )
-            } else {
-                postMessage(
-                    text = "已记录医疗账单",
-                    undoTransactionId = result.mainTransaction.id
-                )
+                app.merchantMemoryManager.learnFromTransaction(result.mainTransaction)
+                if (result.childPersonalTransaction != null) {
+                    val personalYuan = String.format(Locale.US, "%.2f", result.childPersonalTransaction.amountCents / 100.0)
+                    val selfYuan = String.format(Locale.US, "%.2f", result.mainTransaction.amountCents / 100.0)
+                    postMessage(
+                        text = "已记录医保组合支付：自费 ¥$selfYuan + 医保个账 ¥$personalYuan",
+                        undoTransactionId = result.mainTransaction.id
+                    )
+                } else {
+                    postMessage(
+                        text = "已记录医疗账单",
+                        undoTransactionId = result.mainTransaction.id
+                    )
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (err: Exception) {
+                postMessage("保存医保组合账单失败：${err.message ?: err.javaClass.simpleName}")
             }
         }
     }
@@ -1502,7 +1523,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 CaptureAppWhitelistManager.restoreFromBackupJson(snapshot.captureWhitelistJson)
             }
             if (snapshot.dedicatedFundSettingsJson.isNotBlank()) {
-                DedicatedFundManager.restoreFromBackupJson(snapshot.dedicatedFundSettingsJson)
+                if (!DedicatedFundManager.restoreFromBackupJson(snapshot.dedicatedFundSettingsJson)) {
+                    DedicatedFundManager.resetToDefaults()
+                }
+            } else {
+                DedicatedFundManager.resetToDefaults()
             }
             MoJiCloudSyncClient.recordRestoredState(restoredSig)
             txCount
@@ -1743,17 +1768,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         planConfig: DedicatedFundPlanConfig
     ) {
         viewModelScope.launch {
-            val (savedWallet, finalPlan) = repository.setupOrUpdateDedicatedFund(
-                kind = kind,
-                walletDraft = walletDraft,
-                planConfig = planConfig
-            )
-            val ruleSuffix = if (finalPlan.autoCreateMonthlyRule && finalPlan.totalMonthlyDepositCents > 0L) {
-                " · 已启用每月 ${finalPlan.depositDayOfMonth} 日自动入账"
-            } else {
-                ""
+            try {
+                val (savedWallet, finalPlan) = repository.setupOrUpdateDedicatedFund(
+                    kind = kind,
+                    walletDraft = walletDraft,
+                    planConfig = planConfig
+                )
+                val ruleSuffix = if (finalPlan.autoCreateMonthlyRule && finalPlan.totalMonthlyDepositCents > 0L) {
+                    " · 已启用每月 ${finalPlan.depositDayOfMonth} 日自动入账"
+                } else {
+                    ""
+                }
+                postMessage("已保存「${savedWallet.name}」专项保障账户设置$ruleSuffix")
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (err: Exception) {
+                postMessage("保存专项保障账户失败：${err.message ?: err.javaClass.simpleName}")
             }
-            postMessage("已保存「${savedWallet.name}」专项保障账户设置$ruleSuffix")
         }
     }
 

@@ -596,6 +596,22 @@ fun ICostCalculatorSheet(
             flashError("关联退款单不支持直接改金额或类型，请删除该退款后在原账单重新退款")
             return
         }
+        if (
+            editingTransaction != null &&
+            DedicatedFundManager.isCompositeMedicalPersonalChild(editingTransaction) &&
+            (preservedSpecialType != null || txType != TransactionType.EXPENSE || !editingTransaction.currency.equals(currency, ignoreCase = true))
+        ) {
+            flashError("医保组合支付的个账子单不支持修改类型或币种，请删除主账单后重新记账")
+            return
+        }
+        if (
+            editingTransaction != null &&
+            DedicatedFundManager.isCompositeMedicalMain(editingTransaction) &&
+            (preservedSpecialType != null || txType != TransactionType.EXPENSE || !editingTransaction.currency.equals(currency, ignoreCase = true))
+        ) {
+            flashError("医保组合支付主账单不支持修改类型或币种，请删除后重新记账")
+            return
+        }
         val rate = if (
             editingTransaction != null &&
             editingTransaction.currency.equals(currency, ignoreCase = true) &&
@@ -700,6 +716,10 @@ fun ICostCalculatorSheet(
             0L
         }
         val personalMedicalWallet = DedicatedFundManager.findPersonalMedicalWallet(wallets)
+        if ((medicalPoolCents > 0L || medicalPersonalCents > 0L) && !currency.equals("CNY", ignoreCase = true)) {
+            flashError("医保组合支付仅支持人民币（CNY），请切换币种后再保存")
+            return
+        }
         if (medicalPersonalCents > 0L && personalMedicalWallet != null && finalSourceId == personalMedicalWallet.id) {
             flashError("组合支付的自费主账户不能与个人医保账户相同，请切换自费账户")
             return

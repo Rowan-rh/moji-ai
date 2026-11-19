@@ -691,4 +691,154 @@ class MedicalCompositeAndDedicatedFundTest {
         )
         assertNull(DedicatedFundManager.buildLedgerMedicalBadgeSummary(plainRetailTx))
     }
+
+    /**
+     * OCR 回归 1（Critical #1）：纯医保账单携带「医保电子凭证 / 医保统筹」等显式医保付款方式时，
+     * 必须仍判定为纯医保（paymentMethodRaw 归一化为 "医保支付"、isPureMedicalInsurance=true），绝不误走混合双扣。
+     */
+    @Test
+    fun ocrReg1_pureMedicalWithExplicitMedicalPayMethod_staysPureAndNormalized() {
+        val rawText = "某三甲医院 | -0.00 | 支付成功 | 订单金额 | 80.00 | 医保统筹 | -50.00 | 医保个账 | -30.00 | 付款方式 | 医保电子凭证 | 创建时间 | 2026-11-19 10:15:30"
+        val parsed = engine.localSmartFallbackParse(
+            rawText = rawText,
+            sourceAppPackage = "com.eg.android.AlipayGphone",
+            wallets = listOf(huabeiWallet, personalMedicalWallet),
+            recentExpenses = emptyList()
+        )
+        assertNotNull(parsed)
+        assertTrue(parsed!!.isPureMedicalInsurance)
+        assertEquals("医保支付", parsed.paymentMethodRaw)
+        assertEquals(30.0, parsed.amount, 0.001)
+        assertEquals(5_000L, parsed.discountCents)
+        assertEquals(personalMedicalWallet.id, parsed.sourceWalletId)
+    }
+
+    /**
+     * OCR 回归 2（High #2）：extractMedicalBreakdown 兜底行内正则拦截日期/订单号、去重多帧重复标签、支持千分位金额
+     */
+    @Test
+    fun ocrReg2_extractMedicalBreakdown_blocksDatesOrderNumbers_dedupsMultiFrame_parsesCommas() {
+        // 1. 日期与订单号紧跟 "医保支付" 后，不得把 2026 或 420000 误提取为金额
+        val dateText = "某医院 | -20.00 | 支付方式 | 医保支付 | 2026-11-19 10:15:30"
+        val dateBreakdown = AiAccountingEngine.extractMedicalBreakdown(dateText)
+        assertEquals(0L, dateBreakdown.totalMedicalCents)
+
+        val orderText = "某医院 | -20.00 | 医保支付 | 4200001234567890"
+        val orderBreakdown = AiAccountingEngine.extractMedicalBreakdown(orderText)
+        assertEquals(0L, orderBreakdown.totalMedicalCents)
+
+        // 2. 多帧合并出现重复行内标签时严格去重，不翻倍累加
+        val multiFrame = "某药房 医保统筹：50.00元 医保个账：30.00元\n---\n某药房 医保统筹：50.00元 医保个账：30.00元"
+        val deduped = AiAccountingEngine.extractMedicalBreakdown(multiFrame)
+        assertEquals(5_000L, deduped.poolSubsidyCents)
+        assertEquals(3_000L, deduped.personalAccountCents)
+
+        // 3. 千分位逗号金额完整解析
+        val commaText = "某三甲医院 医保统筹：1,234.56元 医保个账：200.00元"
+        val commaParsed = AiAccountingEngine.extractMedicalBreakdown(commaText)
+        assertEquals(123_456L, commaParsed.poolSubsidyCents)
+        assertEquals(20_000L, commaParsed.personalAccountCents)
+    }
+
+    /**
+     * OCR 回归 3（Medium #7）：组合医保账单无统筹但有商业店铺优惠时，商业优惠不得被误算为医保统筹报销
+     */
+    @Test
+    fun ocrReg3_compositeCommercialCouponWithoutPool_doesNotInflatePoolReimbursed() = runBlocking {
+        val store = InMemoryLedgerStore(listOf(huabeiWallet, personalMedicalWallet))
+        val mainTx = TransactionEntity(
+            type = TransactionType.EXPENSE,
+            amountCents = 6_000L,
+            amountCnyCents = 6_000L,
+            category = "医疗",
+            merchant = "益丰大药房",
+            sourceWalletId = huabeiWallet.id
+        )
+        LedgerRepository.recordCompositeMedicalOnStore(
+            store = store,
+            mainTx = mainTx,
+            poolSubsidyCents = 0L,
+            personalAccountCents = 3_000L,
+            commercialDiscountCents = 1_000L
+        )
+        val insights = MedicalExpenseInsightsCalculator.compute(
+            transactions = store.getAllTransactions(),
+            wallets = store.getAllWallets()
+        )
+        assertEquals(0L, insights.poolReimbursedCents)
+        assertEquals(3_000L, insights.personalAccountPaidCents)
+        assertEquals(6_000L, insights.cashOutOfPocketNetCents)
+        assertEquals(9_000L, insights.totalMedicalCostCents)
+        assertEquals(1, insights.medicalBillCount)
+    }
+
+    /**
+     * OCR 回归 4（High #6 + Medium #8）：resetToDefaults 与 clearReferencesForDeletedWallet 正确清理悬空配置
+     */
+    @Test
+    fun ocrReg4_dedicatedFundManager_resetToDefaultsAndClearDeletedWalletRefs() {
+        DedicatedFundManager.updatePlan(
+            DedicatedFundKind.HOUSING_PROVIDENT,
+            DedicatedFundPlanConfig(
+                enabled = true,
+                employeeMonthlyCents = 150_000L,
+                employerMonthlyCents = 150_000L,
+                depositDayOfMonth = 15,
+                linkedPayrollWalletId = 99L,
+                autoCreateMonthlyRule = true,
+                linkedRecurringRuleId = 7L
+            )
+        )
+        // 删除关联工资卡 99L 时，应仅清空 linkedPayrollWalletId
+        val afterPayrollDel = DedicatedFundManager.clearReferencesForDeletedWallet(
+            deletedWalletId = 99L,
+            deletedKind = null,
+            hasRemainingWalletOfSameKind = false
+        )
+        assertNull(afterPayrollDel.providentPlan.linkedPayrollWalletId)
+        assertTrue(afterPayrollDel.providentPlan.autoCreateMonthlyRule)
+
+        // 删除最后一个公积金账户时，清空周期规则关联并关闭自动生成开关
+        val afterProvidentDel = DedicatedFundManager.clearReferencesForDeletedWallet(
+            deletedWalletId = 20L,
+            deletedKind = DedicatedFundKind.HOUSING_PROVIDENT,
+            hasRemainingWalletOfSameKind = false
+        )
+        assertFalse(afterProvidentDel.providentPlan.autoCreateMonthlyRule)
+        assertNull(afterProvidentDel.providentPlan.linkedRecurringRuleId)
+
+        // 恢复旧版无专项配置备份时调用 resetToDefaults 清零全部残留
+        DedicatedFundManager.updatePlan(
+            DedicatedFundKind.MEDICAL_INSURANCE,
+            DedicatedFundPlanConfig(enabled = true, employeeMonthlyCents = 20_000L, linkedRecurringRuleId = 5L)
+        )
+        val reset = DedicatedFundManager.resetToDefaults()
+        assertFalse(reset.medicalPlan.enabled)
+        assertNull(reset.medicalPlan.linkedRecurringRuleId)
+    }
+
+    /**
+     * OCR 回归 5（Low）：医保账户后续被删除后，历史直接扣该账户的医疗支出仍归入「医保个账支出」而非「现金自付」
+     */
+    @Test
+    fun ocrReg5_deletedMedicalWalletDirectExpense_staysPersonalAccountPaid() {
+        val tx = TransactionEntity(
+            id = 501L,
+            type = TransactionType.EXPENSE,
+            amountCents = 4_500L,
+            amountCnyCents = 4_500L,
+            category = "医疗",
+            merchant = "社区医院",
+            tags = "医保",
+            sourceWalletId = 999L,
+            paymentMethodRaw = "个人医保账户"
+        )
+        val insights = MedicalExpenseInsightsCalculator.compute(
+            transactions = listOf(tx),
+            wallets = listOf(huabeiWallet) // 原 999L 医保钱包已删除
+        )
+        assertEquals(4_500L, insights.personalAccountPaidCents)
+        assertEquals(0L, insights.cashOutOfPocketNetCents)
+        assertEquals(4_500L, insights.totalMedicalCostCents)
+    }
 }

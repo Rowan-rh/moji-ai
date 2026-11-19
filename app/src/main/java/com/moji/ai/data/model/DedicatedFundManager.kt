@@ -193,6 +193,8 @@ object DedicatedFundManager {
     private val MEDICAL_WALLET_KEYWORDS = listOf(
         "个人医保", "医保账户", "医保卡", "医保个账", "医疗保险", "社保卡", "医保电子凭证", "医保"
     )
+    fun isMedicalPaymentMethodHint(raw: String): Boolean =
+        raw.isNotBlank() && MEDICAL_WALLET_KEYWORDS.any { raw.contains(it, ignoreCase = true) }
     private val PROVIDENT_WALLET_KEYWORDS = listOf(
         "住房公积金", "补充公积金", "个人公积金", "公积金账户", "公积金"
     )
@@ -263,6 +265,43 @@ object DedicatedFundManager {
         }.getOrNull() ?: return false
         persist(parsed)
         return true
+    }
+
+    @Synchronized
+    fun resetToDefaults(): DedicatedFundSettings {
+        return persist(DedicatedFundSettings())
+    }
+
+    /**
+     * 删除账户时清理悬空引用（工资卡关联 ID，或最后一个同类专项保障账户对应的月度周期规则状态）。
+     */
+    @Synchronized
+    fun clearReferencesForDeletedWallet(
+        deletedWalletId: Long,
+        deletedKind: DedicatedFundKind?,
+        hasRemainingWalletOfSameKind: Boolean
+    ): DedicatedFundSettings {
+        val current = _settingsFlow.value
+        fun sanitizePlan(kind: DedicatedFundKind, plan: DedicatedFundPlanConfig): DedicatedFundPlanConfig {
+            val clearedPayroll = if (plan.linkedPayrollWalletId == deletedWalletId) null else plan.linkedPayrollWalletId
+            return if (deletedKind == kind && !hasRemainingWalletOfSameKind) {
+                plan.copy(
+                    enabled = false,
+                    autoCreateMonthlyRule = false,
+                    linkedRecurringRuleId = null,
+                    linkedPayrollWalletId = clearedPayroll
+                )
+            } else if (clearedPayroll != plan.linkedPayrollWalletId) {
+                plan.copy(linkedPayrollWalletId = clearedPayroll)
+            } else {
+                plan
+            }
+        }
+        val next = current.copy(
+            medicalPlan = sanitizePlan(DedicatedFundKind.MEDICAL_INSURANCE, current.medicalPlan),
+            providentPlan = sanitizePlan(DedicatedFundKind.HOUSING_PROVIDENT, current.providentPlan)
+        )
+        return if (next != current) persist(next) else current
     }
 
     @Synchronized
@@ -544,6 +583,7 @@ object MedicalExpenseInsightsCalculator {
         val medicalTxs = transactions.filter { isMedicalOrInsuranceTransaction(it) }
         if (medicalTxs.isEmpty()) return MedicalExpenseInsights()
 
+        val allWalletIds = wallets.mapTo(hashSetOf()) { it.id }
         val medicalWalletIds = wallets
             .filter { DedicatedFundManager.isMedicalInsuranceWallet(it) }
             .mapTo(hashSetOf()) { it.id }
@@ -589,13 +629,16 @@ object MedicalExpenseInsightsCalculator {
             val personalNoteCny = ((parsedNote.personalAccountCents + parsedNote.unspecifiedMedicalCents) * rate)
                 .roundToLong()
                 .coerceAtLeast(0L)
-            val isPaidByMedicalWallet = tx.sourceWalletId != null && tx.sourceWalletId in medicalWalletIds
+            val isPaidByMedicalWallet = tx.sourceWalletId != null && (
+                tx.sourceWalletId in medicalWalletIds ||
+                    (tx.sourceWalletId !in allWalletIds && DedicatedFundManager.isMedicalPaymentMethodHint(tx.paymentMethodRaw))
+                )
             val isCompositeMain = DedicatedFundManager.isCompositeMedicalMain(tx) || tx.id in parentsWithPresentChild
 
             when {
                 // 2. 组合支付自费主单（其个账部分已拆为独立 `#MED_PERSONAL` 子单，此处绝不重复计入个账）
                 isCompositeMain -> {
-                    val effectivePool = if (poolCny > 0L) poolCny else discountCny
+                    val effectivePool = if (parsedNote.hasExplicitBreakdown) poolCny else discountCny
                     val cashNet = if (tx.reimbursed) 0L else netBaseCny
                     poolReimbursed += effectivePool
                     cashOutOfPocketNet += cashNet

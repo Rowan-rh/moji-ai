@@ -694,7 +694,10 @@ class LedgerRepository(private val db: AppDatabase) {
         if (orig.type != TransactionType.EXPENSE ||
             orig.reimbursed ||
             orig.amountCents < 2L ||
-            orig.refundedAmountCents >= orig.amountCnyCents
+            orig.refundedAmountCents >= orig.amountCnyCents ||
+            DedicatedFundManager.isCompositeMedicalPersonalChild(orig) ||
+            DedicatedFundManager.isCompositeMedicalMain(orig) ||
+            DedicatedFundManager.parseStructuredMedicalNote(orig.note).hasExplicitBreakdown
         ) {
             return@withTransaction false
         }
@@ -817,6 +820,15 @@ class LedgerRepository(private val db: AppDatabase) {
             )
         }
         db.walletDao().deleteWallet(wallet)
+        val deletedKind = DedicatedFundManager.resolveDedicatedFundKind(wallet)
+        val hasRemainingSameKind = deletedKind != null && db.walletDao().getAllWallets().any {
+            it.id != wallet.id && DedicatedFundManager.resolveDedicatedFundKind(it) == deletedKind
+        }
+        DedicatedFundManager.clearReferencesForDeletedWallet(
+            deletedWalletId = wallet.id,
+            deletedKind = deletedKind,
+            hasRemainingWalletOfSameKind = hasRemainingSameKind
+        )
     }
 
     suspend fun backfillTransactionScreenshotHashes(updates: List<Pair<Long, String>>) {
@@ -906,8 +918,10 @@ class LedgerRepository(private val db: AppDatabase) {
         val walletDao = db.walletDao()
         val ruleDao = db.recurringRuleDao()
 
+        val existingWalletRow = if (walletDraft.id > 0L) walletDao.getWalletById(walletDraft.id) else null
         val mergedAliases = DedicatedFundManager.mergeDefaultAliases(kind.brandCode, walletDraft.aliases)
         val normalizedWallet = walletDraft.copy(
+            syncUuid = existingWalletRow?.syncUuid ?: walletDraft.syncUuid,
             brandCode = kind.brandCode,
             subTypeLabel = walletDraft.subTypeLabel.ifBlank { kind.subTypeLabel },
             aliases = mergedAliases,
@@ -926,7 +940,13 @@ class LedgerRepository(private val db: AppDatabase) {
         val sanitizedPlan = planConfig.sanitized()
         val allRules = ruleDao.getAllRules()
         val existingRule = sanitizedPlan.linkedRecurringRuleId?.let { rid ->
-            allRules.firstOrNull { it.id == rid }
+            allRules.firstOrNull { rule ->
+                rule.id == rid &&
+                    rule.type == TransactionType.INCOME &&
+                    (rule.title == kind.recurringRuleTitle ||
+                        rule.targetWalletId == savedWallet.id ||
+                        rule.walletId == savedWallet.id)
+            }
         } ?: allRules.firstOrNull { rule ->
             rule.type == TransactionType.INCOME &&
                 (rule.targetWalletId == savedWallet.id || rule.walletId == savedWallet.id) &&
@@ -986,7 +1006,7 @@ class LedgerRepository(private val db: AppDatabase) {
             }
             finalPlan = sanitizedPlan.copy(
                 enabled = sanitizedPlan.totalMonthlyDepositCents > 0L || sanitizedPlan.linkedPayrollWalletId != null,
-                linkedRecurringRuleId = existingRule?.id ?: sanitizedPlan.linkedRecurringRuleId
+                linkedRecurringRuleId = existingRule?.id
             )
         }
 
@@ -1911,6 +1931,7 @@ class LedgerRepository(private val db: AppDatabase) {
                                 val currentParent = queue.removeFirst()
                                 val splitChildren = store.getSplitChildrenOfExpense(currentParent)
                                 for (child in splitChildren) {
+                                    if (DedicatedFundManager.isCompositeMedicalPersonalChild(child)) continue
                                     if (!visited.add(child.id)) continue
                                     val deductChild = minOf(child.refundedAmountCents.coerceAtLeast(0L), remainingToRevert)
                                     if (deductChild > 0L) {
