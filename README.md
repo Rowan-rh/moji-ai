@@ -46,7 +46,7 @@ adb install -r -g app/build/outputs/apk/qa/app-qa.apk
 
 ## 发布正式版（公开下载与应用内更新）
 
-仓库公开时，每次发布 GitHub Release 并附上 `moji.apk`，就同时提供了公开下载链接和应用内 OTA 更新（无需 Token）：
+仓库公开时，每次发布 GitHub Release 并附上 `moji.apk`（`release` 构建默认限定主流 64 位真机 `arm64-v8a` 架构、开启 R8 与资源收缩并仅保留中文语言资源，保持 `.so` 未压缩对齐免解压安装与完整离线中文 OCR；日常模拟器调试使用不锁架构的 `Debug` / `QA` 包），就同时提供了公开下载链接和应用内 OTA 更新（无需 Token）：
 
 - 最新版直链：`https://github.com/Rowan-rh/moji-ai/releases/latest/download/moji.apk`
 - 发布页：`https://github.com/Rowan-rh/moji-ai/releases`
