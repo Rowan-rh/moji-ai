@@ -27,24 +27,17 @@ import kotlinx.serialization.json.longOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import java.io.File
 import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 
 data class AppUpdateConfig(
-    val repoFullName: String = BuildConfig.GITHUB_UPDATE_REPO.ifBlank { "Rowan-rh/moji-ai" },
-    val customGithubToken: String = "",
     val autoCheckOnLaunch: Boolean = !BuildConfig.IS_QA_BUILD,
     val includePrerelease: Boolean = false,
     val ignoredTag: String = ""
-) {
-    val effectiveToken: String
-        get() = customGithubToken.trim().ifBlank { BuildConfig.GITHUB_UPDATE_TOKEN.trim() }
-
-    val hasTokenConfigured: Boolean
-        get() = effectiveToken.isNotBlank()
-}
+)
 
 data class ReleaseUpdateInfo(
     val tagName: String,
@@ -57,7 +50,6 @@ data class ReleaseUpdateInfo(
     val browserDownloadUrl: String,
     val htmlUrl: String,
     val isPrerelease: Boolean,
-    val repoIsPrivate: Boolean,
     val sha256Digest: String = ""
 )
 
@@ -67,7 +59,6 @@ sealed class UpdateCheckState {
     data class UpToDate(
         val currentVersion: String,
         val repoFullName: String,
-        val repoIsPrivate: Boolean,
         val statusNote: String
     ) : UpdateCheckState()
 
@@ -90,8 +81,7 @@ sealed class UpdateCheckState {
     ) : UpdateCheckState()
 
     data class Error(
-        val message: String,
-        val needTokenConfig: Boolean = false
+        val message: String
     ) : UpdateCheckState()
 }
 
@@ -125,10 +115,14 @@ class AppUpdateManager(context: Context) {
     val stateFlow: StateFlow<UpdateCheckState> = _stateFlow.asStateFlow()
 
     private fun loadConfig(): AppUpdateConfig {
-        val defaultRepo = BuildConfig.GITHUB_UPDATE_REPO.ifBlank { "Rowan-rh/moji-ai" }
+        // 清理早期版本遗留的私有仓库与自定义 Token 本地缓存，收敛至官方公开源
+        if (prefs.contains(LEGACY_KEY_REPO) || prefs.contains(LEGACY_KEY_TOKEN)) {
+            prefs.edit()
+                .remove(LEGACY_KEY_REPO)
+                .remove(LEGACY_KEY_TOKEN)
+                .apply()
+        }
         return AppUpdateConfig(
-            repoFullName = prefs.getString(KEY_REPO, defaultRepo)?.trim().takeUnless { it.isNullOrBlank() } ?: defaultRepo,
-            customGithubToken = prefs.getString(KEY_TOKEN, "")?.trim().orEmpty(),
             autoCheckOnLaunch = !BuildConfig.IS_QA_BUILD && prefs.getBoolean(KEY_AUTO_CHECK, true),
             includePrerelease = prefs.getBoolean(KEY_INCLUDE_PRERELEASE, false),
             ignoredTag = prefs.getString(KEY_IGNORED_TAG, "")?.trim().orEmpty()
@@ -136,23 +130,13 @@ class AppUpdateManager(context: Context) {
     }
 
     fun updateConfig(newConfig: AppUpdateConfig) {
-        val candidateRepo = newConfig.repoFullName.trim()
-            .removePrefix("https://github.com/")
-            .removePrefix("http://github.com/")
-            .trim('/')
-            .ifBlank { "Rowan-rh/moji-ai" }
-        val normalizedRepo = if (REPO_FULL_NAME_REGEX.matches(candidateRepo)) {
-            candidateRepo
-        } else {
-            BuildConfig.GITHUB_UPDATE_REPO.ifBlank { "Rowan-rh/moji-ai" }
-        }
         val sanitized = newConfig.copy(
-            repoFullName = normalizedRepo,
-            customGithubToken = newConfig.customGithubToken.trim()
+            autoCheckOnLaunch = !BuildConfig.IS_QA_BUILD && newConfig.autoCheckOnLaunch,
+            ignoredTag = newConfig.ignoredTag.trim()
         )
         prefs.edit()
-            .putString(KEY_REPO, sanitized.repoFullName)
-            .putString(KEY_TOKEN, sanitized.customGithubToken)
+            .remove(LEGACY_KEY_REPO)
+            .remove(LEGACY_KEY_TOKEN)
             .putBoolean(KEY_AUTO_CHECK, sanitized.autoCheckOnLaunch)
             .putBoolean(KEY_INCLUDE_PRERELEASE, sanitized.includePrerelease)
             .putString(KEY_IGNORED_TAG, sanitized.ignoredTag)
@@ -170,19 +154,17 @@ class AppUpdateManager(context: Context) {
     }
 
     /**
-     * 检查 GitHub 仓库（支持 Private 私有仓库与 Public 公开仓库）最新 Release
+     * 检查官方 GitHub 公开仓库最新 Release
      */
     suspend fun checkForUpdate(isManual: Boolean = true): UpdateCheckState = withContext(Dispatchers.IO) {
         val cfg = _configFlow.value
-        val repo = cfg.repoFullName
-        val token = cfg.effectiveToken
+        val repo = OFFICIAL_GITHUB_REPO
         val currentVersion = BuildConfig.VERSION_NAME
 
         if (BuildConfig.IS_QA_BUILD) {
             val qaUpToDate = UpdateCheckState.UpToDate(
                 currentVersion = currentVersion,
                 repoFullName = repo,
-                repoIsPrivate = false,
                 statusNote = "当前为 QA 独立测试包（com.moji.ai.qa），已禁用正式版 OTA 更新"
             )
             if (isManual) {
@@ -191,66 +173,27 @@ class AppUpdateManager(context: Context) {
             return@withContext qaUpToDate
         }
 
-        if (!REPO_FULL_NAME_REGEX.matches(repo)) {
-            val invalidErr = UpdateCheckState.Error("GitHub 仓库名称格式无效（应为 owner/repo）", needTokenConfig = false)
-            if (isManual) _stateFlow.value = invalidErr
-            return@withContext invalidErr
-        }
-
         if (isManual) {
             _stateFlow.value = UpdateCheckState.Checking
         }
 
         runCatching {
-            // 1. 先请求仓库元信息或直接请求 releases，判断私有状态与鉴权有效性
-            val repoUrl = "https://api.github.com/repos/$repo"
-            val repoReqBuilder = Request.Builder()
-                .url(repoUrl)
-                .header("Accept", "application/vnd.github+json")
-                .header("X-GitHub-Api-Version", "2022-11-28")
-                .header("User-Agent", "MoJi-Android/${BuildConfig.VERSION_NAME}")
-            if (token.isNotBlank()) {
-                repoReqBuilder.header("Authorization", "Bearer $token")
-            }
-
-            var repoIsPrivate = false
-            httpClient.newCall(repoReqBuilder.build()).execute().use { resp ->
-                if (resp.code == 401 || resp.code == 403 || resp.code == 404) {
-                    val errMsg = if (token.isBlank()) {
-                        "仓库 $repo 为私有或需鉴权访问，请先配置 GitHub 只读 Token（Contents: Read-only）"
-                    } else {
-                        "GitHub Token 无法访问私有仓库 $repo（HTTP ${resp.code}），请确认 Token 未过期且已授权该仓库的 Contents: Read-only 权限"
-                    }
-                    val errState = UpdateCheckState.Error(errMsg, needTokenConfig = true)
-                    if (isManual) _stateFlow.value = errState
-                    return@withContext errState
-                }
-                if (resp.isSuccessful) {
-                    val bodyStr = resp.body?.string().orEmpty()
-                    val obj = runCatching { json.parseToJsonElement(bodyStr).jsonObject }.getOrNull()
-                    repoIsPrivate = obj?.get("private")?.jsonPrimitive?.booleanOrNull ?: false
-                }
-            }
-
-            // 2. 获取最新 Release（若不勾选预发布优先走 /releases/latest，404 时回退查 /releases?per_page=5）
-            val releaseObj: JsonObject? = fetchTargetReleaseJson(repo, token, cfg.includePrerelease)
+            val releaseObj: JsonObject? = fetchTargetReleaseJson(repo, cfg.includePrerelease)
             if (releaseObj == null) {
                 val upToDate = UpdateCheckState.UpToDate(
                     currentVersion = currentVersion,
                     repoFullName = repo,
-                    repoIsPrivate = repoIsPrivate,
-                    statusNote = if (repoIsPrivate) "私有仓库连接正常 · 暂无已发布的 Release 安装包" else "仓库连接正常 · 暂无已发布的 Release 安装包"
+                    statusNote = "官方更新源连接正常 · 暂无已发布的 Release 安装包"
                 )
                 if (isManual) _stateFlow.value = upToDate
                 return@withContext upToDate
             }
 
-            val releaseInfo = parseReleaseInfo(releaseObj, repoIsPrivate)
+            val releaseInfo = parseReleaseInfo(releaseObj)
             if (releaseInfo == null) {
                 val upToDate = UpdateCheckState.UpToDate(
                     currentVersion = currentVersion,
                     repoFullName = repo,
-                    repoIsPrivate = repoIsPrivate,
                     statusNote = "最新 Release 未包含可安装的 .apk 附件"
                 )
                 if (isManual) _stateFlow.value = upToDate
@@ -262,7 +205,6 @@ class AppUpdateManager(context: Context) {
                 val upToDate = UpdateCheckState.UpToDate(
                     currentVersion = currentVersion,
                     repoFullName = repo,
-                    repoIsPrivate = repoIsPrivate,
                     statusNote = "当前已是最新版本（远端最新：${releaseInfo.tagName}）"
                 )
                 if (isManual) _stateFlow.value = upToDate
@@ -282,8 +224,7 @@ class AppUpdateManager(context: Context) {
         }.getOrElse { e ->
             if (e is CancellationException) throw e
             val err = UpdateCheckState.Error(
-                message = "检查更新失败：${e.localizedMessage ?: "网络连接异常"}",
-                needTokenConfig = false
+                message = "检查更新失败：${e.localizedMessage ?: "网络连接异常"}"
             )
             if (isManual) _stateFlow.value = err
             err
@@ -292,24 +233,29 @@ class AppUpdateManager(context: Context) {
 
     private fun fetchTargetReleaseJson(
         repo: String,
-        token: String,
         includePrerelease: Boolean
     ): JsonObject? {
         if (!includePrerelease) {
             val latestUrl = "https://api.github.com/repos/$repo/releases/latest"
-            val req = buildGitHubJsonRequest(latestUrl, token)
+            val req = buildGitHubJsonRequest(latestUrl)
             httpClient.newCall(req).execute().use { resp ->
                 if (resp.isSuccessful) {
                     val str = resp.body?.string().orEmpty()
                     return runCatching { json.parseToJsonElement(str).jsonObject }.getOrNull()
                 }
+                if (resp.code == 403 || resp.code == 429 || resp.code >= 500) {
+                    throw IllegalStateException("GitHub 服务暂时繁忙（HTTP ${resp.code}），请稍后重试")
+                }
             }
         }
 
         val listUrl = "https://api.github.com/repos/$repo/releases?per_page=10"
-        val listReq = buildGitHubJsonRequest(listUrl, token)
+        val listReq = buildGitHubJsonRequest(listUrl)
         httpClient.newCall(listReq).execute().use { resp ->
-            if (!resp.isSuccessful) return null
+            if (resp.code == 404) return null
+            if (!resp.isSuccessful) {
+                throw IllegalStateException("获取版本列表失败（HTTP ${resp.code}）")
+            }
             val str = resp.body?.string().orEmpty()
             val arr: JsonArray = runCatching { json.parseToJsonElement(str).jsonArray }.getOrNull() ?: return null
             return arr.mapNotNull { runCatching { it.jsonObject }.getOrNull() }
@@ -321,68 +267,20 @@ class AppUpdateManager(context: Context) {
         }
     }
 
-    private fun buildGitHubJsonRequest(url: String, token: String): Request {
-        val builder = Request.Builder()
+    private fun buildGitHubJsonRequest(url: String): Request {
+        return Request.Builder()
             .url(url)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "MoJi-Android/${BuildConfig.VERSION_NAME}")
-        if (token.isNotBlank()) {
-            builder.header("Authorization", "Bearer $token")
-        }
-        return builder.build()
-    }
-
-    private fun parseReleaseInfo(obj: JsonObject, repoIsPrivate: Boolean): ReleaseUpdateInfo? {
-        val tagName = obj["tag_name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
-        if (tagName.isBlank()) return null
-
-        val title = obj["name"]?.jsonPrimitive?.contentOrNull?.trim().takeUnless { it.isNullOrBlank() } ?: tagName
-        val body = obj["body"]?.jsonPrimitive?.contentOrNull?.trim().takeUnless { it.isNullOrBlank() } ?: "包含体验优化与问题修复。"
-        val publishedAt = obj["published_at"]?.jsonPrimitive?.contentOrNull?.take(10).orEmpty()
-        val htmlUrl = obj["html_url"]?.jsonPrimitive?.contentOrNull.orEmpty()
-        val isPrerelease = obj["prerelease"]?.jsonPrimitive?.booleanOrNull ?: false
-
-        val assets = obj["assets"]?.jsonArray?.mapNotNull { runCatching { it.jsonObject }.getOrNull() }.orEmpty()
-        val apkAsset = assets.firstOrNull { asset ->
-            val name = asset["name"]?.jsonPrimitive?.contentOrNull.orEmpty()
-            name.endsWith(".apk", ignoreCase = true)
-        } ?: return null
-
-        val apkName = apkAsset["name"]?.jsonPrimitive?.contentOrNull ?: "moji-${tagName}.apk"
-        val apkSize = apkAsset["size"]?.jsonPrimitive?.longOrNull ?: 0L
-        val assetApiUrl = apkAsset["url"]?.jsonPrimitive?.contentOrNull.orEmpty()
-        val browserUrl = apkAsset["browser_download_url"]?.jsonPrimitive?.contentOrNull.orEmpty()
-        val rawDigest = apkAsset["digest"]?.jsonPrimitive?.contentOrNull.orEmpty().trim()
-        val sha256Digest = if (rawDigest.startsWith("sha256:", ignoreCase = true)) {
-            rawDigest.substringAfter(':').trim().takeIf { it.length == 64 } ?: ""
-        } else {
-            ""
-        }
-        if (assetApiUrl.isBlank() && browserUrl.isBlank()) return null
-
-        return ReleaseUpdateInfo(
-            tagName = tagName,
-            title = title,
-            releaseNotes = body,
-            publishedAt = publishedAt,
-            apkFileName = apkName,
-            apkSizeBytes = apkSize,
-            assetApiUrl = assetApiUrl,
-            browserDownloadUrl = browserUrl,
-            htmlUrl = htmlUrl,
-            isPrerelease = isPrerelease,
-            repoIsPrivate = repoIsPrivate,
-            sha256Digest = sha256Digest
-        )
+            .build()
     }
 
     /**
-     * 下载 Release APK（兼容私有仓库 API Asset URL + `Accept: application/octet-stream` 鉴权流式下载，
-     * 并在跨域重定向时剥离 Authorization 头、校验文件字节数、SHA-256 摘要以及 APK 包名与签名证书一致性）
+     * 下载官方公开 Release APK，逐跳校验 HTTPS 与受信任 GitHub 域名白名单，
+     * 并严格核验文件字节数、SHA-256 摘要、ZIP 文件头以及 APK 包名与签名证书一致性。
      */
     suspend fun downloadReleaseApk(release: ReleaseUpdateInfo): UpdateCheckState = withContext(Dispatchers.IO) {
-        val token = _configFlow.value.effectiveToken
         val updatesDir = File(appContext.cacheDir, "updates").apply { mkdirs() }
         val safeFileName = release.apkFileName.replace(Regex("""[^a-zA-Z0-9._-]"""), "_")
         val targetFile = File(updatesDir, safeFileName)
@@ -405,60 +303,24 @@ class AppUpdateManager(context: Context) {
         )
 
         runCatching {
-            val initialUrlStr = if (release.assetApiUrl.isNotBlank() && (release.repoIsPrivate || token.isNotBlank())) {
-                release.assetApiUrl
-            } else {
-                release.browserDownloadUrl.ifBlank { release.assetApiUrl }
-            }
-            val parsedInitialUrl = initialUrlStr.toHttpUrlOrNull()
-            if (parsedInitialUrl == null || !parsedInitialUrl.isHttps || !isTrustedGitHubHost(parsedInitialUrl.host)) {
+            val initialUrlStr = release.browserDownloadUrl.ifBlank { release.assetApiUrl }
+            if (!isValidTrustedHttpsDownloadUrl(initialUrlStr)) {
                 val err = UpdateCheckState.Error("下载地址不受信任或非 HTTPS 安全连接，已拦截下载")
                 _stateFlow.value = err
                 return@withContext err
             }
 
-            // 仅当目标域名严格为 api.github.com 时才附加 Bearer Token；若收到 301/302 重定向至对象存储则不携带 Token 请求直链
-            val resolvedStreamResponse = if (parsedInitialUrl.host.equals("api.github.com", ignoreCase = true) && token.isNotBlank()) {
-                val apiReq = Request.Builder()
-                    .url(parsedInitialUrl)
-                    .header("Accept", "application/octet-stream")
-                    .header("X-GitHub-Api-Version", "2022-11-28")
-                    .header("User-Agent", "MoJi-Android/${BuildConfig.VERSION_NAME}")
-                    .header("Authorization", "Bearer $token")
-                    .build()
-                val firstResp = noRedirectHttpClient.newCall(apiReq).execute()
-                if (firstResp.code in listOf(301, 302, 303, 307, 308)) {
-                    val redirectLoc = firstResp.header("Location").orEmpty()
-                    firstResp.close()
-                    val redirectUrl = redirectLoc.toHttpUrlOrNull()
-                    if (redirectUrl == null || !redirectUrl.isHttps) {
-                        val err = UpdateCheckState.Error("下载重定向地址非 HTTPS 安全连接，已拦截下载")
-                        _stateFlow.value = err
-                        return@withContext err
-                    }
-                    val cdnReq = Request.Builder()
-                        .url(redirectUrl)
-                        .header("User-Agent", "MoJi-Android/${BuildConfig.VERSION_NAME}")
-                        .build()
-                    httpClient.newCall(cdnReq).execute()
-                } else {
-                    firstResp
-                }
-            } else {
-                val publicReq = Request.Builder()
-                    .url(parsedInitialUrl)
-                    .header("Accept", "application/octet-stream")
-                    .header("User-Agent", "MoJi-Android/${BuildConfig.VERSION_NAME}")
-                    .build()
-                httpClient.newCall(publicReq).execute()
+            val resolvedStreamResponse = openTrustedDownloadStream(initialUrlStr) ?: run {
+                val err = UpdateCheckState.Error("下载重定向地址不受信任或非 HTTPS 安全连接，已拦截下载")
+                _stateFlow.value = err
+                return@withContext err
             }
 
             var computedSha256Hex = ""
             resolvedStreamResponse.use { response ->
                 if (!response.isSuccessful) {
                     val err = UpdateCheckState.Error(
-                        message = "下载安装包失败（HTTP ${response.code}），请检查网络或 Token 权限",
-                        needTokenConfig = response.code == 401 || response.code == 403 || response.code == 404
+                        message = "下载安装包失败（HTTP ${response.code}），请检查网络连接后重试"
                     )
                     _stateFlow.value = err
                     return@withContext err
@@ -559,6 +421,36 @@ class AppUpdateManager(context: Context) {
             _stateFlow.value = err
             err
         }
+    }
+
+    /**
+     * 逐跳追踪下载重定向，确保每一跳均为 HTTPS 且属于受信任的 GitHub 官方或对象存储域名。
+     */
+    private fun openTrustedDownloadStream(initialUrlStr: String): Response? {
+        var currentUrl = initialUrlStr.toHttpUrlOrNull() ?: return null
+        repeat(MAX_REDIRECT_HOPS) {
+            if (!currentUrl.isHttps || !isTrustedGitHubHost(currentUrl.host)) {
+                return null
+            }
+            val req = Request.Builder()
+                .url(currentUrl)
+                .header("Accept", "application/octet-stream")
+                .header("User-Agent", "MoJi-Android/${BuildConfig.VERSION_NAME}")
+                .build()
+            val resp = noRedirectHttpClient.newCall(req).execute()
+            if (resp.code in listOf(301, 302, 303, 307, 308)) {
+                val loc = resp.header("Location").orEmpty()
+                resp.close()
+                val nextUrl = currentUrl.resolve(loc) ?: return null
+                if (!nextUrl.isHttps || !isTrustedGitHubHost(nextUrl.host)) {
+                    return null
+                }
+                currentUrl = nextUrl
+            } else {
+                return resp
+            }
+        }
+        return null
     }
 
     /**
@@ -688,31 +580,19 @@ class AppUpdateManager(context: Context) {
         }.toSet()
     }
 
-    private fun isValidApkFile(file: File): Boolean {
-        if (!file.exists() || file.length() < 1024L) return false
-        return runCatching {
-            file.inputStream().use { ins ->
-                val header = ByteArray(4)
-                val read = ins.read(header)
-                read == 4 &&
-                    header[0] == 0x50.toByte() &&
-                    header[1] == 0x4B.toByte() &&
-                    header[2] == 0x03.toByte() &&
-                    header[3] == 0x04.toByte()
-            }
-        }.getOrDefault(false)
-    }
-
     companion object {
+        const val OFFICIAL_GITHUB_REPO = "Rowan-rh/moji-ai"
+        const val OFFICIAL_RELEASES_WEB_URL = "https://github.com/$OFFICIAL_GITHUB_REPO/releases"
+
         private const val PREFS_NAME = "moji_app_update_prefs"
-        private const val KEY_REPO = "github_repo_full_name"
-        private const val KEY_TOKEN = "github_custom_token"
+        private const val LEGACY_KEY_REPO = "github_repo_full_name"
+        private const val LEGACY_KEY_TOKEN = "github_custom_token"
         private const val KEY_AUTO_CHECK = "auto_check_on_launch"
         private const val KEY_INCLUDE_PRERELEASE = "include_prerelease"
         private const val KEY_IGNORED_TAG = "ignored_release_tag"
         private const val MAX_APK_DOWNLOAD_BYTES = 256L * 1024L * 1024L
+        private const val MAX_REDIRECT_HOPS = 6
 
-        private val REPO_FULL_NAME_REGEX = Regex("""^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$""")
         private val TRUSTED_GITHUB_HOSTS = setOf(
             "api.github.com",
             "github.com",
@@ -721,8 +601,76 @@ class AppUpdateManager(context: Context) {
         )
 
         fun isTrustedGitHubHost(host: String): Boolean {
-            val lower = host.lowercase()
+            val lower = host.trim().lowercase()
+            if (lower.isEmpty()) return false
             return lower in TRUSTED_GITHUB_HOSTS || lower.endsWith(".githubusercontent.com")
+        }
+
+        fun isValidTrustedHttpsDownloadUrl(url: String): Boolean {
+            val parsed = url.trim().toHttpUrlOrNull() ?: return false
+            return parsed.isHttps && isTrustedGitHubHost(parsed.host)
+        }
+
+        fun isValidApkFile(file: File): Boolean {
+            if (!file.exists() || file.length() < 1024L) return false
+            return runCatching {
+                file.inputStream().use { ins ->
+                    val header = ByteArray(4)
+                    val read = ins.read(header)
+                    read == 4 &&
+                        header[0] == 0x50.toByte() &&
+                        header[1] == 0x4B.toByte() &&
+                        header[2] == 0x03.toByte() &&
+                        header[3] == 0x04.toByte()
+                }
+            }.getOrDefault(false)
+        }
+
+        fun parseReleaseInfo(obj: JsonObject): ReleaseUpdateInfo? {
+            val tagName = obj["tag_name"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+            if (tagName.isBlank()) return null
+
+            val title = obj["name"]?.jsonPrimitive?.contentOrNull?.trim().takeUnless { it.isNullOrBlank() } ?: tagName
+            val body = obj["body"]?.jsonPrimitive?.contentOrNull?.trim().takeUnless { it.isNullOrBlank() } ?: "包含体验优化与问题修复。"
+            val publishedAt = obj["published_at"]?.jsonPrimitive?.contentOrNull?.take(10).orEmpty()
+            val htmlUrl = obj["html_url"]?.jsonPrimitive?.contentOrNull.orEmpty().ifBlank {
+                "$OFFICIAL_RELEASES_WEB_URL/tag/$tagName"
+            }
+            val isPrerelease = obj["prerelease"]?.jsonPrimitive?.booleanOrNull ?: false
+
+            val assets = obj["assets"]?.jsonArray?.mapNotNull { runCatching { it.jsonObject }.getOrNull() }.orEmpty()
+            val apkAsset = assets.firstOrNull { asset ->
+                val name = asset["name"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                name.endsWith(".apk", ignoreCase = true)
+            } ?: return null
+
+            val apkName = apkAsset["name"]?.jsonPrimitive?.contentOrNull ?: "moji-${tagName}.apk"
+            val apkSize = apkAsset["size"]?.jsonPrimitive?.longOrNull ?: 0L
+            val assetApiUrl = apkAsset["url"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val browserUrl = apkAsset["browser_download_url"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val rawDigest = apkAsset["digest"]?.jsonPrimitive?.contentOrNull.orEmpty().trim()
+            val sha256Digest = if (rawDigest.startsWith("sha256:", ignoreCase = true)) {
+                rawDigest.substringAfter(':').trim().takeIf {
+                    it.length == 64 && it.all { c -> c in '0'..'9' || c in 'a'..'f' || c in 'A'..'F' }
+                } ?: ""
+            } else {
+                ""
+            }
+            if (assetApiUrl.isBlank() && browserUrl.isBlank()) return null
+
+            return ReleaseUpdateInfo(
+                tagName = tagName,
+                title = title,
+                releaseNotes = body,
+                publishedAt = publishedAt,
+                apkFileName = apkName,
+                apkSizeBytes = apkSize,
+                assetApiUrl = assetApiUrl,
+                browserDownloadUrl = browserUrl,
+                htmlUrl = htmlUrl,
+                isPrerelease = isPrerelease,
+                sha256Digest = sha256Digest
+            )
         }
 
         /**
