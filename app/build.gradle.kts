@@ -43,6 +43,9 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        // 仅保留中文语言资源，剔除第三方依赖传递引入的数十种无关外语字符串表（AGP 8.7 DSL）
+        resourceConfigurations += listOf("zh", "zh-rCN", "zh-rHK", "zh-rTW")
     }
 
     signingConfigs {
@@ -61,7 +64,12 @@ android {
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
+            // 仅打包主流 64 位 Android 真机架构（debug / qa 保持全架构以兼容日常调试）
+            ndk {
+                abiFilters += "arm64-v8a"
+            }
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

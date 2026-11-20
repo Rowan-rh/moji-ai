@@ -260,4 +260,147 @@ class BackupAndUpdateRegressionTest {
             tmpDir.deleteRecursively()
         }
     }
+
+    @Test
+    fun fullBackupAndSyncDtos_roundTripAllSerializableModelsAndEnums() {
+        val wallet = WalletEntity(
+            id = 1L,
+            name = "招商储蓄卡",
+            type = WalletType.DEBIT_BANK,
+            balanceCents = 123_450L,
+            currency = com.moji.ai.data.model.CurrencyCode.HKD.name,
+            cardLast4 = "8848",
+            includeInNetWorth = true
+        )
+        val tx = TransactionEntity(
+            id = 2L,
+            ledgerName = "默认账本",
+            type = TransactionType.EXPENSE,
+            amountCents = 3580L,
+            currency = com.moji.ai.data.model.CurrencyCode.HKD.name,
+            exchangeRateToCny = 0.93,
+            amountCnyCents = 3329L,
+            category = "餐饮-咖啡",
+            merchant = "Manner Coffee",
+            tags = "早餐,医保",
+            sourceWalletId = 1L,
+            timestamp = 1_762_574_400_000L
+        )
+        val rule = com.moji.ai.data.local.RecurringRuleEntity(
+            id = 3L,
+            title = "每月房租",
+            type = TransactionType.EXPENSE,
+            amountCents = 300_000L,
+            category = "居住-房租",
+            walletId = 1L,
+            frequency = RecurrenceFrequency.MONTHLY,
+            nextTriggerTimeMillis = 1_765_000_000_000L
+        )
+        val appearanceJson = kotlinx.serialization.json.Json.encodeToString(
+            com.moji.ai.data.model.AppearanceSettingsConfig.serializer(),
+            com.moji.ai.data.model.AppearanceSettingsConfig(
+                themeMode = com.moji.ai.data.model.AppThemeMode.DARK,
+                amountColorScheme = com.moji.ai.data.model.AmountColorScheme.GREEN_EXPENSE_RED_INCOME,
+                fontScalePreset = com.moji.ai.data.model.AppFontScalePreset.LARGE
+            )
+        )
+        val fullJson = BackupAndCsvTransferEngine.exportFullBackupJson(
+            ledgers = listOf("默认账本", "旅行基金"),
+            monthlyBudgetCents = 500_000L,
+            wallets = listOf(wallet),
+            transactions = listOf(tx),
+            recurringRules = listOf(rule),
+            merchantMemories = listOf(
+                com.moji.ai.ai.MerchantMemoryEntry(
+                    merchantKeyword = "Manner",
+                    category = "餐饮-咖啡",
+                    preferredWalletId = 1L
+                )
+            ),
+            customExpenseCategories = listOf(
+                com.moji.ai.data.model.CategoryDef(
+                    name = "餐饮",
+                    assetFile = "cat_dining.webp",
+                    subCategories = listOf(com.moji.ai.data.model.SubCategoryDef("咖啡", "sub_coffee.webp"))
+                )
+            ),
+            customTags = listOf(TagDef(name = "早餐", groupName = "日常")),
+            quickTemplates = listOf(
+                com.moji.ai.ui.QuickBookkeepingTemplate(
+                    id = 10L,
+                    title = "早咖啡",
+                    category = "餐饮-咖啡",
+                    amountCents = 1500L,
+                    typeName = TransactionType.EXPENSE.name
+                )
+            ),
+            smartRules = listOf(
+                com.moji.ai.ai.SmartConditionRule(
+                    id = 20L,
+                    name = "深夜外卖",
+                    keywordContains = "美团",
+                    targetCategory = "餐饮-夜宵"
+                )
+            ),
+            savingPlans = listOf(com.moji.ai.ui.SavingPlanItem(id = 30L, title = "应急金", targetCents = 1_000_000L)),
+            installmentPlans = listOf(com.moji.ai.ui.InstallmentPlanItem(id = 40L, title = "手机分期", totalCents = 600_000L, totalPeriods = 12)),
+            customCurrencyRates = mapOf("HKD" to 0.935),
+            appearanceSettingsJson = appearanceJson
+        )
+
+        val parsed = BackupAndCsvTransferEngine.parseFullBackupJson(fullJson)
+        assertNotNull(parsed)
+        val (restoredWallets, restoredTxs, snapshot) = parsed!!
+        assertEquals(1, restoredWallets.size)
+        assertEquals(WalletType.DEBIT_BANK, restoredWallets.single().type)
+        assertEquals("HKD", restoredWallets.single().currency)
+        assertEquals(1, restoredTxs.size)
+        assertEquals("Manner Coffee", restoredTxs.single().merchant)
+        assertEquals(1, snapshot.recurringRules.size)
+        assertEquals(RecurrenceFrequency.MONTHLY.name, snapshot.recurringRules.single().frequency)
+        assertEquals(0.935, snapshot.customCurrencyRates["HKD"]!!, 1e-6)
+
+        val encodedCurrency = kotlinx.serialization.json.Json.encodeToString(
+            com.moji.ai.data.model.CurrencyCode.serializer(),
+            com.moji.ai.data.model.CurrencyCode.HKD
+        )
+        assertEquals(
+            com.moji.ai.data.model.CurrencyCode.HKD,
+            kotlinx.serialization.json.Json.decodeFromString(
+                com.moji.ai.data.model.CurrencyCode.serializer(),
+                encodedCurrency
+            )
+        )
+        val encodedWalletType = kotlinx.serialization.json.Json.encodeToString(
+            WalletType.serializer(),
+            WalletType.CREDIT
+        )
+        assertEquals(
+            WalletType.CREDIT,
+            kotlinx.serialization.json.Json.decodeFromString(WalletType.serializer(), encodedWalletType)
+        )
+
+        val decodedAppearance = kotlinx.serialization.json.Json.decodeFromString(
+            com.moji.ai.data.model.AppearanceSettingsConfig.serializer(),
+            snapshot.appearanceSettingsJson
+        )
+        assertEquals(com.moji.ai.data.model.AppThemeMode.DARK, decodedAppearance.themeMode)
+
+        val summaryDto = MoJiCloudSyncClient.AccountSummaryDto(
+            latestRevision = 9L,
+            walletCount = 1,
+            txCount = 1,
+            ledgerCount = 2
+        )
+        val encodedSummary = kotlinx.serialization.json.Json.encodeToString(
+            MoJiCloudSyncClient.AccountSummaryDto.serializer(),
+            summaryDto
+        )
+        val decodedSummary = kotlinx.serialization.json.Json.decodeFromString(
+            MoJiCloudSyncClient.AccountSummaryDto.serializer(),
+            encodedSummary
+        )
+        assertEquals(9L, decodedSummary.latestRevision)
+        assertEquals(2, decodedSummary.ledgerCount)
+    }
 }
