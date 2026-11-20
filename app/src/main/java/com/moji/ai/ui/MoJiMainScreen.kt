@@ -118,6 +118,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.SnackbarHost
@@ -1745,7 +1746,9 @@ private fun ICostSettingsFullScreen(
                                         fontSize = 18.sp,
                                         fontWeight = FontWeight.ExtraBold,
                                         color = ICostTextPrimary,
-                                        maxLines = 1
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
                                     )
                                     if (BuildConfig.IS_QA_BUILD) {
                                         Surface(
@@ -1757,6 +1760,7 @@ private fun ICostSettingsFullScreen(
                                                 fontSize = 10.sp,
                                                 fontWeight = FontWeight.Bold,
                                                 color = ICostBlueAccent,
+                                                maxLines = 1,
                                                 modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                                             )
                                         }
@@ -1767,7 +1771,8 @@ private fun ICostSettingsFullScreen(
                                     text = "当前账本：$currentLedger · 点击修改头像与昵称",
                                     fontSize = 12.sp,
                                     color = ICostTextSecondary,
-                                    maxLines = 1
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                             Icon(
@@ -1789,40 +1794,47 @@ private fun ICostSettingsFullScreen(
                                 .fillMaxWidth()
                                 .clickable(onClick = onOpenMoJiCloudSync)
                                 .padding(horizontal = 16.dp, vertical = 11.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Surface(
-                                shape = RoundedCornerShape(10.dp),
-                                color = if (isCloudBound) {
-                                    ICostGreenIncome.copy(alpha = 0.12f)
-                                } else {
-                                    ICostBlueAccent.copy(alpha = 0.10f)
-                                }
+                            Box(
+                                modifier = Modifier.weight(1f),
+                                contentAlignment = Alignment.CenterStart
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isCloudBound) {
+                                        ICostGreenIncome.copy(alpha = 0.12f)
+                                    } else {
+                                        ICostBlueAccent.copy(alpha = 0.10f)
+                                    }
                                 ) {
-                                    if (isCloudBound) {
-                                        Icon(
-                                            imageVector = Icons.Default.CheckCircle,
-                                            contentDescription = null,
-                                            tint = ICostGreenIncome,
-                                            modifier = Modifier.size(13.dp)
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        if (isCloudBound) {
+                                            Icon(
+                                                imageVector = Icons.Default.CheckCircle,
+                                                contentDescription = null,
+                                                tint = ICostGreenIncome,
+                                                modifier = Modifier.size(13.dp)
+                                            )
+                                        }
+                                        Text(
+                                            text = if (isCloudBound) {
+                                                "云端已连接 ($maskedKey)"
+                                            } else {
+                                                "本地记账 · 开启云同步 ›"
+                                            },
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (isCloudBound) ICostGreenIncome else ICostBlueAccent,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
                                         )
                                     }
-                                    Text(
-                                        text = if (isCloudBound) {
-                                            "云端已连接 ($maskedKey)"
-                                        } else {
-                                            "本地记账 · 开启云同步 ›"
-                                        },
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = if (isCloudBound) ICostGreenIncome else ICostBlueAccent
-                                    )
                                 }
                             }
                             Text(
@@ -1832,7 +1844,9 @@ private fun ICostSettingsFullScreen(
                                     "支持后续账号绑定"
                                 },
                                 fontSize = 11.sp,
-                                color = ICostTextSecondary
+                                color = ICostTextSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }

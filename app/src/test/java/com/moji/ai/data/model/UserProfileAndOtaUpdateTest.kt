@@ -1,6 +1,7 @@
 package com.moji.ai.data.model
 
 import com.moji.ai.data.backup.BackupAndCsvTransferEngine
+import com.moji.ai.data.backup.MoJiCloudConfig
 import com.moji.ai.data.backup.MoJiCloudSyncClient
 import com.moji.ai.update.AppUpdateConfig
 import com.moji.ai.update.AppUpdateManager
@@ -223,5 +224,117 @@ class UserProfileAndOtaUpdateTest {
         } finally {
             tempDir.deleteRecursively()
         }
+    }
+
+    @Test
+    fun cloudRestoreAndNicknameSync_preservesRestoredNicknameOverDeviceModelAndProtectsCustomDeviceLabel() {
+        val defaultDevice = "Google Pixel 8"
+        val serverUrl = "https://cloud.example.com"
+        val syncKey = "MOJI-ABCD-EFGH-JKLM-9Z8Y"
+        val targetSig = MoJiCloudSyncClient.computeTargetSignature(serverUrl, syncKey)
+
+        val baseBoundConfig = MoJiCloudConfig(
+            serverUrl = serverUrl,
+            syncKey = syncKey,
+            userId = "u_1001",
+            boundTargetSignature = targetSig,
+            memberLabel = defaultDevice
+        )
+
+        // 1. 新机恢复快照：本地 memberLabel 为默认机型名时，自动同步为快照昵称，且 commitPulledConfigAfterRestore 不将其覆盖回默认机型名
+        val syncedFromRestore = MoJiCloudSyncClient.resolveSyncedMemberLabel(
+            current = baseBoundConfig,
+            newNickname = "Rowan",
+            previousNickname = "默记用户",
+            fromSnapshotRestore = true,
+            defaultDeviceLabel = defaultDevice
+        )
+        assertEquals("Rowan", syncedFromRestore)
+
+        val latestAfterSnapshotApply = baseBoundConfig.copy(memberLabel = syncedFromRestore!!)
+        val pulledBeforeApply = baseBoundConfig.copy(
+            memberLabel = defaultDevice,
+            lastSyncedRevision = 12L,
+            remoteRevision = 12L
+        )
+        val mergedNewDevice = MoJiCloudSyncClient.mergePulledConfigAfterRestore(
+            latest = latestAfterSnapshotApply,
+            pulledConfig = pulledBeforeApply,
+            defaultDeviceLabel = defaultDevice,
+            preRestoreMemberLabel = defaultDevice
+        )
+        assertEquals("Rowan", mergedNewDevice.memberLabel)
+        assertEquals(12L, mergedNewDevice.lastSyncedRevision)
+
+        // 2. 存量设备曾自动同步过旧昵称 "OldRowan"，云端快照更新为 "NewRowan" 时，拉取恢复后完整保留新昵称
+        val oldNickConfig = baseBoundConfig.copy(memberLabel = "OldRowan")
+        val syncedUpdatedNick = MoJiCloudSyncClient.resolveSyncedMemberLabel(
+            current = oldNickConfig,
+            newNickname = "NewRowan",
+            previousNickname = "OldRowan",
+            fromSnapshotRestore = true,
+            defaultDeviceLabel = defaultDevice
+        )
+        assertEquals("NewRowan", syncedUpdatedNick)
+        val mergedUpdatedNick = MoJiCloudSyncClient.mergePulledConfigAfterRestore(
+            latest = oldNickConfig.copy(memberLabel = syncedUpdatedNick!!),
+            pulledConfig = oldNickConfig.copy(lastSyncedRevision = 15L, remoteRevision = 15L),
+            defaultDeviceLabel = defaultDevice,
+            preRestoreMemberLabel = "OldRowan"
+        )
+        assertEquals("NewRowan", mergedUpdatedNick.memberLabel)
+
+        // 3. 家庭共享场景下某台设备曾手动设置专属备注（如 "家人iPad"）：快照恢复不覆盖自定义备注，而用户主动改昵称仍可联动
+        val customDeviceConfig = baseBoundConfig.copy(memberLabel = "家人iPad")
+        val restoreOnCustomDevice = MoJiCloudSyncClient.resolveSyncedMemberLabel(
+            current = customDeviceConfig,
+            newNickname = "Rowan",
+            previousNickname = "默记用户",
+            fromSnapshotRestore = true,
+            defaultDeviceLabel = defaultDevice
+        )
+        assertNull(restoreOnCustomDevice)
+
+        val mergedCustomDevice = MoJiCloudSyncClient.mergePulledConfigAfterRestore(
+            latest = customDeviceConfig,
+            pulledConfig = customDeviceConfig.copy(lastSyncedRevision = 18L, remoteRevision = 18L),
+            defaultDeviceLabel = defaultDevice,
+            preRestoreMemberLabel = "家人iPad"
+        )
+        assertEquals("家人iPad", mergedCustomDevice.memberLabel)
+
+        val activeRenameOnBoundDevice = MoJiCloudSyncClient.resolveSyncedMemberLabel(
+            current = customDeviceConfig,
+            newNickname = "阿浩的主力机",
+            previousNickname = "默记用户",
+            fromSnapshotRestore = false,
+            defaultDeviceLabel = defaultDevice
+        )
+        assertEquals("阿浩的主力机", activeRenameOnBoundDevice)
+    }
+
+    @Test
+    fun computeAvatarDecodeSampleSize_constrainsBothShortSideAndExtremeLongScreenshot() {
+        // 常规比例照片：保持短边 >= 384px 的清晰度
+        assertEquals(1, UserProfileManager.computeAvatarDecodeSampleSize(384, 384))
+        assertEquals(1, UserProfileManager.computeAvatarDecodeSampleSize(600, 720))
+        assertEquals(2, UserProfileManager.computeAvatarDecodeSampleSize(1080, 1440))
+        assertEquals(4, UserProfileManager.computeAvatarDecodeSampleSize(3024, 4032))
+
+        // 窄而极长的滚动截图（如 400x24000 / 384x30000）：受长边 4096px 上限约束继续降采样，避免瞬时分配数十 MB 内存
+        val sampleNarrowLong = UserProfileManager.computeAvatarDecodeSampleSize(400, 24000)
+        assertEquals(8, sampleNarrowLong)
+        assertTrue(24000 / sampleNarrowLong <= UserProfileManager.MAX_DECODE_LONG_SIDE_PX)
+
+        val sampleUltraLong = UserProfileManager.computeAvatarDecodeSampleSize(384, 30000)
+        assertEquals(8, sampleUltraLong)
+        assertTrue(30000 / sampleUltraLong <= UserProfileManager.MAX_DECODE_LONG_SIDE_PX)
+
+        // 非法或极端大整数边界安全兜底
+        assertEquals(1, UserProfileManager.computeAvatarDecodeSampleSize(0, 0))
+        assertEquals(1, UserProfileManager.computeAvatarDecodeSampleSize(-10, 500))
+        val sampleMaxInt = UserProfileManager.computeAvatarDecodeSampleSize(100, Int.MAX_VALUE)
+        assertTrue(sampleMaxInt >= 524288)
+        assertTrue(Int.MAX_VALUE / sampleMaxInt <= UserProfileManager.MAX_DECODE_LONG_SIDE_PX)
     }
 }

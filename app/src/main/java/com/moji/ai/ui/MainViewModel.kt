@@ -1550,7 +1550,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     MoJiCloudSyncClient.syncMemberLabelWithNickname(
                         context = app,
                         newNickname = UserProfileManager.currentConfig.nickname,
-                        previousNickname = previousNickname
+                        previousNickname = previousNickname,
+                        fromSnapshotRestore = true
                     )
                 }
             }
@@ -1752,13 +1753,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 onSuccess = { bundle ->
                     try {
                         val txCount = withContext(NonCancellable) {
+                            val preRestoreMemberLabel = MoJiCloudSyncClient.configFlow.value.memberLabel
                             val count = applyRestoredSnapshotInternal(
                                 backupWallets = bundle.wallets,
                                 backupTxs = bundle.transactions,
                                 backupRules = bundle.recurringRules,
                                 snapshot = bundle.snapshot
                             )
-                            MoJiCloudSyncClient.commitPulledConfigAfterRestore(app, bundle.updatedConfig)
+                            MoJiCloudSyncClient.commitPulledConfigAfterRestore(
+                                context = app,
+                                pulledConfig = bundle.updatedConfig,
+                                preRestoreMemberLabel = preRestoreMemberLabel
+                            )
                             count
                         }
                         val ssText = if (bundle.syncedScreenshots > 0) "、拉回 ${bundle.syncedScreenshots} 张账单原图" else ""

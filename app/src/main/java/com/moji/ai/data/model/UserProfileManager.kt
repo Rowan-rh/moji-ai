@@ -156,7 +156,8 @@ object UserProfileManager {
 
     private const val MAX_SOURCE_IMAGE_BYTES = 16 * 1024 * 1024
     private const val MAX_AVATAR_FILE_BYTES = 4L * 1024L * 1024L
-    private const val AVATAR_TARGET_PX = 384
+    internal const val AVATAR_TARGET_PX = 384
+    internal const val MAX_DECODE_LONG_SIDE_PX = 4096
 
     private val jsonCodec = Json {
         ignoreUnknownKeys = true
@@ -309,12 +310,38 @@ object UserProfileManager {
         return saveCustomAvatarFromEncodedImageBytes(appContext, rawBytes)
     }
 
+    /**
+     * 计算头像解码 `inSampleSize`：
+     * 常规比例图片保证短边不低于 `targetPx`（384px）以维持清晰度；
+     * 同时约束长边上限 `maxLongSidePx`（4096px），防止窄而极长的滚动长截图在 `ARGB_8888` 解码时瞬时分配数十 MB 内存。
+     */
+    internal fun computeAvatarDecodeSampleSize(
+        srcWidth: Int,
+        srcHeight: Int,
+        targetPx: Int = AVATAR_TARGET_PX,
+        maxLongSidePx: Int = MAX_DECODE_LONG_SIDE_PX
+    ): Int {
+        if (srcWidth <= 0 || srcHeight <= 0) return 1
+        val safeTargetPx = targetPx.coerceAtLeast(1)
+        val safeMaxLongSidePx = maxLongSidePx.coerceAtLeast(safeTargetPx)
+        var sampleSize = 1
+        val minSide = minOf(srcWidth, srcHeight)
+        val maxSide = maxOf(srcWidth, srcHeight)
+        while (
+            (minSide / (sampleSize * 2) >= safeTargetPx || maxSide / sampleSize > safeMaxLongSidePx) &&
+            sampleSize < (1 shl 29)
+        ) {
+            sampleSize *= 2
+        }
+        return sampleSize
+    }
+
     fun saveCustomAvatarFromEncodedImageBytes(
         context: Context,
         encodedImageBytes: ByteArray
     ): Result<UserProfileConfig> {
         val appContext = context.applicationContext
-        return runCatching {
+        return try {
             val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(encodedImageBytes, 0, encodedImageBytes.size, boundsOpts)
             val srcW = boundsOpts.outWidth
@@ -323,39 +350,49 @@ object UserProfileManager {
                 throw IllegalArgumentException("图片格式不受支持或文件已损坏")
             }
 
-            var sampleSize = 1
-            val minSide = minOf(srcW, srcH)
-            while (minSide / (sampleSize * 2) >= AVATAR_TARGET_PX) {
-                sampleSize *= 2
-            }
+            val sampleSize = computeAvatarDecodeSampleSize(srcW, srcH)
 
             val decodeOpts = BitmapFactory.Options().apply {
                 inSampleSize = sampleSize
                 inPreferredConfig = Bitmap.Config.ARGB_8888
             }
-            val decodedBitmap = BitmapFactory.decodeByteArray(
-                encodedImageBytes,
-                0,
-                encodedImageBytes.size,
-                decodeOpts
-            ) ?: throw IllegalArgumentException("无法解码所选图片")
+            var decodedBitmap: Bitmap? = null
+            var orientedBitmap: Bitmap? = null
+            var squareBitmap: Bitmap? = null
+            val outBytes = try {
+                val rawBitmap = BitmapFactory.decodeByteArray(
+                    encodedImageBytes,
+                    0,
+                    encodedImageBytes.size,
+                    decodeOpts
+                ) ?: throw IllegalArgumentException("无法解码所选图片")
+                decodedBitmap = rawBitmap
 
-            val orientedBitmap = applyExifOrientationIfNeeded(decodedBitmap, encodedImageBytes)
-            val squareBitmap = centerCropAndScaleSquare(orientedBitmap, AVATAR_TARGET_PX)
-            if (squareBitmap !== orientedBitmap) {
-                orientedBitmap.recycle()
-            }
-
-            val outBytes = ByteArrayOutputStream().use { bos ->
-                val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    Bitmap.CompressFormat.WEBP_LOSSY
-                } else {
-                    @Suppress("DEPRECATION")
-                    Bitmap.CompressFormat.WEBP
+                val oriented = applyExifOrientationIfNeeded(rawBitmap, encodedImageBytes)
+                orientedBitmap = oriented
+                if (oriented !== rawBitmap) {
+                    rawBitmap.recycle()
                 }
-                squareBitmap.compress(format, 86, bos)
-                squareBitmap.recycle()
-                bos.toByteArray()
+                val cropped = centerCropAndScaleSquare(oriented, AVATAR_TARGET_PX)
+                squareBitmap = cropped
+                if (cropped !== oriented) {
+                    oriented.recycle()
+                }
+
+                ByteArrayOutputStream().use { bos ->
+                    val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        Bitmap.CompressFormat.WEBP_LOSSY
+                    } else {
+                        @Suppress("DEPRECATION")
+                        Bitmap.CompressFormat.WEBP
+                    }
+                    cropped.compress(format, 86, bos)
+                    bos.toByteArray()
+                }
+            } finally {
+                squareBitmap?.takeIf { !it.isRecycled }?.recycle()
+                orientedBitmap?.takeIf { !it.isRecycled }?.recycle()
+                decodedBitmap?.takeIf { !it.isRecycled }?.recycle()
             }
             if (!isValidAvatarImageBytes(outBytes)) {
                 throw IllegalStateException("头像压缩编码失败")
@@ -389,14 +426,19 @@ object UserProfileManager {
                 }
             }
 
-            synchronized(this) {
-                val updated = _configFlow.value.copy(
+            val updated = synchronized(this) {
+                val next = _configFlow.value.copy(
                     customAvatarPath = targetFile.absolutePath,
                     avatarUpdatedAtMillis = now
                 )
-                persist(updated)
-                updated
+                persist(next)
+                next
             }
+            Result.success(updated)
+        } catch (oom: OutOfMemoryError) {
+            Result.failure(IllegalArgumentException("图片尺寸过大导致内存不足，请选择常规尺寸图片"))
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 

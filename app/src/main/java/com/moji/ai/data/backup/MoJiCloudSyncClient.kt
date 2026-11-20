@@ -258,16 +258,50 @@ object MoJiCloudSyncClient {
 
     /**
      * 在本地 Room 数据库原子恢复成功之后，正式提交云端拉取到的最新修订号配置。
+     * 若恢复快照刚将默认机型名/旧昵称同步为云端快照昵称，优先保留已同步的 `latest.memberLabel`，
+     * 避免被拉取前构造的默认机型名覆盖回退；若用户显式设置了自定义设备备注则原样保留。
      */
-    fun commitPulledConfigAfterRestore(context: Context, pulledConfig: MoJiCloudConfig) {
+    fun commitPulledConfigAfterRestore(
+        context: Context,
+        pulledConfig: MoJiCloudConfig,
+        preRestoreMemberLabel: String? = null
+    ) {
         clearPendingAutoPush(context)
         val latest = _configFlow.value
-        val merged = if (latest.currentTargetSignature == pulledConfig.currentTargetSignature) {
-            pulledConfig.copy(autoSyncEnabled = latest.autoSyncEnabled)
-        } else {
-            pulledConfig
-        }
+        val merged = mergePulledConfigAfterRestore(
+            latest = latest,
+            pulledConfig = pulledConfig,
+            preRestoreMemberLabel = preRestoreMemberLabel
+        )
         saveConfig(context, merged)
+    }
+
+    internal fun mergePulledConfigAfterRestore(
+        latest: MoJiCloudConfig,
+        pulledConfig: MoJiCloudConfig,
+        defaultDeviceLabel: String = defaultDeviceName(),
+        preRestoreMemberLabel: String? = null
+    ): MoJiCloudConfig {
+        if (latest.currentTargetSignature != pulledConfig.currentTargetSignature) {
+            return pulledConfig
+        }
+        val pulledTrimmed = pulledConfig.memberLabel.trim()
+        val latestTrimmed = latest.memberLabel.trim()
+        val preTrimmed = preRestoreMemberLabel?.trim()
+        val shouldPreferLatestLabel = latestTrimmed.isNotEmpty() && (
+            pulledTrimmed.isEmpty() ||
+                pulledTrimmed == defaultDeviceLabel ||
+                (preTrimmed != null && pulledTrimmed == preTrimmed)
+            )
+        val resolvedMemberLabel = if (shouldPreferLatestLabel) {
+            latestTrimmed
+        } else {
+            pulledConfig.memberLabel
+        }
+        return pulledConfig.copy(
+            autoSyncEnabled = latest.autoSyncEnabled,
+            memberLabel = resolvedMemberLabel
+        )
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -441,37 +475,61 @@ object MoJiCloudSyncClient {
     }
 
     /**
-     * 当用户修改个人资料昵称时，若已配置默记云存储（或当前成员标签仍为默认机型/旧昵称），自动同步更新 `memberLabel`。
+     * 同步个人资料昵称至 `memberLabel`：
+     * - 用户主动修改昵称（`fromSnapshotRestore = false`）：已配置云同步或当前标签为空/默认机型/旧昵称时同步更新；
+     * - 快照恢复联动（`fromSnapshotRestore = true`）：仅当本地 `memberLabel` 为空、默认机型名或恢复前旧昵称时才填入快照昵称，
+     *   保护家庭共享等场景下用户为单台设备显式自定义的专属备注（如 `iPad` / `家人`）。
      */
     fun syncMemberLabelWithNickname(
         context: Context,
         newNickname: String,
-        previousNickname: String = ""
+        previousNickname: String = "",
+        fromSnapshotRestore: Boolean = false
     ): Boolean {
         val current = _configFlow.value
-        val normalizedNick = UserProfileManager.normalizeNickname(newNickname)
-        val deviceFallback = defaultDeviceName()
-        val isCloudConfigured = current.isTargetBound || current.serverUrl.isNotBlank()
-        val targetLabel = if (normalizedNick == UserProfileManager.DEFAULT_NICKNAME) {
-            if (current.memberLabel == previousNickname && previousNickname.isNotBlank()) {
-                deviceFallback
-            } else {
-                return false
-            }
-        } else {
-            val shouldSync = isCloudConfigured ||
-                current.memberLabel.isBlank() ||
-                current.memberLabel == deviceFallback ||
-                (previousNickname.isNotBlank() && current.memberLabel == previousNickname)
-            if (!shouldSync) return false
-            normalizedNick
-        }
-        if (current.memberLabel == targetLabel) return false
+        val targetLabel = resolveSyncedMemberLabel(
+            current = current,
+            newNickname = newNickname,
+            previousNickname = previousNickname,
+            fromSnapshotRestore = fromSnapshotRestore
+        ) ?: return false
         saveConfig(context, current.copy(memberLabel = targetLabel))
-        if (current.isTargetBound) {
+        if (current.isTargetBound && !fromSnapshotRestore) {
             markPendingAutoPush(context, notifySignal = true)
         }
         return true
+    }
+
+    internal fun resolveSyncedMemberLabel(
+        current: MoJiCloudConfig,
+        newNickname: String,
+        previousNickname: String = "",
+        fromSnapshotRestore: Boolean = false,
+        defaultDeviceLabel: String = defaultDeviceName()
+    ): String? {
+        val normalizedNick = UserProfileManager.normalizeNickname(newNickname)
+        val currentTrimmed = current.memberLabel.trim()
+        val prevTrimmed = previousNickname.trim()
+        val targetLabel = if (normalizedNick == UserProfileManager.DEFAULT_NICKNAME) {
+            if (prevTrimmed.isNotEmpty() && currentTrimmed == prevTrimmed) {
+                defaultDeviceLabel
+            } else {
+                return null
+            }
+        } else {
+            val isDefaultOrPreviousLabel = currentTrimmed.isEmpty() ||
+                currentTrimmed == defaultDeviceLabel ||
+                (prevTrimmed.isNotEmpty() && currentTrimmed == prevTrimmed)
+            val isCloudConfigured = current.isTargetBound || current.serverUrl.isNotBlank()
+            val shouldSync = if (fromSnapshotRestore) {
+                isDefaultOrPreviousLabel
+            } else {
+                isCloudConfigured || isDefaultOrPreviousLabel
+            }
+            if (!shouldSync) return null
+            normalizedNick
+        }
+        return targetLabel.takeIf { it != current.memberLabel }
     }
 
     /**
