@@ -81,6 +81,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.MedicalExpenseInsightsCalculator
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
@@ -646,6 +647,19 @@ fun TagManagementScreen(
                                             modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp)
                                         )
                                     } else {
+                                        if (tag.name == "医保") {
+                                            val tagMedicalInsights = remember(txs, wallets) {
+                                                MedicalExpenseInsightsCalculator.compute(txs, wallets)
+                                            }
+                                            if (tagMedicalInsights.hasData) {
+                                                ICostMedicalFourDimCard(
+                                                    insights = tagMedicalInsights,
+                                                    hideAmounts = false,
+                                                    embedded = true,
+                                                    modifier = Modifier.padding(bottom = 10.dp)
+                                                )
+                                            }
+                                        }
                                         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                                             txs.forEach { tx ->
                                                 TagTransactionDrilldownRow(

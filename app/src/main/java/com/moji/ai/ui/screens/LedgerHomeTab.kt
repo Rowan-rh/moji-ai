@@ -30,6 +30,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -87,6 +88,7 @@ import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
@@ -236,6 +238,22 @@ fun ICostLedgerHomeScreen(
         val keyFmt = SimpleDateFormat("yyyy-MM-dd", Locale.CHINA)
         monthTransactions.groupBy { tx -> keyFmt.format(Date(tx.timestamp)) }
     }
+    val compositeChildSumByParentId = remember(transactions) {
+        val parentCurrencyById = transactions.associate { it.id to it.currency }
+        val sums = HashMap<Long, Long>()
+        for (item in transactions) {
+            val pid = item.relatedTransactionId
+            if (pid != null &&
+                pid > 0L &&
+                item.type == TransactionType.EXPENSE &&
+                DedicatedFundManager.isCompositeMedicalPersonalChild(item) &&
+                parentCurrencyById[pid]?.equals(item.currency, ignoreCase = true) != false
+            ) {
+                sums[pid] = (sums[pid] ?: 0L) + item.amountCents
+            }
+        }
+        sums
+    }
     val dayHeaderFmt = remember { SimpleDateFormat("MM/dd EEEE", Locale.CHINA) }
 
     LazyColumn(
@@ -355,7 +373,11 @@ fun ICostLedgerHomeScreen(
 
                 Surface(
                     shape = RoundedCornerShape(14.dp),
-                    color = if (showQuickTemplatesBar) Color(0xFFFFF3E0) else ICostSearchBg,
+                    color = if (showQuickTemplatesBar) {
+                        if (AppearanceConfigManager.isDarkThemeActive) Color(0xFFF59E0B).copy(alpha = 0.20f) else Color(0xFFFFF3E0)
+                    } else {
+                        ICostSearchBg
+                    },
                     modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
                         showQuickTemplatesBar = !showQuickTemplatesBar
                     }
@@ -388,9 +410,10 @@ fun ICostLedgerHomeScreen(
         // 2.2 当账本存在「待梳理」账单时，展示顶部醒目提示胶囊，一键唤起 Agent 梳理
         if (pendingTriageList.isNotEmpty()) {
             item {
+                val isDarkTriage = AppearanceConfigManager.isDarkThemeActive
                 Surface(
                     shape = RoundedCornerShape(16.dp),
-                    color = Color(0xFFEEF2FF),
+                    color = if (isDarkTriage) Color(0xFF6366F1).copy(alpha = 0.18f) else Color(0xFFEEF2FF),
                     modifier = Modifier
                         .fillMaxWidth()
                         .iCostPressScale(pressedScale = 0.96f) {
@@ -422,12 +445,12 @@ fun ICostLedgerHomeScreen(
                                 text = "有 ${pendingTriageList.size} 笔「待梳理」账单待归档",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color(0xFF3730A3)
+                                color = if (isDarkTriage) Color(0xFFC7D2FE) else Color(0xFF3730A3)
                             )
                             Text(
                                 text = "点击交由 Agent 自动识别分类并提炼规则",
                                 fontSize = 11.sp,
-                                color = Color(0xFF4F46E5)
+                                color = if (isDarkTriage) Color(0xFFA5B4FC) else Color(0xFF4F46E5)
                             )
                         }
                         Surface(
@@ -458,6 +481,7 @@ fun ICostLedgerHomeScreen(
                     animationSpec = spring(dampingRatio = 0.96f, stiffness = 680f)
                 ) + fadeOut(tween(110))
             ) {
+                val isDarkBar = AppearanceConfigManager.isDarkThemeActive
                 Surface(
                     shape = RoundedCornerShape(20.dp),
                     color = ICostCardWhite,
@@ -469,12 +493,31 @@ fun ICostLedgerHomeScreen(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "快捷模板（点一下直接记账或预填）",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = ICostTextSecondary
-                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "快捷模板",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostTextPrimary
+                                )
+                                if (templates.isNotEmpty()) {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = ICostCellGray
+                                    ) {
+                                        Text(
+                                            text = "${templates.size}",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ICostTextSecondary,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
                             Row(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.CenterVertically
@@ -494,29 +537,31 @@ fun ICostLedgerHomeScreen(
                                         modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
                                     )
                                 }
-                                Surface(
-                                    shape = RoundedCornerShape(10.dp),
-                                    color = ICostBlueAccent.copy(alpha = 0.12f),
-                                    modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
-                                        onOpenTemplateManagement(true)
+                                if (templates.isNotEmpty()) {
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = ICostBlueAccent.copy(alpha = if (isDarkBar) 0.22f else 0.12f),
+                                        modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
+                                            onOpenTemplateManagement(true)
+                                        }
+                                    ) {
+                                        Text(
+                                            text = "+ 新建",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ICostBlueAccent,
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
+                                        )
                                     }
-                                ) {
-                                    Text(
-                                        text = "+ 新建",
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = ICostBlueAccent,
-                                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
-                                    )
                                 }
                             }
                         }
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(10.dp))
                         if (templates.isEmpty()) {
                             Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(vertical = 4.dp),
+                                    .padding(vertical = 2.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Text(
@@ -542,7 +587,7 @@ fun ICostLedgerHomeScreen(
                                     }
                                     Surface(
                                         shape = RoundedCornerShape(12.dp),
-                                        color = Color(0xFFFFF3E0),
+                                        color = if (isDarkBar) Color(0xFFF59E0B).copy(alpha = 0.18f) else Color(0xFFFFF3E0),
                                         modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
                                             onLoadPresetTemplates()
                                         }
@@ -557,61 +602,75 @@ fun ICostLedgerHomeScreen(
                                     }
                                 }
                             }
-                        }
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            items(templates, key = { it.id }) { tpl ->
-                                val tplType = tpl.resolvedType()
-                                val amtColor = when (tplType) {
-                                    TransactionType.INCOME -> ICostIncomeColor
-                                    TransactionType.TRANSFER -> ICostAmberGold
-                                    else -> ICostExpenseColor
-                                }
-                                val amtPrefix = when (tplType) {
-                                    TransactionType.INCOME -> "+"
-                                    TransactionType.TRANSFER -> "⇄ "
-                                    else -> "-"
-                                }
-                                Surface(
-                                    shape = RoundedCornerShape(14.dp),
-                                    color = ICostCellGray,
-                                    modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
-                                        onApplyTemplate(tpl)
+                        } else {
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                items(templates, key = { it.id }) { tpl ->
+                                    val tplType = tpl.resolvedType()
+                                    val amtColor = when (tplType) {
+                                        TransactionType.INCOME -> ICostIncomeColor
+                                        TransactionType.TRANSFER -> ICostAmberGold
+                                        else -> ICostExpenseColor
                                     }
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
+                                    val amtPrefix = when (tplType) {
+                                        TransactionType.INCOME -> "+"
+                                        TransactionType.TRANSFER -> "⇄ "
+                                        else -> "-"
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(16.dp),
+                                        color = ICostCellGray,
+                                        modifier = Modifier
+                                            .height(56.dp)
+                                            .widthIn(min = 132.dp, max = 188.dp)
+                                            .iCostPressScale(pressedScale = 0.92f) {
+                                                onApplyTemplate(tpl)
+                                            }
                                     ) {
-                                        ICostCategoryBadge(
-                                            category = if (tplType == TransactionType.TRANSFER) "内部转账" else tpl.category,
-                                            type = tplType,
-                                            size = 28.dp
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Column {
-                                            Text(
-                                                text = tpl.title,
-                                                fontSize = 13.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                color = ICostTextPrimary,
-                                                maxLines = 1
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .padding(horizontal = 11.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            ICostCategoryBadge(
+                                                category = if (tplType == TransactionType.TRANSFER) "内部转账" else tpl.category,
+                                                type = tplType,
+                                                size = 32.dp
                                             )
-                                            if (tpl.amountCents > 0L) {
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Column(
+                                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                                            ) {
                                                 Text(
-                                                    text = amtPrefix + formatMoneyCents(tpl.amountCents, tpl.currency),
-                                                    fontFamily = ICDinFontFamily,
-                                                    fontSize = 12.sp,
-                                                    color = amtColor,
-                                                    maxLines = 1
+                                                    text = tpl.title,
+                                                    fontSize = 13.sp,
+                                                    lineHeight = 16.sp,
+                                                    fontWeight = FontWeight.SemiBold,
+                                                    color = ICostTextPrimary,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
                                                 )
-                                            } else {
-                                                Text(
-                                                    text = "待填金额",
-                                                    fontSize = 11.sp,
-                                                    fontWeight = FontWeight.Bold,
-                                                    color = Color(0xFFD97706),
-                                                    maxLines = 1
-                                                )
+                                                if (tpl.amountCents > 0L) {
+                                                    Text(
+                                                        text = amtPrefix + formatMoneyCents(tpl.amountCents, tpl.currency),
+                                                        fontFamily = ICDinFontFamily,
+                                                        fontSize = 12.sp,
+                                                        lineHeight = 15.sp,
+                                                        fontWeight = FontWeight.Bold,
+                                                        color = amtColor,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis
+                                                    )
+                                                } else {
+                                                    Text(
+                                                        text = "待填金额",
+                                                        fontSize = 11.sp,
+                                                        lineHeight = 15.sp,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = Color(0xFFD97706),
+                                                        maxLines = 1
+                                                    )
+                                                }
                                             }
                                         }
                                     }
@@ -1196,6 +1255,7 @@ fun ICostLedgerHomeScreen(
                                                 tx = tx,
                                                 walletMap = walletMap,
                                                 catalogTags = catalogTags,
+                                                childPersonalSumCents = compositeChildSumByParentId[tx.id] ?: 0L,
                                                 onClick = { onClickTransaction(tx) }
                                             )
                                         }
@@ -1252,10 +1312,21 @@ fun ICostLedgerHomeScreen(
 
     // 侧滑删除确认弹窗
     deletingTx?.let { targetTx ->
+        val linkedChildSum = compositeChildSumByParentId[targetTx.id] ?: 0L
+        val deleteMsg = when {
+            linkedChildSum > 0L ->
+                "「${targetTx.merchant.ifBlank { targetTx.category }}」自付 ${formatMoneyCents(targetTx.amountCents, targetTx.currency)}，" +
+                    "删除后将一并撤销关联的医保个账扣款 ${formatMoneyCents(linkedChildSum, targetTx.currency)}，双账户余额同步恢复。"
+            DedicatedFundManager.isCompositeMedicalPersonalChild(targetTx) ->
+                "「${targetTx.merchant.ifBlank { targetTx.category }}」医保个账扣款 ${formatMoneyCents(targetTx.amountCents, targetTx.currency)}" +
+                    " 删除后，个人医保账户余额会同步恢复。"
+            else ->
+                "「${targetTx.merchant.ifBlank { targetTx.category }}」${formatMoneyCents(targetTx.amountCents, targetTx.currency)}" +
+                    " 删除后，相关账户余额会同步恢复。"
+        }
         ICostConfirmDialog(
             title = "删除这笔账单？",
-            message = "「${targetTx.merchant.ifBlank { targetTx.category }}」${formatMoneyCents(targetTx.amountCents, targetTx.currency)}" +
-                " 删除后，相关账户余额会同步恢复。",
+            message = deleteMsg,
             confirmText = "删除",
             onConfirm = {
                 onDeleteTransaction(targetTx.id)
@@ -1312,68 +1383,86 @@ fun ICostLedgerHomeScreen(
 
     // 切换/新建账本弹窗
     if (showLedgerSwitcher) {
-        var newLedgerName by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { showLedgerSwitcher = false },
-            containerColor = ICostCardWhite,
-            title = { Text("切换或新建账本", fontWeight = FontWeight.Bold) },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Column(
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier
-                            .heightIn(max = 300.dp)
-                            .verticalScroll(rememberScrollState())
-                    ) {
-                        ledgers.forEach { name ->
-                            Surface(
-                                onClick = {
-                                    onSelectLedger(name)
-                                    showLedgerSwitcher = false
-                                },
-                                shape = RoundedCornerShape(12.dp),
-                                color = if (name == currentLedger) {
-                                    if (AppearanceConfigManager.isDarkThemeActive) ICostBlueAccent.copy(alpha = 0.22f) else Color(0xFFEAF2FF)
-                                } else {
-                                    ICostCellGray
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text(
-                                    text = if (name == currentLedger) "✓  $name" else name,
-                                    fontWeight = if (name == currentLedger) FontWeight.Bold else FontWeight.Medium,
-                                    color = if (name == currentLedger) ICostBlueAccent else ICostTextPrimary,
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
-                                )
-                            }
-                        }
-                    }
-                    Spacer(modifier = Modifier.height(4.dp))
-                    ICostFormField(
-                        value = newLedgerName,
-                        onValueChange = { newLedgerName = it },
-                        label = "新建账本名称",
-                        placeholder = "如：家庭账本、旅行账本",
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
+        ICostLedgerSwitcherDialog(
+            ledgers = ledgers,
+            currentLedger = currentLedger,
+            onSelectLedger = { name ->
+                onSelectLedger(name)
+                showLedgerSwitcher = false
             },
-            confirmButton = {
-                if (newLedgerName.isNotBlank()) {
-                    TextButton(onClick = {
-                        onCreateLedger(newLedgerName.trim())
-                        showLedgerSwitcher = false
-                    }) {
-                        Text("创建并切换", fontWeight = FontWeight.Bold)
-                    }
-                }
+            onCreateLedger = { name ->
+                onCreateLedger(name)
+                showLedgerSwitcher = false
             },
-            dismissButton = {
-                TextButton(onClick = { showLedgerSwitcher = false }) { Text("关闭") }
-            }
+            onDismiss = { showLedgerSwitcher = false }
         )
     }
+}
+
+/** 账本切换与新建弹窗（供账本首页与设置页「多账本」共用） */
+@Composable
+fun ICostLedgerSwitcherDialog(
+    ledgers: List<String>,
+    currentLedger: String,
+    onSelectLedger: (String) -> Unit,
+    onCreateLedger: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var newLedgerName by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = ICostCardWhite,
+        title = { Text("切换或新建账本", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier
+                        .heightIn(max = 300.dp)
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    ledgers.forEach { name ->
+                        Surface(
+                            onClick = { onSelectLedger(name) },
+                            shape = RoundedCornerShape(12.dp),
+                            color = if (name == currentLedger) {
+                                if (AppearanceConfigManager.isDarkThemeActive) ICostBlueAccent.copy(alpha = 0.22f) else Color(0xFFEAF2FF)
+                            } else {
+                                ICostCellGray
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = if (name == currentLedger) "✓  $name" else name,
+                                fontWeight = if (name == currentLedger) FontWeight.Bold else FontWeight.Medium,
+                                color = if (name == currentLedger) ICostBlueAccent else ICostTextPrimary,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(4.dp))
+                ICostFormField(
+                    value = newLedgerName,
+                    onValueChange = { newLedgerName = it },
+                    label = "新建账本名称",
+                    placeholder = "如：家庭账本、旅行账本",
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            if (newLedgerName.isNotBlank()) {
+                TextButton(onClick = { onCreateLedger(newLedgerName.trim()) }) {
+                    Text("创建并切换", fontWeight = FontWeight.Bold)
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("关闭") }
+        }
+    )
 }
 
 private fun FontWeight.Companion.normalOrMedium(): FontWeight = FontWeight.Normal
@@ -1414,6 +1503,7 @@ private fun ICostLedgerRow(
     tx: TransactionEntity,
     walletMap: Map<Long, WalletEntity>,
     catalogTags: List<TagDef>,
+    childPersonalSumCents: Long = 0L,
     onClick: () -> Unit
 ) {
     val timeStr = remember(tx.timestamp) {
@@ -1473,9 +1563,36 @@ private fun ICostLedgerRow(
     val isRefundedExpense = tx.type == TransactionType.EXPENSE && tx.refundedAmountCents > 0L
     val isRefundOffset = tx.type == TransactionType.REFUND_OFFSET
     val netExpenseCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
-    val hasDiscountBreakdown = (tx.type == TransactionType.EXPENSE || isRefundOffset) && tx.discountCents > 0L
+    val medicalBadgeSummary = remember(
+        tx.id,
+        tx.type,
+        tx.amountCents,
+        tx.discountCents,
+        tx.currency,
+        tx.note,
+        tx.tags,
+        tx.orderKey,
+        tx.dedupFingerprint,
+        tx.relatedTransactionId,
+        childPersonalSumCents
+    ) {
+        DedicatedFundManager.buildLedgerMedicalBadgeSummary(
+            tx = tx,
+            childPersonalSumCents = childPersonalSumCents,
+            formatCents = { cents -> formatMoneyCents(cents, tx.currency) }
+        )
+    }
+    val hasDiscountBreakdown = medicalBadgeSummary == null &&
+        (tx.type == TransactionType.EXPENSE || isRefundOffset) &&
+        tx.discountCents > 0L
     val userTags = remember(tx.tags) { TagCatalog.parseTags(tx.tags) }
-    val hasTagsRow = hasDiscountBreakdown || tx.duplicateSuspected || isRefundedExpense || isRefundOffset || tx.reimbursable || userTags.isNotEmpty()
+    val hasTagsRow = medicalBadgeSummary != null ||
+        hasDiscountBreakdown ||
+        tx.duplicateSuspected ||
+        isRefundedExpense ||
+        isRefundOffset ||
+        tx.reimbursable ||
+        userTags.isNotEmpty()
 
     Row(
         modifier = Modifier
@@ -1609,7 +1726,23 @@ private fun ICostLedgerRow(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    if (hasDiscountBreakdown) {
+                    if (medicalBadgeSummary != null) {
+                        Surface(
+                            shape = RoundedCornerShape(6.dp),
+                            color = if (isDark) Color(0xFF14B8A6).copy(alpha = 0.20f) else Color(0xFFEAFBF8)
+                        ) {
+                            Text(
+                                text = medicalBadgeSummary,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (isDark) Color(0xFF2DD4BF) else Color(0xFF0F766E),
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    } else if (hasDiscountBreakdown) {
                         val origCents = tx.amountCents + tx.discountCents
                         Surface(
                             shape = RoundedCornerShape(6.dp),
