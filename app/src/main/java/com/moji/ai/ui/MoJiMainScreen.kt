@@ -9,6 +9,7 @@ import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import java.nio.ByteBuffer
 import java.nio.charset.Charset
@@ -36,6 +37,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -61,9 +63,13 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
@@ -141,17 +147,22 @@ import com.moji.ai.data.backup.WebDavConfig
 import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.AppearanceSettingsConfig
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.PasswordProtectionConfig
+import com.moji.ai.data.model.PresetAvatarStyle
 import com.moji.ai.data.model.ReminderSettingsConfig
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.data.model.UserProfileConfig
+import com.moji.ai.data.model.UserProfileManager
 import com.moji.ai.service.AccessibilityHealthState
 import com.moji.ai.service.CaptureEventOutcome
 import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.service.PaymentAccessibilityService
 import com.moji.ai.service.RomKeepAliveGuideHelper
 import com.moji.ai.update.AppUpdateConfig
+import com.moji.ai.update.AppUpdateManager
 import com.moji.ai.update.ReleaseUpdateInfo
 import com.moji.ai.update.UpdateCheckState
 import com.moji.ai.ui.components.AgentTriageBottomSheet
@@ -165,6 +176,7 @@ import com.moji.ai.ui.screens.CategoryManagementScreen
 import com.moji.ai.ui.screens.CurrencyManagementScreen
 import com.moji.ai.ui.screens.ICostAssetsScreen
 import com.moji.ai.ui.screens.ICostLedgerHomeScreen
+import com.moji.ai.ui.screens.ICostLedgerSwitcherDialog
 import com.moji.ai.ui.screens.ICostStatisticsScreen
 import com.moji.ai.ui.screens.PasswordProtectionScreen
 import com.moji.ai.ui.screens.ReminderManagementScreen
@@ -177,6 +189,7 @@ import com.moji.ai.ui.theme.ICostAvatarButton
 import com.moji.ai.ui.theme.ICostBgGray
 import com.moji.ai.ui.theme.ICostBlueAccent
 import com.moji.ai.ui.theme.ICostCardWhite
+import com.moji.ai.ui.theme.ICostCellGray
 import com.moji.ai.ui.theme.ICostCircleIconButton
 import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
@@ -189,6 +202,8 @@ import com.moji.ai.ui.theme.ICostSmoothBottomSheet
 import com.moji.ai.ui.theme.ICostTextMuted
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
+import com.moji.ai.ui.theme.ICostUserAvatar
+import com.moji.ai.ui.theme.MoJiBrandIconBadge
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.iCostHorizontalSwipeTrigger
 import com.moji.ai.ui.theme.iCostPressScale
@@ -239,6 +254,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val isAppSessionLocked by viewModel.isAppSessionLocked.collectAsState()
     val reminderSettingsConfig by viewModel.reminderSettingsConfig.collectAsState()
     val appearanceSettingsConfig by viewModel.appearanceSettingsConfig.collectAsState()
+    val userProfileConfig by viewModel.userProfileConfig.collectAsState()
     val captureWhitelistEntries by viewModel.captureWhitelistEntries.collectAsState()
     val blockedCaptureWindows by viewModel.blockedCaptureWindows.collectAsState()
     val recentCapturedWindows by viewModel.recentCapturedWindows.collectAsState()
@@ -331,6 +347,8 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var showKeepAliveGuideSheet by remember { mutableStateOf(false) }
     var showBatchReimburseSheet by remember { mutableStateOf(false) }
     var showAppUpdateSheet by remember { mutableStateOf(false) }
+    var showProfileEditorSheet by remember { mutableStateOf(false) }
+    var showSettingsLedgerDialog by remember { mutableStateOf(false) }
 
     // 启动后台自动检查若发现新版本，自动弹出更新面板提示用户
     LaunchedEffect(appUpdateState) {
@@ -634,10 +652,13 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         ) {
             ICostSettingsFullScreen(
                 currentLedger = currentLedger,
+                ledgers = ledgers,
                 monthlyBudgetCents = monthlyBudgetCents,
+                userProfileConfig = userProfileConfig,
                 updateState = appUpdateState,
-                updateConfig = appUpdateConfig,
                 onBack = { showSettingsPage = false },
+                onOpenProfileEditor = { showProfileEditorSheet = true },
+                onOpenLedgerSwitcher = { showSettingsLedgerDialog = true },
                 onOpenSmartBookkeeping = { showSmartBookkeepingPage = true },
                 onOpenBudgetDialog = { showBudgetDialog = true },
                 onOpenCsvImport = {
@@ -654,7 +675,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     showBackupTransferSheet = true
                 },
                 onOpenWebDavSync = {
-                    backupInitialTab = 2
+                    backupInitialTab = 4
                     showBackupTransferSheet = true
                 },
                 onOpenBatchReimburse = {
@@ -1243,7 +1264,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             }
         }
 
-        // 版本与私有仓库 OTA 自动更新面板
+        // 版本与官方公开源 OTA 自动更新面板
         if (showAppUpdateSheet) {
             ICostSmoothBottomSheet(
                 onDismissRequest = { showAppUpdateSheet = false },
@@ -1258,6 +1279,30 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onDownloadAndInstall = { rel -> viewModel.downloadAndInstallAppUpdate(appContext, rel) },
                     onTriggerInstall = { path -> viewModel.triggerInstallDownloadedApk(appContext, path) },
                     onIgnoreTag = { tag -> viewModel.ignoreAppUpdateTag(tag) },
+                    onClose = requestDismiss
+                )
+            }
+        }
+
+        // 个人资料（头像与昵称）编辑面板
+        if (showProfileEditorSheet) {
+            ICostSmoothBottomSheet(
+                onDismissRequest = { showProfileEditorSheet = false },
+                containerColor = ICostBgGray,
+                showDragHandle = false
+            ) { requestDismiss ->
+                UserProfileEditorBottomSheet(
+                    profile = userProfileConfig,
+                    mojiCloudConfig = mojiCloudConfig,
+                    onSaveNickname = { name -> viewModel.updateUserNickname(name) },
+                    onSelectPresetAvatar = { preset -> viewModel.selectPresetAvatar(preset) },
+                    onPickCustomAvatarUri = { uri -> viewModel.saveCustomUserAvatar(uri) },
+                    onClearCustomAvatar = { viewModel.clearCustomUserAvatar() },
+                    onOpenCloudSync = {
+                        showProfileEditorSheet = false
+                        backupInitialTab = 3
+                        showBackupTransferSheet = true
+                    },
                     onClose = requestDismiss
                 )
             }
@@ -1297,6 +1342,22 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 }
             )
         }
+    }
+
+    if (showSettingsLedgerDialog) {
+        ICostLedgerSwitcherDialog(
+            ledgers = ledgers,
+            currentLedger = currentLedger,
+            onSelectLedger = { name ->
+                viewModel.selectLedger(name)
+                showSettingsLedgerDialog = false
+            },
+            onCreateLedger = { name ->
+                viewModel.createLedger(name)
+                showSettingsLedgerDialog = false
+            },
+            onDismiss = { showSettingsLedgerDialog = false }
+        )
     }
 
     if (showBudgetDialog) {
@@ -1570,10 +1631,13 @@ private fun SettingsSectionTitle(text: String, modifier: Modifier = Modifier, bo
 @Composable
 private fun ICostSettingsFullScreen(
     currentLedger: String,
+    ledgers: List<String> = listOf(currentLedger),
     monthlyBudgetCents: Long,
+    userProfileConfig: UserProfileConfig = UserProfileConfig(),
     updateState: UpdateCheckState = UpdateCheckState.Idle,
-    updateConfig: AppUpdateConfig = AppUpdateConfig(),
     onBack: () -> Unit,
+    onOpenProfileEditor: () -> Unit = {},
+    onOpenLedgerSwitcher: () -> Unit = {},
     onOpenSmartBookkeeping: () -> Unit,
     onOpenBudgetDialog: () -> Unit,
     onOpenCsvImport: () -> Unit = {},
@@ -1608,11 +1672,7 @@ private fun ICostSettingsFullScreen(
         is UpdateCheckState.ReadyToInstall -> "点击安装 ${updateState.release.tagName}"
         is UpdateCheckState.Checking -> "正在检查…"
         is UpdateCheckState.UpToDate -> "已是最新 v${BuildConfig.VERSION_NAME}"
-        else -> if (updateConfig.hasTokenConfigured) {
-            "v${BuildConfig.VERSION_NAME} · 私有源"
-        } else {
-            "v${BuildConfig.VERSION_NAME} · 检查更新"
-        }
+        else -> "v${BuildConfig.VERSION_NAME} · 检查更新"
     }
 
     Column(
@@ -1634,63 +1694,145 @@ private fun ICostSettingsFullScreen(
             verticalArrangement = Arrangement.spacedBy(18.dp),
             contentPadding = PaddingValues(bottom = 48.dp)
         ) {
-            // 应用信息卡片
+            // 顶部「个人资料与账号同步卡」（56dp 头像 + 昵称 + 云端状态胶囊 + 预留登录身份挂载位）
             item {
+                val isCloudBound = mojiCloudConfig.isTargetBound
+                val maskedKey = MoJiCloudSyncClient.maskedSyncKeyHint(mojiCloudConfig.syncKey)
                 Surface(
-                    shape = RoundedCornerShape(20.dp),
+                    shape = RoundedCornerShape(22.dp),
                     color = ICostCardWhite,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(onClick = onOpenAppUpdate)
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        com.moji.ai.ui.theme.MoJiBrandIconBadge(onClick = onOpenAppUpdate, size = 48.dp)
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = if (BuildConfig.IS_QA_BUILD) {
-                                    "默记 QA · v${BuildConfig.VERSION_NAME}"
-                                } else {
-                                    "MoJi 默记 · v${BuildConfig.VERSION_NAME}"
-                                },
-                                fontSize = 17.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = ICostTextPrimary
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "当前账本：$currentLedger",
-                                fontSize = 13.sp,
-                                color = ICostTextSecondary
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(onClick = onOpenProfileEditor)
+                                .padding(horizontal = 16.dp, vertical = 15.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(modifier = Modifier.size(58.dp)) {
+                                ICostUserAvatar(
+                                    profile = userProfileConfig,
+                                    size = 56.dp,
+                                    modifier = Modifier.align(Alignment.TopStart)
+                                )
+                                Box(
+                                    modifier = Modifier
+                                        .size(20.dp)
+                                        .align(Alignment.BottomEnd)
+                                        .clip(CircleShape)
+                                        .background(ICostBlueAccent)
+                                        .border(1.5.dp, ICostCardWhite, CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = "编辑个人资料",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(11.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.width(14.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = userProfileConfig.nickname,
+                                        fontSize = 18.sp,
+                                        fontWeight = FontWeight.ExtraBold,
+                                        color = ICostTextPrimary,
+                                        maxLines = 1
+                                    )
+                                    if (BuildConfig.IS_QA_BUILD) {
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = ICostBlueAccent.copy(alpha = 0.14f)
+                                        ) {
+                                            Text(
+                                                text = "QA",
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = ICostBlueAccent,
+                                                modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                                Spacer(modifier = Modifier.height(3.dp))
+                                Text(
+                                    text = "当前账本：$currentLedger · 点击修改头像与昵称",
+                                    fontSize = 12.sp,
+                                    color = ICostTextSecondary,
+                                    maxLines = 1
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.Default.ChevronRight,
+                                contentDescription = null,
+                                tint = ICostTextMuted,
+                                modifier = Modifier.size(20.dp)
                             )
                         }
-                        Surface(
-                            shape = RoundedCornerShape(12.dp),
-                            color = if (updateState is UpdateCheckState.UpdateAvailable || updateState is UpdateCheckState.ReadyToInstall) {
-                                ICostCoralRed.copy(alpha = 0.12f)
-                            } else {
-                                ICostBlueAccent.copy(alpha = 0.10f)
-                            }
+
+                        HorizontalDivider(
+                            thickness = 0.5.dp,
+                            color = ICostDivider,
+                            modifier = Modifier.padding(horizontal = 16.dp)
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(onClick = onOpenMoJiCloudSync)
+                                .padding(horizontal = 16.dp, vertical = 11.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isCloudBound) {
+                                    ICostGreenIncome.copy(alpha = 0.12f)
+                                } else {
+                                    ICostBlueAccent.copy(alpha = 0.10f)
+                                }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    if (isCloudBound) {
+                                        Icon(
+                                            imageVector = Icons.Default.CheckCircle,
+                                            contentDescription = null,
+                                            tint = ICostGreenIncome,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                    }
+                                    Text(
+                                        text = if (isCloudBound) {
+                                            "云端已连接 ($maskedKey)"
+                                        } else {
+                                            "本地记账 · 开启云同步 ›"
+                                        },
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (isCloudBound) ICostGreenIncome else ICostBlueAccent
+                                    )
+                                }
+                            }
                             Text(
-                                text = if (updateState is UpdateCheckState.UpdateAvailable) {
-                                    "新版本 ${updateState.release.tagName}"
+                                text = if (isCloudBound && mojiCloudConfig.remoteRevision > 0L) {
+                                    "云端版本 v${mojiCloudConfig.remoteRevision}"
                                 } else {
-                                    "检查更新"
+                                    "支持后续账号绑定"
                                 },
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = if (updateState is UpdateCheckState.UpdateAvailable || updateState is UpdateCheckState.ReadyToInstall) {
-                                    ICostCoralRed
-                                } else {
-                                    ICostBlueAccent
-                                },
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                fontSize = 11.sp,
+                                color = ICostTextSecondary
                             )
                         }
                     }
@@ -1709,7 +1851,12 @@ private fun ICostSettingsFullScreen(
                             onClick = onOpenBudgetDialog
                         ),
                         SettingRowDef("setting_reimbursement.webp", "报销管理", "批量核销", onClick = onOpenBatchReimburse),
-                        SettingRowDef("setting_multi_book.webp", "多账本", "在首页顶部切换")
+                        SettingRowDef(
+                            "setting_multi_book.webp",
+                            "多账本",
+                            "$currentLedger · 共 ${ledgers.size} 个",
+                            onClick = onOpenLedgerSwitcher
+                        )
                     )
                 )
             }
@@ -1785,6 +1932,31 @@ private fun ICostSettingsFullScreen(
                         )
                     )
                 )
+            }
+
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onOpenAppUpdate
+                        )
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (BuildConfig.IS_QA_BUILD) {
+                            "默记 QA · v${BuildConfig.VERSION_NAME}"
+                        } else {
+                            "MoJi 默记 · v${BuildConfig.VERSION_NAME}"
+                        },
+                        fontSize = 12.sp,
+                        color = ICostTextMuted
+                    )
+                }
             }
         }
     }
@@ -3095,26 +3267,57 @@ private fun BackupAndCsvTransferSheet(
             contentPadding = PaddingValues(bottom = 24.dp)
         ) {
             item {
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    val tabs = listOf(
+                val tabs = remember {
+                    listOf(
                         0 to "批量导入",
                         1 to "导出 CSV",
                         2 to "备份快照",
                         3 to "默记云同步",
                         4 to "WebDAV 同步"
                     )
-                    tabs.forEach { (idx, title) ->
-                        FilterChip(
-                            selected = currentTab == idx,
-                            onClick = {
-                                currentTab = idx
-                                localBanner = null
-                            },
-                            label = { Text(title, fontSize = 12.sp) }
-                        )
+                }
+                val tabScrollState = rememberScrollState()
+                LaunchedEffect(initialTab) {
+                    if (initialTab >= 3) {
+                        tabScrollState.animateScrollTo(tabScrollState.maxValue)
+                    } else if (initialTab == 0) {
+                        tabScrollState.animateScrollTo(0)
+                    }
+                }
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = ICostCardWhite,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(tabScrollState)
+                            .padding(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        tabs.forEach { (idx, title) ->
+                            val isSelected = currentTab == idx
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isSelected) ICostTextPrimary else Color.Transparent,
+                                modifier = Modifier.iCostPressScale(pressedScale = 0.94f) {
+                                    currentTab = idx
+                                    localBanner = null
+                                }
+                            ) {
+                                Text(
+                                    text = title,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (isSelected) ICostCardWhite else ICostTextSecondary,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -4477,7 +4680,274 @@ private fun BatchReimbursementSheet(
 }
 
 /**
- * GitHub 私有仓库 / 公开仓库 OTA 自动检查更新与 APK 下载安装面板
+ * 个人资料（头像与昵称）编辑面板：
+ * - 支持系统 Photo Picker 免权限选取本地图片（裁剪为 WebP 落盘至 `files/profile/`）；
+ * - 内置 8 款莫兰迪色系精致插画预设头像（默认首项 `薄荷初晴` 与历史薄荷绿插画一致）；
+ * - 昵称规范化校验（上限 16 字，纯空白自动回退 `默记用户`），已绑定默记云时同步更新成员标识。
+ */
+@Composable
+private fun UserProfileEditorBottomSheet(
+    profile: UserProfileConfig,
+    mojiCloudConfig: MoJiCloudConfig,
+    onSaveNickname: (String) -> Unit,
+    onSelectPresetAvatar: (PresetAvatarStyle) -> Unit,
+    onPickCustomAvatarUri: (Uri) -> Unit,
+    onClearCustomAvatar: () -> Unit,
+    onOpenCloudSync: () -> Unit,
+    onClose: () -> Unit
+) {
+    var nicknameInput by remember(profile.nickname) { mutableStateOf(profile.nickname) }
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            onPickCustomAvatarUri(uri)
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .navigationBarsPadding()
+    ) {
+        ICostSheetHeader(
+            title = "个人资料",
+            subtitle = "自定义头像与昵称 · 支持随备份快照迁移预设形象",
+            onClose = onClose
+        )
+
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(bottom = 24.dp)
+        ) {
+            // 1. 当前头像实时预览与系统 Photo Picker 免权限选图
+            item {
+                ICostFormCard {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        ICostUserAvatar(
+                            profile = profile,
+                            size = 68.dp
+                        )
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = if (profile.hasCustomAvatarConfigured) {
+                                    "当前使用：相册自定义头像"
+                                } else {
+                                    "当前使用：${profile.presetAvatar.label}"
+                                },
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostTextPrimary
+                            )
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = ICostBlueAccent.copy(
+                                        alpha = if (AppearanceConfigManager.isDarkThemeActive) 0.22f else 0.12f
+                                    ),
+                                    modifier = Modifier.iCostPressScale(pressedScale = 0.94f) {
+                                        photoPickerLauncher.launch(
+                                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                        )
+                                    }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.PhotoLibrary,
+                                            contentDescription = null,
+                                            tint = ICostBlueAccent,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Text(
+                                            text = "从相册选图",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ICostBlueAccent
+                                        )
+                                    }
+                                }
+                                if (profile.hasCustomAvatarConfigured) {
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = ICostCellGray,
+                                        modifier = Modifier.iCostPressScale(pressedScale = 0.94f) {
+                                            onClearCustomAvatar()
+                                        }
+                                    ) {
+                                        Text(
+                                            text = "恢复插画",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = ICostTextSecondary,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = ICostDivider)
+
+                    Text(
+                        text = "莫兰迪插画预设（8 选 1）",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextSecondary
+                    )
+
+                    val styles = PresetAvatarStyle.entries
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        styles.chunked(4).forEach { rowStyles ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                rowStyles.forEach { style ->
+                                    val isSelected = !profile.hasCustomAvatarConfigured && profile.presetAvatar == style
+                                    Column(
+                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .iCostPressScale(pressedScale = 0.92f) {
+                                                onSelectPresetAvatar(style)
+                                            }
+                                            .padding(vertical = 2.dp)
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            ICostUserAvatar(
+                                                profile = UserProfileConfig(presetAvatar = style),
+                                                size = 46.dp,
+                                                modifier = if (isSelected) {
+                                                    Modifier.border(2.dp, ICostBlueAccent, CircleShape)
+                                                } else {
+                                                    Modifier
+                                                }
+                                            )
+                                            if (isSelected) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .size(16.dp)
+                                                        .align(Alignment.BottomEnd)
+                                                        .clip(CircleShape)
+                                                        .background(ICostBlueAccent)
+                                                        .border(1.dp, ICostCardWhite, CircleShape),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Check,
+                                                        contentDescription = null,
+                                                        tint = Color.White,
+                                                        modifier = Modifier.size(10.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        Text(
+                                            text = style.label,
+                                            fontSize = 11.sp,
+                                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                            color = if (isSelected) ICostBlueAccent else ICostTextSecondary,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. 昵称编辑与云同步成员标识说明
+            item {
+                ICostFormCard {
+                    ICostFormField(
+                        value = nicknameInput,
+                        onValueChange = { raw ->
+                            val cpCount = raw.codePointCount(0, raw.length)
+                            if (cpCount <= UserProfileManager.MAX_NICKNAME_LENGTH) {
+                                nicknameInput = raw
+                            } else {
+                                val endIdx = raw.offsetByCodePoints(0, UserProfileManager.MAX_NICKNAME_LENGTH)
+                                nicknameInput = raw.substring(0, endIdx)
+                            }
+                        },
+                        label = "个人昵称（最多 16 字）",
+                        placeholder = UserProfileManager.DEFAULT_NICKNAME,
+                        singleLine = true,
+                        supportingText = if (mojiCloudConfig.isTargetBound) {
+                            "保存后将联动更新默记云成员标签；相册自定义头像文件仅保存在本机"
+                        } else {
+                            "留空将自动回退为「${UserProfileManager.DEFAULT_NICKNAME}」；昵称与预设头像支持随备份快照恢复"
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    if (!mojiCloudConfig.isTargetBound) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(ICostCellGray)
+                                .clickable(onClick = onOpenCloudSync)
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "暂未绑定默记云同步，可生成免登录专属密钥跨设备备份",
+                                fontSize = 11.sp,
+                                color = ICostTextSecondary,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = "去配置 ›",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostBlueAccent
+                            )
+                        }
+                    }
+
+                    Button(
+                        onClick = {
+                            onSaveNickname(nicknameInput)
+                            onClose()
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(46.dp)
+                    ) {
+                        Text("保存个人资料", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 官方 GitHub 公开仓库 Release OTA 自动检查更新与 APK 下载安装面板
  */
 @Composable
 private fun AppUpdateSheetContent(
@@ -4491,14 +4961,8 @@ private fun AppUpdateSheetContent(
     onClose: () -> Unit
 ) {
     val context = LocalContext.current
-    var repoInput by remember(config.repoFullName) { mutableStateOf(config.repoFullName) }
-    var tokenInput by remember(config.customGithubToken) { mutableStateOf(config.customGithubToken) }
     var autoCheck by remember(config.autoCheckOnLaunch) { mutableStateOf(config.autoCheckOnLaunch) }
     var includePre by remember(config.includePrerelease) { mutableStateOf(config.includePrerelease) }
-    var showTokenPlain by remember { mutableStateOf(false) }
-    var savedFeedback by remember { mutableStateOf<String?>(null) }
-
-    val hasBuildConfigToken = remember { BuildConfig.GITHUB_UPDATE_TOKEN.isNotBlank() }
 
     Column(
         modifier = Modifier
@@ -4507,7 +4971,7 @@ private fun AppUpdateSheetContent(
     ) {
         ICostSheetHeader(
             title = "版本与自动更新",
-            subtitle = "当前 v${BuildConfig.VERSION_NAME} · 支持 GitHub 私有仓库 OTA",
+            subtitle = "当前 v${BuildConfig.VERSION_NAME} · 官方公开 Release 安全校验升级",
             onClose = onClose
         )
 
@@ -4518,7 +4982,7 @@ private fun AppUpdateSheetContent(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             contentPadding = PaddingValues(bottom = 24.dp)
         ) {
-            // 1. 实时状态与操作卡片
+            // 1. 品牌与当前版本实时状态卡片
             item {
                 ICostFormCard {
                     Row(
@@ -4526,33 +4990,40 @@ private fun AppUpdateSheetContent(
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "当前已装版本：v${BuildConfig.VERSION_NAME}",
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = ICostTextPrimary
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "更新源：${repoInput.ifBlank { "Rowan-rh/moji-ai" }}",
-                                fontSize = 12.sp,
-                                color = ICostTextSecondary
-                            )
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            MoJiBrandIconBadge(onClick = {}, size = 44.dp)
+                            Column {
+                                Text(
+                                    text = if (BuildConfig.IS_QA_BUILD) {
+                                        "默记 QA · v${BuildConfig.VERSION_NAME}"
+                                    } else {
+                                        "MoJi 默记 · v${BuildConfig.VERSION_NAME}"
+                                    },
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostTextPrimary
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "官方更新源：${AppUpdateManager.OFFICIAL_GITHUB_REPO}",
+                                    fontSize = 12.sp,
+                                    color = ICostTextSecondary
+                                )
+                            }
                         }
                         Surface(
                             shape = RoundedCornerShape(10.dp),
-                            color = if (tokenInput.isNotBlank() || hasBuildConfigToken) {
-                                ICostGreenIncome.copy(alpha = 0.12f)
-                            } else {
-                                ICostAmberGold.copy(alpha = 0.14f)
-                            }
+                            color = ICostBlueAccent.copy(alpha = 0.12f)
                         ) {
                             Text(
-                                text = if (tokenInput.isNotBlank() || hasBuildConfigToken) "私有鉴权已就绪" else "公开模式 / 未配Token",
+                                text = "官方公开源",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = if (tokenInput.isNotBlank() || hasBuildConfigToken) ICostGreenIncome else ICostAmberGold,
+                                color = ICostBlueAccent,
                                 modifier = Modifier.padding(horizontal = 9.dp, vertical = 4.dp)
                             )
                         }
@@ -4693,7 +5164,7 @@ private fun AppUpdateSheetContent(
                                     text = if (state.needsInstallPermission) {
                                         "APK 已下载完成，请先在系统设置中开启「允许安装未知应用」，返回后点击下方按钮即可覆盖安装"
                                     } else {
-                                        "新版本 ${state.release.tagName} 安装包已下载并通过签名头校验"
+                                        "新版本 ${state.release.tagName} 安装包已下载并通过签名一致性校验"
                                     },
                                     fontSize = 13.sp,
                                     fontWeight = FontWeight.Medium,
@@ -4736,17 +5207,7 @@ private fun AppUpdateSheetContent(
                     }
 
                     Button(
-                        onClick = {
-                            onSaveConfig(
-                                config.copy(
-                                    repoFullName = repoInput.trim(),
-                                    customGithubToken = tokenInput.trim(),
-                                    autoCheckOnLaunch = autoCheck,
-                                    includePrerelease = includePre
-                                )
-                            )
-                            onCheckNow()
-                        },
+                        onClick = onCheckNow,
                         enabled = state !is UpdateCheckState.Checking && state !is UpdateCheckState.Downloading,
                         colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
                         shape = RoundedCornerShape(14.dp),
@@ -4760,67 +5221,40 @@ private fun AppUpdateSheetContent(
                             fontSize = 14.sp
                         )
                     }
+
+                    OutlinedButton(
+                        onClick = {
+                            runCatching {
+                                val browserUrl = (state as? UpdateCheckState.UpdateAvailable)?.release?.htmlUrl
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?: AppUpdateManager.OFFICIAL_RELEASES_WEB_URL
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse(browserUrl)).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                )
+                            }
+                        },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(42.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+                            contentDescription = null,
+                            tint = ICostTextSecondary,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("前往 GitHub Releases 查看", fontSize = 13.sp, color = ICostTextPrimary)
+                    }
                 }
             }
 
-            // 2. 私有仓库与 Token 配置卡片
+            // 2. 更新检查偏好开关
             item {
                 ICostFormCard {
-                    Text(
-                        text = "GitHub 私有仓库 OTA 配置",
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = ICostTextPrimary
-                    )
-
-                    ICostFormField(
-                        value = repoInput,
-                        onValueChange = { repoInput = it },
-                        label = "GitHub 仓库（owner/repo）",
-                        placeholder = "Rowan-rh/moji-ai",
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    ICostFormField(
-                        value = tokenInput,
-                        onValueChange = { tokenInput = it },
-                        label = "私有仓库只读 Token（Fine-grained PAT）",
-                        placeholder = if (hasBuildConfigToken) "已内置 local.properties Token，留空即生效" else "github_pat_xxx（仅需 Contents: Read-only）",
-                        singleLine = true,
-                        visualTransformation = if (showTokenPlain) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingContent = {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                modifier = Modifier.padding(end = 6.dp)
-                            ) {
-                                TextButton(
-                                    onClick = {
-                                        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                        val clipText = cm?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()?.trim().orEmpty()
-                                        if (clipText.isNotBlank()) {
-                                            tokenInput = clipText
-                                            savedFeedback = "已从剪贴板粘贴 Token"
-                                        }
-                                    }
-                                ) {
-                                    Text("粘贴", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = ICostBlueAccent)
-                                }
-                                TextButton(onClick = { showTokenPlain = !showTokenPlain }) {
-                                    Text(if (showTokenPlain) "隐藏" else "显示", fontSize = 12.sp, color = ICostTextSecondary)
-                                }
-                            }
-                        },
-                        supportingText = if (hasBuildConfigToken && tokenInput.isBlank()) {
-                            "当前已使用编译期注入的 GITHUB_UPDATE_TOKEN；在此输入可覆盖"
-                        } else {
-                            "私有仓库下载 Release 附件会通过 API Asset + octet-stream 鉴权直连，Token 仅保存在本机"
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    HorizontalDivider(color = ICostDivider)
-
                     SmartSwitchRow(
                         title = "启动 App 时自动检查更新",
                         subtitle = "冷启动后台静默检测，发现新 Release 时自动弹窗提醒",
@@ -4829,8 +5263,6 @@ private fun AppUpdateSheetContent(
                             autoCheck = it
                             onSaveConfig(
                                 config.copy(
-                                    repoFullName = repoInput.trim(),
-                                    customGithubToken = tokenInput.trim(),
                                     autoCheckOnLaunch = it,
                                     includePrerelease = includePre
                                 )
@@ -4848,71 +5280,11 @@ private fun AppUpdateSheetContent(
                             includePre = it
                             onSaveConfig(
                                 config.copy(
-                                    repoFullName = repoInput.trim(),
-                                    customGithubToken = tokenInput.trim(),
                                     autoCheckOnLaunch = autoCheck,
                                     includePrerelease = it
                                 )
                             )
                         }
-                    )
-
-                    Button(
-                        onClick = {
-                            onSaveConfig(
-                                config.copy(
-                                    repoFullName = repoInput.trim(),
-                                    customGithubToken = tokenInput.trim(),
-                                    autoCheckOnLaunch = autoCheck,
-                                    includePrerelease = includePre,
-                                    ignoredTag = ""
-                                )
-                            )
-                            savedFeedback = "已保存私有仓库更新配置"
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = ICostTextPrimary),
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(44.dp)
-                    ) {
-                        Text("保存配置", fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                    }
-
-                    if (!savedFeedback.isNullOrBlank()) {
-                        Text(
-                            text = savedFeedback!!,
-                            fontSize = 12.sp,
-                            color = ICostGreenIncome,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-
-            // 3. 私有仓库发版与 Token 生成简明说明
-            item {
-                ICostFormCard {
-                    Text(
-                        text = "私有仓库 OTA 使用说明",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = ICostTextPrimary
-                    )
-                    Text(
-                        text = "1. 生成只读 Token：GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens，Repository 选择 Rowan-rh/moji-ai，Permissions 仅开启 Contents: Read-only。",
-                        fontSize = 12.sp,
-                        color = ICostTextSecondary
-                    )
-                    Text(
-                        text = "2. 配置 Token：可填入上方输入框保存，或在本机 local.properties 中添加 GITHUB_UPDATE_TOKEN=github_pat_xxx。",
-                        fontSize = 12.sp,
-                        color = ICostTextSecondary
-                    )
-                    Text(
-                        text = "3. 发布更新包：在电脑执行 gh release create v1.0.1 app/build/outputs/apk/debug/app-debug.apk --repo Rowan-rh/moji-ai，手机端即可自动收到更新并一键覆盖安装。",
-                        fontSize = 12.sp,
-                        color = ICostTextSecondary
                     )
                 }
             }
