@@ -115,6 +115,10 @@ fun AgentTriageBottomSheet(
         selectedCategoryIds.size +
         selectedRuleIds.size +
         selectedMemoryIds.size
+    val isDarkTheme = AppearanceConfigManager.isDarkThemeActive
+    val indigoBannerBg = if (isDarkTheme) Color(0xFF6366F1).copy(alpha = 0.18f) else Color(0xFFEEF2FF)
+    val indigoTitleColor = if (isDarkTheme) Color(0xFFC7D2FE) else Color(0xFF3730A3)
+    val indigoAccentColor = if (isDarkTheme) Color(0xFFA5B4FC) else Color(0xFF4F46E5)
 
     ICostSmoothBottomSheet(
         onDismissRequest = onDismiss,
@@ -143,7 +147,7 @@ fun AgentTriageBottomSheet(
                 // 顶部概览横幅
                 Surface(
                     shape = RoundedCornerShape(18.dp),
-                    color = Color(0xFFEEF2FF),
+                    color = indigoBannerBg,
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Row(
@@ -183,7 +187,7 @@ fun AgentTriageBottomSheet(
                                 },
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = Color(0xFF3730A3)
+                                color = indigoTitleColor
                             )
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
@@ -194,13 +198,13 @@ fun AgentTriageBottomSheet(
                                         ?: "点击右侧开始扫描当前账本"
                                 },
                                 fontSize = 11.sp,
-                                color = Color(0xFF4F46E5)
+                                color = indigoAccentColor
                             )
                         }
                         if (!isTriaging) {
                             Surface(
                                 shape = RoundedCornerShape(12.dp),
-                                color = Color.White,
+                                color = if (isDarkTheme) ICostCardWhite else Color.White,
                                 modifier = Modifier
                                     .padding(start = 8.dp)
                                     .iCostPressScale(pressedScale = 0.92f) { onRescan() }
@@ -212,7 +216,7 @@ fun AgentTriageBottomSheet(
                                     Icon(
                                         imageVector = Icons.Default.Refresh,
                                         contentDescription = "重新扫描",
-                                        tint = Color(0xFF4F46E5),
+                                        tint = indigoAccentColor,
                                         modifier = Modifier.size(14.dp)
                                     )
                                     Spacer(modifier = Modifier.width(3.dp))
@@ -220,7 +224,7 @@ fun AgentTriageBottomSheet(
                                         text = "重扫",
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF4F46E5)
+                                        color = indigoAccentColor
                                     )
                                 }
                             }
@@ -303,13 +307,13 @@ fun AgentTriageBottomSheet(
                                         Spacer(modifier = Modifier.width(6.dp))
                                         Surface(
                                             shape = RoundedCornerShape(6.dp),
-                                            color = Color(0xFFEEF2FF)
+                                            color = if (isDarkTheme) Color(0xFF6366F1).copy(alpha = 0.22f) else Color(0xFFEEF2FF)
                                         ) {
                                             Text(
                                                 text = if (cat.isSubCategory) "+新二级分类" else "+新一级分类",
                                                 fontSize = 10.sp,
                                                 fontWeight = FontWeight.Bold,
-                                                color = Color(0xFF4F46E5),
+                                                color = indigoAccentColor,
                                                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                             )
                                         }

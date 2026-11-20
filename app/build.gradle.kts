@@ -14,10 +14,6 @@ val localProps = Properties().apply {
         file.inputStream().use { load(it) }
     }
 }
-val githubUpdateRepo: String = localProps.getProperty("GITHUB_UPDATE_REPO", "Rowan-rh/moji-ai").trim()
-val githubUpdateToken: String = localProps.getProperty("GITHUB_UPDATE_TOKEN", "").trim()
-fun escapeForBuildConfig(value: String): String =
-    value.replace("\\", "\\\\").replace("\"", "\\\"")
 
 // 正式签名：从 local.properties 或同名环境变量读取，证书与密码绝不提交进仓库。
 // 四项齐全时 release 包使用该证书签名；缺任一项时 release 包不签名，scripts/release.sh 会拒绝发布。
@@ -43,8 +39,6 @@ android {
         versionName = "1.1.4"
 
         buildConfigField("Boolean", "IS_QA_BUILD", "false")
-        buildConfigField("String", "GITHUB_UPDATE_REPO", "\"${escapeForBuildConfig(githubUpdateRepo)}\"")
-        buildConfigField("String", "GITHUB_UPDATE_TOKEN", "\"${escapeForBuildConfig(githubUpdateToken)}\"")
 
         vectorDrawables {
             useSupportLibrary = true
@@ -67,8 +61,6 @@ android {
             if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
-            // 正式发布包禁止把本机 local.properties 中的开发者 Token 打进公开 APK DEX
-            buildConfigField("String", "GITHUB_UPDATE_TOKEN", "\"\"")
             isMinifyEnabled = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

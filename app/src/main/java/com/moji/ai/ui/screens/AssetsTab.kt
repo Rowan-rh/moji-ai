@@ -267,7 +267,7 @@ fun ICostAssetsScreen(
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 8.dp, bottom = 148.dp),
+            contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 148.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             // 1. 顶部栏：右侧 `+` 白色圆钮 + `•••` 白色圆钮 + 薄荷绿插画头像（对齐 07_assets_tab.png）

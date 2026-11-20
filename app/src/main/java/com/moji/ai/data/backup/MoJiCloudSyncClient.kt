@@ -15,6 +15,7 @@ import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.ReminderConfigManager
 import com.moji.ai.data.model.TagCatalog
+import com.moji.ai.data.model.UserProfileManager
 import com.moji.ai.service.BillScreenshotStorage
 import com.moji.ai.ui.InstallmentPlanItem
 import com.moji.ai.ui.QuickBookkeepingTemplate
@@ -257,16 +258,50 @@ object MoJiCloudSyncClient {
 
     /**
      * 在本地 Room 数据库原子恢复成功之后，正式提交云端拉取到的最新修订号配置。
+     * 若恢复快照刚将默认机型名/旧昵称同步为云端快照昵称，优先保留已同步的 `latest.memberLabel`，
+     * 避免被拉取前构造的默认机型名覆盖回退；若用户显式设置了自定义设备备注则原样保留。
      */
-    fun commitPulledConfigAfterRestore(context: Context, pulledConfig: MoJiCloudConfig) {
+    fun commitPulledConfigAfterRestore(
+        context: Context,
+        pulledConfig: MoJiCloudConfig,
+        preRestoreMemberLabel: String? = null
+    ) {
         clearPendingAutoPush(context)
         val latest = _configFlow.value
-        val merged = if (latest.currentTargetSignature == pulledConfig.currentTargetSignature) {
-            pulledConfig.copy(autoSyncEnabled = latest.autoSyncEnabled)
-        } else {
-            pulledConfig
-        }
+        val merged = mergePulledConfigAfterRestore(
+            latest = latest,
+            pulledConfig = pulledConfig,
+            preRestoreMemberLabel = preRestoreMemberLabel
+        )
         saveConfig(context, merged)
+    }
+
+    internal fun mergePulledConfigAfterRestore(
+        latest: MoJiCloudConfig,
+        pulledConfig: MoJiCloudConfig,
+        defaultDeviceLabel: String = defaultDeviceName(),
+        preRestoreMemberLabel: String? = null
+    ): MoJiCloudConfig {
+        if (latest.currentTargetSignature != pulledConfig.currentTargetSignature) {
+            return pulledConfig
+        }
+        val pulledTrimmed = pulledConfig.memberLabel.trim()
+        val latestTrimmed = latest.memberLabel.trim()
+        val preTrimmed = preRestoreMemberLabel?.trim()
+        val shouldPreferLatestLabel = latestTrimmed.isNotEmpty() && (
+            pulledTrimmed.isEmpty() ||
+                pulledTrimmed == defaultDeviceLabel ||
+                (preTrimmed != null && pulledTrimmed == preTrimmed)
+            )
+        val resolvedMemberLabel = if (shouldPreferLatestLabel) {
+            latestTrimmed
+        } else {
+            pulledConfig.memberLabel
+        }
+        return pulledConfig.copy(
+            autoSyncEnabled = latest.autoSyncEnabled,
+            memberLabel = resolvedMemberLabel
+        )
     }
 
     private val httpClient = OkHttpClient.Builder()
@@ -402,7 +437,11 @@ object MoJiCloudSyncClient {
         }
         val base = parsed ?: MoJiCloudConfig()
         val ensuredKey = base.syncKey.trim().uppercase(Locale.US).ifBlank { generateSyncKey() }
-        val ensuredLabel = base.memberLabel.trim().ifBlank { defaultDeviceName() }
+        val preferredDefaultLabel = UserProfileManager.currentConfig.nickname
+            .trim()
+            .takeIf { it.isNotEmpty() && it != UserProfileManager.DEFAULT_NICKNAME }
+            ?: defaultDeviceName()
+        val ensuredLabel = base.memberLabel.trim().ifBlank { preferredDefaultLabel }
         val normalized = base.copy(syncKey = ensuredKey, memberLabel = ensuredLabel)
         if (parsed == null || parsed.syncKey != ensuredKey || parsed.memberLabel != ensuredLabel) {
             saveConfig(context, normalized)
@@ -414,6 +453,83 @@ object MoJiCloudSyncClient {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putString(KEY_CONFIG_JSON, jsonCodec.encodeToString(config)).apply()
         _configFlow.value = config
+    }
+
+    /**
+     * 生成脱敏后的专属密钥展示摘要（如 `MOJI-****-NPQR` / `MOJIQA-****-NPQR`），用于设置页个人资料卡状态胶囊。
+     */
+    fun maskedSyncKeyHint(rawKey: String): String {
+        val clean = rawKey.trim().uppercase(Locale.US)
+        if (clean.isBlank()) return ""
+        val prefix = when {
+            clean.startsWith("MOJIQA-") -> "MOJIQA-"
+            clean.startsWith("MOJI-") -> "MOJI-"
+            else -> clean.substringBefore('-', "").let { if (it.isNotEmpty()) "$it-" else "" }
+        }
+        val suffix = clean.substringAfterLast('-').takeLast(4)
+        return when {
+            prefix.isNotEmpty() && suffix.length == 4 -> "${prefix}****-$suffix"
+            clean.length > 8 -> "${clean.take(4)}****${clean.takeLast(4)}"
+            else -> "****"
+        }
+    }
+
+    /**
+     * 同步个人资料昵称至 `memberLabel`：
+     * - 用户主动修改昵称（`fromSnapshotRestore = false`）：已配置云同步或当前标签为空/默认机型/旧昵称时同步更新；
+     * - 快照恢复联动（`fromSnapshotRestore = true`）：仅当本地 `memberLabel` 为空、默认机型名或恢复前旧昵称时才填入快照昵称，
+     *   保护家庭共享等场景下用户为单台设备显式自定义的专属备注（如 `iPad` / `家人`）。
+     */
+    fun syncMemberLabelWithNickname(
+        context: Context,
+        newNickname: String,
+        previousNickname: String = "",
+        fromSnapshotRestore: Boolean = false
+    ): Boolean {
+        val current = _configFlow.value
+        val targetLabel = resolveSyncedMemberLabel(
+            current = current,
+            newNickname = newNickname,
+            previousNickname = previousNickname,
+            fromSnapshotRestore = fromSnapshotRestore
+        ) ?: return false
+        saveConfig(context, current.copy(memberLabel = targetLabel))
+        if (current.isTargetBound && !fromSnapshotRestore) {
+            markPendingAutoPush(context, notifySignal = true)
+        }
+        return true
+    }
+
+    internal fun resolveSyncedMemberLabel(
+        current: MoJiCloudConfig,
+        newNickname: String,
+        previousNickname: String = "",
+        fromSnapshotRestore: Boolean = false,
+        defaultDeviceLabel: String = defaultDeviceName()
+    ): String? {
+        val normalizedNick = UserProfileManager.normalizeNickname(newNickname)
+        val currentTrimmed = current.memberLabel.trim()
+        val prevTrimmed = previousNickname.trim()
+        val targetLabel = if (normalizedNick == UserProfileManager.DEFAULT_NICKNAME) {
+            if (prevTrimmed.isNotEmpty() && currentTrimmed == prevTrimmed) {
+                defaultDeviceLabel
+            } else {
+                return null
+            }
+        } else {
+            val isDefaultOrPreviousLabel = currentTrimmed.isEmpty() ||
+                currentTrimmed == defaultDeviceLabel ||
+                (prevTrimmed.isNotEmpty() && currentTrimmed == prevTrimmed)
+            val isCloudConfigured = current.isTargetBound || current.serverUrl.isNotBlank()
+            val shouldSync = if (fromSnapshotRestore) {
+                isDefaultOrPreviousLabel
+            } else {
+                isCloudConfigured || isDefaultOrPreviousLabel
+            }
+            if (!shouldSync) return null
+            normalizedNick
+        }
+        return targetLabel.takeIf { it != current.memberLabel }
     }
 
     /**
@@ -493,7 +609,8 @@ object MoJiCloudSyncClient {
                 reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
                 appearanceSettingsJson = AppearanceConfigManager.exportConfigJson(),
                 captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson(),
-                dedicatedFundSettingsJson = DedicatedFundManager.exportConfigJson()
+                dedicatedFundSettingsJson = DedicatedFundManager.exportConfigJson(),
+                userProfileJson = UserProfileManager.exportBackupJson()
             )
             snapshotJson to enrichedTxs
         }

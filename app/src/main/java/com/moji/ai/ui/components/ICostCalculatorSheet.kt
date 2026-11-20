@@ -1049,7 +1049,11 @@ fun ICostCalculatorSheet(
 
                             Surface(
                                 shape = RoundedCornerShape(14.dp),
-                                color = Color(0xFFEEF2FF),
+                                color = if (AppearanceConfigManager.isDarkThemeActive) {
+                                    Color(0xFF6366F1).copy(alpha = 0.22f)
+                                } else {
+                                    Color(0xFFEEF2FF)
+                                },
                                 modifier = Modifier.iCostPressScale(pressedScale = 0.93f) {
                                     onOpenAgentTriage()
                                 }
@@ -1062,7 +1066,11 @@ fun ICostCalculatorSheet(
                                         text = "✨ Agent 梳理",
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = Color(0xFF4F46E5)
+                                        color = if (AppearanceConfigManager.isDarkThemeActive) {
+                                            Color(0xFFA5B4FC)
+                                        } else {
+                                            Color(0xFF4F46E5)
+                                        }
                                     )
                                 }
                             }
@@ -1548,7 +1556,11 @@ fun ICostCalculatorSheet(
 
                 Surface(
                     shape = RoundedCornerShape(16.dp),
-                    color = if (currency != "CNY") Color(0xFFEAF2FF) else ICostCardWhite,
+                    color = if (currency != "CNY") {
+                        if (AppearanceConfigManager.isDarkThemeActive) ICostBlueAccent.copy(alpha = 0.22f) else Color(0xFFEAF2FF)
+                    } else {
+                        ICostCardWhite
+                    },
                     modifier = Modifier.iCostPressScale(pressedScale = 0.92f) { showCurrencyPicker = true }
                 ) {
                     Text(
@@ -1647,7 +1659,11 @@ fun ICostCalculatorSheet(
                     ) {
                         Surface(
                             shape = RoundedCornerShape(14.dp),
-                            color = if (timeManuallySet) Color(0xFFEAF2FF) else ICostPillGray,
+                            color = if (timeManuallySet) {
+                                if (AppearanceConfigManager.isDarkThemeActive) ICostBlueAccent.copy(alpha = 0.22f) else Color(0xFFEAF2FF)
+                            } else {
+                                ICostPillGray
+                            },
                             modifier = Modifier.iCostPressScale(pressedScale = 0.92f) { showDatePicker = true }
                         ) {
                             Row(
@@ -1965,7 +1981,11 @@ fun ICostCalculatorSheet(
                                 showLedgerPicker = false
                             },
                             shape = RoundedCornerShape(12.dp),
-                            color = if (name == targetLedger) Color(0xFFEAF2FF) else ICostCellGray,
+                            color = if (name == targetLedger) {
+                                if (AppearanceConfigManager.isDarkThemeActive) ICostBlueAccent.copy(alpha = 0.22f) else Color(0xFFEAF2FF)
+                            } else {
+                                ICostCellGray
+                            },
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Text(
@@ -2032,7 +2052,11 @@ fun ICostCalculatorSheet(
                                 showCurrencyPicker = false
                             },
                             shape = RoundedCornerShape(12.dp),
-                            color = if (isSelected) Color(0xFFEAF2FF) else ICostCellGray,
+                            color = if (isSelected) {
+                                if (AppearanceConfigManager.isDarkThemeActive) ICostBlueAccent.copy(alpha = 0.22f) else Color(0xFFEAF2FF)
+                            } else {
+                                ICostCellGray
+                            },
                             modifier = Modifier.fillMaxWidth()
                         ) {
                             Column(
@@ -2549,7 +2573,11 @@ private fun CalculatorTemplatePickerSheet(
                     if (templates.isEmpty()) {
                         Surface(
                             shape = RoundedCornerShape(14.dp),
-                            color = Color(0xFFFFF3E0),
+                            color = if (AppearanceConfigManager.isDarkThemeActive) {
+                                Color(0xFFF59E0B).copy(alpha = 0.18f)
+                            } else {
+                                Color(0xFFFFF3E0)
+                            },
                             modifier = Modifier.iCostPressScale(pressedScale = 0.94f) {
                                 onLoadPresetTemplates()
                             }
@@ -2579,12 +2607,18 @@ private fun CalculatorTemplatePickerSheet(
                         )
                     }
                 } else {
+                    val isDarkPicker = AppearanceConfigManager.isDarkThemeActive
                     templates.forEach { tpl ->
                         val resolvedType = tpl.resolvedType()
                         val amtColor = when (resolvedType) {
                             TransactionType.INCOME -> ICostIncomeColor
                             TransactionType.TRANSFER -> ICostAmberGold
                             else -> ICostExpenseColor
+                        }
+                        val amtPrefix = when (resolvedType) {
+                            TransactionType.INCOME -> "+"
+                            TransactionType.TRANSFER -> "⇄ "
+                            else -> "-"
                         }
                         Surface(
                             shape = RoundedCornerShape(16.dp),
@@ -2604,10 +2638,13 @@ private fun CalculatorTemplatePickerSheet(
                                 ICostCategoryBadge(
                                     category = if (resolvedType == TransactionType.TRANSFER) "内部转账" else tpl.category,
                                     type = resolvedType,
-                                    size = 34.dp
+                                    size = 36.dp
                                 )
                                 Spacer(modifier = Modifier.width(10.dp))
-                                Column(modifier = Modifier.weight(1f)) {
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
                                     Text(
                                         text = tpl.title,
                                         fontSize = 14.sp,
@@ -2629,17 +2666,30 @@ private fun CalculatorTemplatePickerSheet(
                                     )
                                 }
                                 Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = if (tpl.amountCents > 0L) {
-                                        formatMoneyCents(tpl.amountCents, tpl.currency)
-                                    } else {
-                                        "待填金额"
-                                    },
-                                    fontFamily = ICDinFontFamily,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (tpl.amountCents > 0L) amtColor else Color(0xFFD97706)
-                                )
+                                if (tpl.amountCents > 0L) {
+                                    Text(
+                                        text = amtPrefix + formatMoneyCents(tpl.amountCents, tpl.currency),
+                                        fontFamily = ICDinFontFamily,
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = amtColor,
+                                        maxLines = 1
+                                    )
+                                } else {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = if (isDarkPicker) Color(0xFFF59E0B).copy(alpha = 0.18f) else Color(0xFFFFF3E0)
+                                    ) {
+                                        Text(
+                                            text = "待填金额",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = Color(0xFFD97706),
+                                            maxLines = 1,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                        )
+                                    }
+                                }
                             }
                         }
                     }

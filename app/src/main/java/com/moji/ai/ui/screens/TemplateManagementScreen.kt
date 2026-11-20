@@ -370,10 +370,10 @@ private fun TemplateManagementContent(
         }
 
         Spacer(modifier = Modifier.height(12.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.Bottom
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp)
         ) {
             Text(
                 text = "记账模板",
@@ -381,11 +381,11 @@ private fun TemplateManagementContent(
                 fontWeight = FontWeight.ExtraBold,
                 color = ICostTextPrimary
             )
+            Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "共 ${templates.size} 个模板 · 支持一键秒记与预填",
+                text = "共 ${templates.size} 个模板 · 支持一键秒记与计算器预填",
                 fontSize = 12.sp,
-                color = ICostTextSecondary,
-                modifier = Modifier.padding(bottom = 4.dp)
+                color = ICostTextSecondary
             )
         }
 
@@ -661,6 +661,7 @@ private fun TemplateManagementCard(
         }
     }
     val parsedTags = remember(tpl.tags) { TagCatalog.parseTags(tpl.tags) }
+    var showCardMoreMenu by remember { mutableStateOf(false) }
 
     Surface(
         shape = RoundedCornerShape(20.dp),
@@ -672,116 +673,146 @@ private fun TemplateManagementCard(
                 .fillMaxWidth()
                 .padding(horizontal = 14.dp, vertical = 13.dp)
         ) {
-            // 第 1 行（核心识别区）：左侧 ICostCategoryBadge(38dp) + 中间标题与类型胶囊 + 右侧预设金额/待填金额
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                ICostCategoryBadge(
-                    category = if (resolvedType == TransactionType.TRANSFER) "内部转账" else tpl.category,
-                    type = resolvedType,
-                    size = 38.dp
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Row(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(end = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = tpl.title,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = ICostTextPrimary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
+            // 上半区（点击整块信息区直接编辑模板）：左 40dp 分类圆章 + 中间标题与精简元信息 + 右侧醒目金额
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onEdit
                     )
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = typeColor.copy(alpha = 0.12f)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ICostCategoryBadge(
+                        category = if (resolvedType == TransactionType.TRANSFER) "内部转账" else tpl.category,
+                        type = resolvedType,
+                        size = 40.dp
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp)
                     ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Text(
+                                text = tpl.title,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostTextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = typeColor.copy(alpha = 0.12f)
+                            ) {
+                                Text(
+                                    text = typeLabel,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = typeColor,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(3.dp))
+                        val metaLine = buildString {
+                            append(categoryDisplay)
+                            append(" · ")
+                            append(accountLabel)
+                            if (resolvedType == TransactionType.EXPENSE && tpl.reimbursable) {
+                                append(" · 待报销")
+                            }
+                        }
                         Text(
-                            text = typeLabel,
-                            fontSize = 10.sp,
+                            text = metaLine,
+                            fontSize = 12.sp,
+                            color = if (accountLabel == "待确认账户") ICostCoralRed else ICostTextSecondary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    if (tpl.amountCents > 0L) {
+                        val prefix = when (resolvedType) {
+                            TransactionType.INCOME -> "+"
+                            TransactionType.TRANSFER -> "⇄ "
+                            else -> "-"
+                        }
+                        Text(
+                            text = "$prefix${formatMoneyCents(tpl.amountCents, tpl.currency)}",
+                            fontFamily = ICDinFontFamily,
+                            fontSize = 17.sp,
                             fontWeight = FontWeight.Bold,
                             color = typeColor,
                             maxLines = 1,
-                            softWrap = false,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            softWrap = false
                         )
+                    } else {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF332614) else Color(0xFFFFF3E0)
+                        ) {
+                            Text(
+                                text = "待填金额",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Color(0xFFD97706),
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                            )
+                        }
                     }
                 }
-                if (tpl.amountCents > 0L) {
-                    val prefix = when (resolvedType) {
-                        TransactionType.INCOME -> "+"
-                        TransactionType.TRANSFER -> "⇄ "
-                        else -> "-"
-                    }
-                    Text(
-                        text = "$prefix${formatMoneyCents(tpl.amountCents, tpl.currency)}",
-                        fontFamily = ICDinFontFamily,
-                        fontSize = 17.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = typeColor,
-                        maxLines = 1,
-                        softWrap = false
-                    )
-                } else {
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = if (AppearanceConfigManager.isDarkThemeActive) Color(0xFF332614) else Color(0xFFFFF3E0)
+
+                val hasExtraNote = tpl.note.isNotBlank() && tpl.note != tpl.title
+                if (parsedTags.isNotEmpty() || hasExtraNote) {
+                    Spacer(modifier = Modifier.height(7.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 50.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        Text(
-                            text = "待填金额",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color(0xFFD97706),
-                            maxLines = 1,
-                            softWrap = false,
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                        )
+                        parsedTags.take(2).forEach { tagName ->
+                            ICostColorTagChip(
+                                tagName = tagName,
+                                fontSize = 10.sp,
+                                horizontalPadding = 6.dp,
+                                verticalPadding = 2.dp
+                            )
+                        }
+                        if (parsedTags.size > 2) {
+                            TemplateMetaChip(
+                                text = "+${parsedTags.size - 2}",
+                                bg = ICostCellGray,
+                                color = ICostTextSecondary
+                            )
+                        }
+                        if (hasExtraNote) {
+                            Text(
+                                text = tpl.note,
+                                fontSize = 11.sp,
+                                color = ICostTextSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
                     }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // 第 2 行（分类、账户与属性区，使用 FlowRow 自适应换行，绝不单行挤压折行）
-            FlowRow(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                TemplateMetaChip(text = categoryDisplay, bg = ICostCellGray, color = ICostTextSecondary)
-                TemplateMetaChip(
-                    text = accountLabel,
-                    bg = if (accountLabel == "待确认账户") ICostCoralRed.copy(alpha = 0.12f) else ICostCellGray,
-                    color = if (accountLabel == "待确认账户") ICostCoralRed else ICostTextSecondary
-                )
-                if (resolvedType == TransactionType.EXPENSE && tpl.reimbursable) {
-                    TemplateMetaChip(
-                        text = "待报销",
-                        bg = ICostBlueAccent.copy(alpha = 0.12f),
-                        color = ICostBlueAccent
-                    )
-                }
-                parsedTags.forEach { tagName ->
-                    ICostColorTagChip(
-                        tagName = tagName,
-                        fontSize = 10.sp,
-                        horizontalPadding = 7.dp,
-                        verticalPadding = 2.dp
-                    )
-                }
-                if (tpl.note.isNotBlank() && tpl.note != tpl.title) {
-                    TemplateMetaChip(
-                        text = "备注：${tpl.note}",
-                        bg = ICostCellGray,
-                        color = ICostTextSecondary
-                    )
                 }
             }
 
@@ -789,14 +820,14 @@ private fun TemplateManagementCard(
             HorizontalDivider(thickness = 0.5.dp, color = ICostDivider)
             Spacer(modifier = Modifier.height(8.dp))
 
-            // 第 3 行（独立操作栏）：左侧「记一笔」「填入计算器」；右侧 上移 / 下移 / 复制 / 编辑 / 删除
+            // 下半区（操作底栏，总宽严格 < 280dp）：左侧高频主操作胶囊 + 右侧上移/下移与 ••• 更多菜单
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Surface(
@@ -805,13 +836,13 @@ private fun TemplateManagementCard(
                         modifier = Modifier.iCostPressScale(pressedScale = 0.93f, onClick = onApplyNow)
                     ) {
                         Text(
-                            text = if (tpl.amountCents > 0L) "记一笔" else "输入金额记账",
+                            text = if (tpl.amountCents > 0L) "直接记一笔" else "输入金额",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White,
                             maxLines = 1,
                             softWrap = false,
-                            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp)
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                         )
                     }
                     Surface(
@@ -846,27 +877,66 @@ private fun TemplateManagementCard(
                         enabled = canMoveDown,
                         onClick = onMoveDown
                     )
-                    TemplateSmallIconBtn(
-                        icon = Icons.Default.ContentCopy,
-                        contentDescription = "复制${tpl.title}",
-                        enabled = true,
-                        tint = ICostAmberGold,
-                        onClick = onDuplicate
-                    )
-                    TemplateSmallIconBtn(
-                        icon = Icons.Default.Edit,
-                        contentDescription = "编辑${tpl.title}",
-                        enabled = true,
-                        tint = ICostBlueAccent,
-                        onClick = onEdit
-                    )
-                    TemplateSmallIconBtn(
-                        icon = Icons.Default.DeleteOutline,
-                        contentDescription = "删除${tpl.title}",
-                        enabled = true,
-                        tint = ICostCoralRed,
-                        onClick = onDelete
-                    )
+                    Box {
+                        TemplateSmallIconBtn(
+                            icon = Icons.Default.MoreHoriz,
+                            contentDescription = "更多操作${tpl.title}",
+                            enabled = true,
+                            tint = ICostTextPrimary,
+                            onClick = { showCardMoreMenu = true }
+                        )
+                        DropdownMenu(
+                            expanded = showCardMoreMenu,
+                            onDismissRequest = { showCardMoreMenu = false },
+                            containerColor = ICostCardWhite
+                        ) {
+                            DropdownMenuItem(
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.Edit,
+                                        contentDescription = null,
+                                        tint = ICostBlueAccent,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                },
+                                text = { Text("编辑模板", fontSize = 14.sp, color = ICostTextPrimary) },
+                                onClick = {
+                                    showCardMoreMenu = false
+                                    onEdit()
+                                }
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.ContentCopy,
+                                        contentDescription = null,
+                                        tint = ICostAmberGold,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                },
+                                text = { Text("复制模板", fontSize = 14.sp, color = ICostTextPrimary) },
+                                onClick = {
+                                    showCardMoreMenu = false
+                                    onDuplicate()
+                                }
+                            )
+                            DropdownMenuItem(
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Default.DeleteOutline,
+                                        contentDescription = null,
+                                        tint = ICostCoralRed,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                },
+                                text = { Text("删除模板", fontSize = 14.sp, color = ICostCoralRed) },
+                                onClick = {
+                                    showCardMoreMenu = false
+                                    onDelete()
+                                }
+                            )
+                        }
+                    }
                 }
             }
         }
