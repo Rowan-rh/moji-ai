@@ -18,6 +18,7 @@ import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.ReminderConfigManager
 import com.moji.ai.data.model.TagCatalog
+import com.moji.ai.data.model.UserProfileManager
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.DailyReminderScheduler
 import com.moji.ai.notification.SilentBookkeepingNotifier
@@ -119,6 +120,7 @@ class MoJiApp : Application() {
         AppLockManager.init(this)
         ReminderConfigManager.init(this)
         AppearanceConfigManager.init(this)
+        UserProfileManager.init(this)
         CaptureAppWhitelistManager.init(this)
         BillScreenshotStorage.init(this)
         MoJiCloudSyncClient.init(this)
@@ -174,6 +176,7 @@ class MoJiApp : Application() {
             "moji_smart_rules_prefs",
             "moji_merchant_memory_prefs",
             AppearanceConfigManager.PREFS_NAME,
+            UserProfileManager.PREFS_NAME,
             ReminderConfigManager.PREFS_NAME,
             "moji_tag_catalog_prefs",
             DedicatedFundManager.PREFS_NAME,

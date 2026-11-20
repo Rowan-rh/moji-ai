@@ -20,6 +20,7 @@ import com.moji.ai.data.model.ReminderConfigManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.data.model.UserProfileManager
 import com.moji.ai.data.model.WalletType
 import com.moji.ai.ui.InstallmentPlanItem
 import com.moji.ai.ui.QuickBookkeepingTemplate
@@ -145,7 +146,8 @@ data class MoJiFullBackupSnapshot(
     val reminderSettingsJson: String = "",
     val appearanceSettingsJson: String = "",
     val captureWhitelistJson: String = "",
-    val dedicatedFundSettingsJson: String = ""
+    val dedicatedFundSettingsJson: String = "",
+    val userProfileJson: String = ""
 )
 
 data class CsvParsePreviewResult(
@@ -222,7 +224,8 @@ object BackupAndCsvTransferEngine {
         reminderSettingsJson: String = ReminderConfigManager.exportConfigJson(),
         appearanceSettingsJson: String = AppearanceConfigManager.exportConfigJson(),
         captureWhitelistJson: String = CaptureAppWhitelistManager.exportConfigJson(),
-        dedicatedFundSettingsJson: String = DedicatedFundManager.exportConfigJson()
+        dedicatedFundSettingsJson: String = DedicatedFundManager.exportConfigJson(),
+        userProfileJson: String = UserProfileManager.exportBackupJson()
     ): String {
         val snapshot = MoJiFullBackupSnapshot(
             schemaVersion = 3,
@@ -320,7 +323,8 @@ object BackupAndCsvTransferEngine {
             reminderSettingsJson = reminderSettingsJson,
             appearanceSettingsJson = appearanceSettingsJson,
             captureWhitelistJson = captureWhitelistJson,
-            dedicatedFundSettingsJson = dedicatedFundSettingsJson
+            dedicatedFundSettingsJson = dedicatedFundSettingsJson,
+            userProfileJson = userProfileJson
         )
         return backupJson.encodeToString(snapshot)
     }

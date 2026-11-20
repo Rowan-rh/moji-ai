@@ -15,6 +15,7 @@ import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.ReminderConfigManager
 import com.moji.ai.data.model.TagCatalog
+import com.moji.ai.data.model.UserProfileManager
 import com.moji.ai.service.BillScreenshotStorage
 import com.moji.ai.ui.InstallmentPlanItem
 import com.moji.ai.ui.QuickBookkeepingTemplate
@@ -402,7 +403,11 @@ object MoJiCloudSyncClient {
         }
         val base = parsed ?: MoJiCloudConfig()
         val ensuredKey = base.syncKey.trim().uppercase(Locale.US).ifBlank { generateSyncKey() }
-        val ensuredLabel = base.memberLabel.trim().ifBlank { defaultDeviceName() }
+        val preferredDefaultLabel = UserProfileManager.currentConfig.nickname
+            .trim()
+            .takeIf { it.isNotEmpty() && it != UserProfileManager.DEFAULT_NICKNAME }
+            ?: defaultDeviceName()
+        val ensuredLabel = base.memberLabel.trim().ifBlank { preferredDefaultLabel }
         val normalized = base.copy(syncKey = ensuredKey, memberLabel = ensuredLabel)
         if (parsed == null || parsed.syncKey != ensuredKey || parsed.memberLabel != ensuredLabel) {
             saveConfig(context, normalized)
@@ -414,6 +419,59 @@ object MoJiCloudSyncClient {
         val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         prefs.edit().putString(KEY_CONFIG_JSON, jsonCodec.encodeToString(config)).apply()
         _configFlow.value = config
+    }
+
+    /**
+     * 生成脱敏后的专属密钥展示摘要（如 `MOJI-****-NPQR` / `MOJIQA-****-NPQR`），用于设置页个人资料卡状态胶囊。
+     */
+    fun maskedSyncKeyHint(rawKey: String): String {
+        val clean = rawKey.trim().uppercase(Locale.US)
+        if (clean.isBlank()) return ""
+        val prefix = when {
+            clean.startsWith("MOJIQA-") -> "MOJIQA-"
+            clean.startsWith("MOJI-") -> "MOJI-"
+            else -> clean.substringBefore('-', "").let { if (it.isNotEmpty()) "$it-" else "" }
+        }
+        val suffix = clean.substringAfterLast('-').takeLast(4)
+        return when {
+            prefix.isNotEmpty() && suffix.length == 4 -> "${prefix}****-$suffix"
+            clean.length > 8 -> "${clean.take(4)}****${clean.takeLast(4)}"
+            else -> "****"
+        }
+    }
+
+    /**
+     * 当用户修改个人资料昵称时，若已配置默记云存储（或当前成员标签仍为默认机型/旧昵称），自动同步更新 `memberLabel`。
+     */
+    fun syncMemberLabelWithNickname(
+        context: Context,
+        newNickname: String,
+        previousNickname: String = ""
+    ): Boolean {
+        val current = _configFlow.value
+        val normalizedNick = UserProfileManager.normalizeNickname(newNickname)
+        val deviceFallback = defaultDeviceName()
+        val isCloudConfigured = current.isTargetBound || current.serverUrl.isNotBlank()
+        val targetLabel = if (normalizedNick == UserProfileManager.DEFAULT_NICKNAME) {
+            if (current.memberLabel == previousNickname && previousNickname.isNotBlank()) {
+                deviceFallback
+            } else {
+                return false
+            }
+        } else {
+            val shouldSync = isCloudConfigured ||
+                current.memberLabel.isBlank() ||
+                current.memberLabel == deviceFallback ||
+                (previousNickname.isNotBlank() && current.memberLabel == previousNickname)
+            if (!shouldSync) return false
+            normalizedNick
+        }
+        if (current.memberLabel == targetLabel) return false
+        saveConfig(context, current.copy(memberLabel = targetLabel))
+        if (current.isTargetBound) {
+            markPendingAutoPush(context, notifySignal = true)
+        }
+        return true
     }
 
     /**
@@ -493,7 +551,8 @@ object MoJiCloudSyncClient {
                 reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
                 appearanceSettingsJson = AppearanceConfigManager.exportConfigJson(),
                 captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson(),
-                dedicatedFundSettingsJson = DedicatedFundManager.exportConfigJson()
+                dedicatedFundSettingsJson = DedicatedFundManager.exportConfigJson(),
+                userProfileJson = UserProfileManager.exportBackupJson()
             )
             snapshotJson to enrichedTxs
         }

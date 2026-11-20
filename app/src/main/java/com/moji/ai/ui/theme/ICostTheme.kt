@@ -56,6 +56,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -106,7 +107,10 @@ import com.moji.ai.data.model.AmountColorScheme
 import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
+import com.moji.ai.data.model.PresetAvatarStyle
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.data.model.UserProfileConfig
+import com.moji.ai.data.model.UserProfileManager
 import com.moji.ai.data.model.WalletType
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -926,8 +930,238 @@ fun ICostCircleIconButton(
     }
 }
 
+private val customAvatarBitmapCache = ConcurrentHashMap<String, ImageBitmap>()
+
 /**
- * 1:1 iCost 右上角薄荷绿插画头像按钮（点击进入全屏「设置」，自带弹簧按压回弹）
+ * 通用用户头像组件（支持自定义相册图片异步解码与 8 款莫兰迪色系预设插画头像自动降级渲染）
+ */
+@Composable
+fun ICostUserAvatar(
+    profile: UserProfileConfig = UserProfileManager.currentConfig,
+    size: Dp = 42.dp,
+    borderWidth: Dp = 2.dp,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val customPath = profile.customAvatarPath
+    val cacheKey = remember(customPath, profile.avatarUpdatedAtMillis) {
+        if (customPath.isBlank()) "" else "$customPath|${profile.avatarUpdatedAtMillis}"
+    }
+    val customBitmap by produceState<ImageBitmap?>(
+        initialValue = if (cacheKey.isNotEmpty()) customAvatarBitmapCache[cacheKey] else null,
+        key1 = cacheKey
+    ) {
+        if (cacheKey.isEmpty()) {
+            value = null
+            return@produceState
+        }
+        val cached = customAvatarBitmapCache[cacheKey]
+        if (cached != null) {
+            value = cached
+            return@produceState
+        }
+        val decoded = withContext(Dispatchers.IO) {
+            val validFile = UserProfileManager.resolveValidCustomAvatarFile(customPath, context)
+                ?: return@withContext null
+            runCatching {
+                BitmapFactory.decodeFile(validFile.absolutePath)?.asImageBitmap()
+            }.getOrNull()
+        }
+        if (decoded != null) {
+            if (customAvatarBitmapCache.size >= 4) {
+                customAvatarBitmapCache.clear()
+            }
+            customAvatarBitmapCache[cacheKey] = decoded
+        }
+        value = decoded
+    }
+
+    val style = profile.presetAvatar
+    val borderColor = if (AppearanceConfigManager.isDarkThemeActive) {
+        Color(0xFF2E3442)
+    } else {
+        Color.White
+    }
+
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(Color(style.bgHex))
+            .then(
+                if (borderWidth > 0.dp) {
+                    Modifier.border(borderWidth, borderColor, CircleShape)
+                } else {
+                    Modifier
+                }
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        val bmp = customBitmap
+        if (bmp != null) {
+            Image(
+                bitmap = bmp,
+                contentDescription = "个人头像",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(CircleShape)
+            )
+        } else {
+            PresetAvatarIllustration(
+                style = style,
+                modifier = Modifier.size(size * 0.78f)
+            )
+        }
+    }
+}
+
+@Composable
+fun PresetAvatarIllustration(
+    style: PresetAvatarStyle,
+    modifier: Modifier = Modifier
+) {
+    Canvas(modifier = modifier) {
+        val w = this.size.width
+        val h = this.size.height
+        val hairColor = Color(style.hairHex)
+        val collarColor = Color(style.collarHex)
+        val skinColor = Color(style.skinHex)
+        val smileColor = Color(style.smileHex)
+
+        // 若为波波头（hairVariant == 2），先绘制脸后方两侧垂发背景
+        if (style.hairVariant == 2) {
+            drawRoundRect(
+                color = hairColor,
+                topLeft = Offset(w * 0.20f, h * 0.24f),
+                size = Size(w * 0.60f, h * 0.50f),
+                cornerRadius = CornerRadius(w * 0.26f, w * 0.26f)
+            )
+        }
+
+        // 衣领与肩膀
+        drawRoundRect(
+            color = collarColor,
+            topLeft = Offset(w * 0.20f, h * 0.72f),
+            size = Size(w * 0.60f, h * 0.34f),
+            cornerRadius = CornerRadius(w * 0.24f, w * 0.24f)
+        )
+        if (style.hairVariant == 1) {
+            // 精致小 V 领点缀
+            val vNeck = Path().apply {
+                moveTo(w * 0.43f, h * 0.72f)
+                lineTo(w * 0.50f, h * 0.82f)
+                lineTo(w * 0.57f, h * 0.72f)
+                close()
+            }
+            drawPath(vNeck, color = skinColor)
+        }
+
+        // 脸部轮廓
+        drawCircle(
+            color = skinColor,
+            radius = w * 0.26f,
+            center = Offset(w * 0.50f, h * 0.49f)
+        )
+
+        // 4 种莫兰迪插画发型变体（variant 0 与原版薄荷绿头像 1:1 完全一致）
+        val hairPath = Path().apply {
+            when (style.hairVariant) {
+                1 -> {
+                    moveTo(w * 0.22f, h * 0.45f)
+                    cubicTo(w * 0.22f, h * 0.15f, w * 0.78f, h * 0.15f, w * 0.78f, h * 0.44f)
+                    cubicTo(w * 0.66f, h * 0.31f, w * 0.44f, h * 0.31f, w * 0.22f, h * 0.45f)
+                    close()
+                }
+                2 -> {
+                    moveTo(w * 0.21f, h * 0.48f)
+                    cubicTo(w * 0.21f, h * 0.15f, w * 0.79f, h * 0.15f, w * 0.79f, h * 0.48f)
+                    cubicTo(w * 0.68f, h * 0.36f, w * 0.54f, h * 0.35f, w * 0.50f, h * 0.39f)
+                    cubicTo(w * 0.42f, h * 0.35f, w * 0.30f, h * 0.36f, w * 0.21f, h * 0.48f)
+                    close()
+                }
+                3 -> {
+                    moveTo(w * 0.22f, h * 0.46f)
+                    cubicTo(w * 0.20f, h * 0.14f, w * 0.80f, h * 0.14f, w * 0.78f, h * 0.46f)
+                    cubicTo(w * 0.70f, h * 0.38f, w * 0.62f, h * 0.33f, w * 0.55f, h * 0.39f)
+                    cubicTo(w * 0.48f, h * 0.32f, w * 0.40f, h * 0.38f, w * 0.33f, h * 0.35f)
+                    cubicTo(w * 0.27f, h * 0.36f, w * 0.24f, h * 0.42f, w * 0.22f, h * 0.46f)
+                    close()
+                }
+                else -> {
+                    moveTo(w * 0.22f, h * 0.46f)
+                    cubicTo(w * 0.22f, h * 0.16f, w * 0.78f, h * 0.16f, w * 0.78f, h * 0.46f)
+                    cubicTo(w * 0.68f, h * 0.35f, w * 0.56f, h * 0.34f, w * 0.48f, h * 0.40f)
+                    cubicTo(w * 0.38f, h * 0.34f, w * 0.28f, h * 0.38f, w * 0.22f, h * 0.46f)
+                    close()
+                }
+            }
+        }
+        drawPath(hairPath, color = hairColor)
+
+        if (style.hasHairpin) {
+            drawRoundRect(
+                color = Color(0xFFFFF8E7),
+                topLeft = Offset(w * 0.60f, h * 0.30f),
+                size = Size(w * 0.11f, h * 0.042f),
+                cornerRadius = CornerRadius(w * 0.02f, w * 0.02f)
+            )
+        }
+
+        // 双眼
+        drawCircle(hairColor, radius = w * 0.032f, center = Offset(w * 0.41f, h * 0.50f))
+        drawCircle(hairColor, radius = w * 0.032f, center = Offset(w * 0.59f, h * 0.50f))
+
+        if (style.hasGlasses) {
+            val strokeW = w * 0.024f
+            drawCircle(
+                color = collarColor.copy(alpha = 0.78f),
+                radius = w * 0.072f,
+                center = Offset(w * 0.40f, h * 0.50f),
+                style = Stroke(width = strokeW)
+            )
+            drawCircle(
+                color = collarColor.copy(alpha = 0.78f),
+                radius = w * 0.072f,
+                center = Offset(w * 0.60f, h * 0.50f),
+                style = Stroke(width = strokeW)
+            )
+            drawLine(
+                color = collarColor.copy(alpha = 0.78f),
+                start = Offset(w * 0.472f, h * 0.50f),
+                end = Offset(w * 0.528f, h * 0.50f),
+                strokeWidth = strokeW
+            )
+        }
+
+        if (style.hasBlush) {
+            drawCircle(
+                color = smileColor.copy(alpha = 0.26f),
+                radius = w * 0.042f,
+                center = Offset(w * 0.34f, h * 0.55f)
+            )
+            drawCircle(
+                color = smileColor.copy(alpha = 0.26f),
+                radius = w * 0.042f,
+                center = Offset(w * 0.66f, h * 0.55f)
+            )
+        }
+
+        // 微笑弧线
+        drawArc(
+            color = smileColor,
+            startAngle = 20f,
+            sweepAngle = 140f,
+            useCenter = false,
+            topLeft = Offset(w * 0.43f, h * 0.53f),
+            size = Size(w * 0.14f, h * 0.09f),
+            style = Stroke(width = w * 0.032f, cap = StrokeCap.Round)
+        )
+    }
+}
+
+/**
+ * 1:1 iCost 右上角头像按钮（点击进入全屏「设置」，实时响应预设/自定义头像切换，自带弹簧按压回弹）
  */
 @Composable
 fun ICostAvatarButton(
@@ -935,9 +1169,11 @@ fun ICostAvatarButton(
     size: Dp = 42.dp,
     modifier: Modifier = Modifier
 ) {
-    Box(
+    ICostUserAvatar(
+        profile = UserProfileManager.currentConfig,
+        size = size,
+        borderWidth = 2.dp,
         modifier = modifier
-            .size(size)
             .iCostPressScale(pressedScale = 0.90f, onClick = onClick)
             .shadow(
                 elevation = 3.dp,
@@ -945,50 +1181,7 @@ fun ICostAvatarButton(
                 ambientColor = Color.Black.copy(alpha = 0.05f),
                 spotColor = Color.Black.copy(alpha = 0.08f)
             )
-            .clip(CircleShape)
-            .background(Color(0xFFC6F3EA))
-            .border(2.dp, Color.White, CircleShape),
-        contentAlignment = Alignment.Center
-    ) {
-        Canvas(modifier = Modifier.size(size * 0.78f)) {
-            val w = this.size.width
-            val h = this.size.height
-            // 衣领肩膀
-            drawRoundRect(
-                color = Color(0xFF1F2430),
-                topLeft = Offset(w * 0.20f, h * 0.72f),
-                size = Size(w * 0.60f, h * 0.34f),
-                cornerRadius = CornerRadius(w * 0.24f, w * 0.24f)
-            )
-            // 脸部
-            drawCircle(
-                color = Color(0xFFFFEFE6),
-                radius = w * 0.26f,
-                center = Offset(w * 0.50f, h * 0.49f)
-            )
-            // 刘海与头发轮廓
-            val hairPath = Path().apply {
-                moveTo(w * 0.22f, h * 0.46f)
-                cubicTo(w * 0.22f, h * 0.16f, w * 0.78f, h * 0.16f, w * 0.78f, h * 0.46f)
-                cubicTo(w * 0.68f, h * 0.35f, w * 0.56f, h * 0.34f, w * 0.48f, h * 0.40f)
-                cubicTo(w * 0.38f, h * 0.34f, w * 0.28f, h * 0.38f, w * 0.22f, h * 0.46f)
-                close()
-            }
-            drawPath(hairPath, color = Color(0xFF1B1F26))
-            // 双眼与微笑
-            drawCircle(Color(0xFF1B1F26), radius = w * 0.032f, center = Offset(w * 0.41f, h * 0.50f))
-            drawCircle(Color(0xFF1B1F26), radius = w * 0.032f, center = Offset(w * 0.59f, h * 0.50f))
-            drawArc(
-                color = Color(0xFFE07A68),
-                startAngle = 20f,
-                sweepAngle = 140f,
-                useCenter = false,
-                topLeft = Offset(w * 0.43f, h * 0.53f),
-                size = Size(w * 0.14f, h * 0.09f),
-                style = Stroke(width = w * 0.032f, cap = StrokeCap.Round)
-            )
-        }
-    }
+    )
 }
 
 /**

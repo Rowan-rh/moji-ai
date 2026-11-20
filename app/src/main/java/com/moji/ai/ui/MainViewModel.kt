@@ -2,6 +2,7 @@ package com.moji.ai.ui
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.moji.ai.MoJiApp
@@ -46,6 +47,7 @@ import com.moji.ai.data.model.DedicatedFundPlanConfig
 import com.moji.ai.data.model.DedicatedFundSettings
 import com.moji.ai.data.model.PasswordProtectionConfig
 import com.moji.ai.data.model.PinVerifyResult
+import com.moji.ai.data.model.PresetAvatarStyle
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.ReminderConfigManager
 import com.moji.ai.data.model.ReminderSettingsConfig
@@ -54,6 +56,8 @@ import com.moji.ai.data.model.SubCategoryDef
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.data.model.UserProfileConfig
+import com.moji.ai.data.model.UserProfileManager
 import com.moji.ai.notification.DailyReminderScheduler
 import com.moji.ai.service.BillScreenshotStorage
 import com.moji.ai.service.CaptureObservabilityLogEntry
@@ -609,6 +613,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val reminderSettingsConfig: StateFlow<ReminderSettingsConfig> = ReminderConfigManager.configFlow
 
     val appearanceSettingsConfig: StateFlow<AppearanceSettingsConfig> = AppearanceConfigManager.configFlow
+
+    val userProfileConfig: StateFlow<UserProfileConfig> = UserProfileManager.configFlow
 
     val captureWhitelistEntries: StateFlow<List<CaptureAppWhitelistEntry>> = CaptureAppWhitelistManager.entriesFlow
 
@@ -1305,7 +1311,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
             appearanceSettingsJson = AppearanceConfigManager.exportConfigJson(),
             captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson(),
-            dedicatedFundSettingsJson = DedicatedFundManager.exportConfigJson()
+            dedicatedFundSettingsJson = DedicatedFundManager.exportConfigJson(),
+            userProfileJson = UserProfileManager.exportBackupJson()
         )
     }
 
@@ -1328,7 +1335,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             reminderSettingsJson = ReminderConfigManager.exportConfigJson(),
             appearanceSettingsJson = AppearanceConfigManager.exportConfigJson(),
             captureWhitelistJson = CaptureAppWhitelistManager.exportConfigJson(),
-            dedicatedFundSettingsJson = DedicatedFundManager.exportConfigJson()
+            dedicatedFundSettingsJson = DedicatedFundManager.exportConfigJson(),
+            userProfileJson = UserProfileManager.exportBackupJson()
         )
     }
 
@@ -1535,6 +1543,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             } else {
                 DedicatedFundManager.resetToDefaults()
+            }
+            if (snapshot.userProfileJson.isNotBlank()) {
+                val previousNickname = UserProfileManager.currentConfig.nickname
+                if (UserProfileManager.restoreFromBackupJson(snapshot.userProfileJson, app)) {
+                    MoJiCloudSyncClient.syncMemberLabelWithNickname(
+                        context = app,
+                        newNickname = UserProfileManager.currentConfig.nickname,
+                        previousNickname = previousNickname
+                    )
+                }
             }
             MoJiCloudSyncClient.recordRestoredState(restoredSig)
             txCount
@@ -2421,6 +2439,52 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun resetAppearanceDefaults() {
         AppearanceConfigManager.resetToDefaults()
         postMessage("已恢复默认外观显示设置")
+    }
+
+    fun updateUserNickname(rawNickname: String) {
+        val prevNickname = UserProfileManager.currentConfig.nickname
+        val updated = UserProfileManager.updateNickname(rawNickname)
+        val syncedCloudLabel = MoJiCloudSyncClient.syncMemberLabelWithNickname(
+            context = app,
+            newNickname = updated.nickname,
+            previousNickname = prevNickname
+        )
+        if (syncedCloudLabel && MoJiCloudSyncClient.configFlow.value.isTargetBound) {
+            postMessage("昵称已更新为「${updated.nickname}」，已同步云端成员标签")
+        } else {
+            postMessage("昵称已更新为「${updated.nickname}」")
+        }
+    }
+
+    fun selectPresetAvatar(preset: PresetAvatarStyle) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                UserProfileManager.selectPresetAvatar(preset, app)
+            }
+            postMessage("已切换头像为「${preset.label}」")
+        }
+    }
+
+    fun saveCustomUserAvatar(uri: Uri) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) {
+                UserProfileManager.saveCustomAvatarFromUri(app, uri)
+            }
+            result.onSuccess {
+                postMessage("自定义相册头像已更新")
+            }.onFailure { err ->
+                postMessage(err.message ?: "更换自定义头像失败")
+            }
+        }
+    }
+
+    fun clearCustomUserAvatar() {
+        viewModelScope.launch {
+            val updated = withContext(Dispatchers.IO) {
+                UserProfileManager.clearCustomAvatar(app)
+            }
+            postMessage("已恢复为预设头像「${updated.presetAvatar.label}」")
+        }
     }
 
     fun setCaptureAppChannelEnabled(
