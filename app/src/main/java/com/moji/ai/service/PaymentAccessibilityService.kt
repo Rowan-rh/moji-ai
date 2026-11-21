@@ -2,6 +2,7 @@ package com.moji.ai.service
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
+import android.app.KeyguardManager
 import android.content.ComponentName
 import android.graphics.Bitmap
 import android.os.Build
@@ -28,6 +29,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
 
 /**
@@ -369,22 +371,65 @@ open class PaymentAccessibilityService : AccessibilityService() {
         }, delayMs)
     }
 
+    private fun isDeviceCurrentlyLocked(): Boolean {
+        val km = getSystemService(KeyguardManager::class.java)
+        return km?.isDeviceLocked == true || km?.isKeyguardLocked == true
+    }
+
     /**
      * 供 CapturePipelineCoordinator 在无障碍节点识账成功入库后静默抓取当前账单页面截图并持久化到本地。
+     * 截图前复核设备未锁屏且当前焦点窗口仍为原采集宿主，并在胶囊展示前先完成帧捕获以避免截入本应用悬浮窗；
      * 回调与 WebP 压缩全部运行在后台单线程池 screenshotIoExecutor，绝不阻塞主线程动画！
      */
-    fun captureBillEvidenceScreenshot(onSaved: (SavedScreenshotInfo?) -> Unit) {
+    fun captureBillEvidenceScreenshot(
+        expectedPackage: String = "",
+        abortSignal: AtomicBoolean? = null,
+        onFrameCaptured: (() -> Unit)? = null,
+        onSaved: (SavedScreenshotInfo?) -> Unit
+    ) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            onFrameCaptured?.invoke()
             onSaved(null)
             return
         }
         mainHandler.post {
+            if (abortSignal?.get() == true || isDeviceCurrentlyLocked()) {
+                onFrameCaptured?.invoke()
+                onSaved(null)
+                return@post
+            }
+            if (expectedPackage.isNotBlank()) {
+                if (!CaptureAppWhitelistManager.isAccessibilityAllowed(expectedPackage, this@PaymentAccessibilityService)) {
+                    onFrameCaptured?.invoke()
+                    onSaved(null)
+                    return@post
+                }
+                val focusedNow = resolveFocusedApplicationPackage()?.takeIf { it !in systemOverlayPackages }
+                if (focusedNow == null || focusedNow != expectedPackage) {
+                    onFrameCaptured?.invoke()
+                    onSaved(null)
+                    return@post
+                }
+                val currentAct = resolveActivityForEventWindow(expectedPackage, -1)
+                val currentRole = CaptureWindowGuard.classifyActivityContainer(expectedPackage, currentAct)
+                if (currentRole == WindowContainerRole.SENSITIVE_AUTH_BLOCKED ||
+                    currentRole == WindowContainerRole.NON_TRANSACTION_BLOCKED
+                ) {
+                    onFrameCaptured?.invoke()
+                    onSaved(null)
+                    return@post
+                }
+            }
+            if (RecognitionBanner.isShowingOrAnimating()) {
+                RecognitionBanner.dismissImmediate()
+            }
             try {
                 takeScreenshot(
                     Display.DEFAULT_DISPLAY,
                     screenshotIoExecutor,
                     object : TakeScreenshotCallback {
                         override fun onSuccess(screenshotResult: ScreenshotResult) {
+                            onFrameCaptured?.invoke()
                             val hwBuffer = screenshotResult.hardwareBuffer
                             val colorSpace = screenshotResult.colorSpace
                             val rawBitmap = try {
@@ -413,11 +458,13 @@ open class PaymentAccessibilityService : AccessibilityService() {
                         }
 
                         override fun onFailure(errorCode: Int) {
+                            onFrameCaptured?.invoke()
                             onSaved(null)
                         }
                     }
                 )
             } catch (_: Throwable) {
+                onFrameCaptured?.invoke()
                 onSaved(null)
             }
         }
@@ -616,12 +663,15 @@ open class PaymentAccessibilityService : AccessibilityService() {
         RecognitionBanner.dismissImmediate()
 
         mainHandler.postDelayed({
+            if (isDeviceCurrentlyLocked()) {
+                return@postDelayed
+            }
             if (!isManualTrigger) {
                 if (!CaptureAppWhitelistManager.isAccessibilityAllowed(pkg, this@PaymentAccessibilityService)) {
                     return@postDelayed
                 }
                 val focusedNow = resolveFocusedApplicationPackage()?.takeIf { it !in systemOverlayPackages }
-                if (focusedNow != null && focusedNow != pkg) {
+                if (focusedNow == null || focusedNow != pkg) {
                     return@postDelayed
                 }
                 val currentAct = expectedActivity.ifBlank {
