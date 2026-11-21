@@ -26,3 +26,9 @@
     public static final ** INSTANCE;
     kotlinx.serialization.descriptors.SerialDescriptor getDescriptor();
 }
+
+-keepclassmembers @kotlinx.serialization.Serializable enum com.moji.ai.** {
+    <fields>;
+    public static **[] values();
+    public static ** valueOf(java.lang.String);
+}

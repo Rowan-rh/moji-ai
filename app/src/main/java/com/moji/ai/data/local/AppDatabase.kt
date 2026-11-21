@@ -187,6 +187,26 @@ interface TransactionDao {
     )
     suspend fun updateScreenshotSha256ById(id: Long, sha256: String)
 
+    @Query(
+        """
+        UPDATE transactions
+        SET screenshotPath = :screenshotPath,
+            screenshotSha256 = :screenshotSha256,
+            updatedAtMillis = :nowMillis,
+            syncRevision = syncRevision + 1,
+            syncDirty = 1
+        WHERE id = :id
+          AND deletedAtMillis IS NULL
+          AND screenshotPath = ''
+        """
+    )
+    suspend fun attachScreenshotIfBlank(
+        id: Long,
+        screenshotPath: String,
+        screenshotSha256: String,
+        nowMillis: Long
+    ): Int
+
     @Delete
     suspend fun deleteTransaction(tx: TransactionEntity)
 
@@ -272,7 +292,7 @@ interface RecurringRuleDao {
         CaptureEvidenceEntity::class,
         RecurringRuleEntity::class
     ],
-    version = 5,
+    version = 6,
     exportSchema = false
 )
 @TypeConverters(LedgerTypeConverters::class)
@@ -356,6 +376,14 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN sourceWalletDeltaCents INTEGER")
+                db.execSQL("ALTER TABLE transactions ADD COLUMN targetWalletDeltaCents INTEGER")
+                db.execSQL("ALTER TABLE transactions ADD COLUMN reimbursedAtMillis INTEGER")
+            }
+        }
+
         private const val SEED_PREFS_NAME = "moji_db_seed_prefs"
         private const val KEY_INITIAL_WALLETS_SEEDED = "initial_wallets_seeded_v1"
 
@@ -392,7 +420,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "moji_ai.db"
                 )
-                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
+                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
                     .addCallback(object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
                             super.onCreate(db)
@@ -419,158 +447,68 @@ abstract class AppDatabase : RoomDatabase() {
         }
 
         fun defaultWallets(): List<WalletEntity> = listOf(
-            // 信用账户 (7) — 1:1 同步 iCost
             WalletEntity(
                 id = 1,
-                name = "招商银行信用卡 3354",
-                type = WalletType.CREDIT,
-                subTypeLabel = "信用卡",
-                brandCode = "CMB",
-                currency = "CNY",
-                balanceCents = 397_277L,
-                creditLimitCents = 1_000_000L,
-                cardLast4 = "3354",
-                billingDay = 5,
-                repaymentDay = 15,
-                aliases = "招商银行信用卡,招商银行信用卡 3354,掌上生活,招行信用卡,3354",
-                colorHex = 0xFFE65540
-            ),
-            WalletEntity(
-                id = 2,
-                name = "e 招贷",
-                type = WalletType.CREDIT,
-                subTypeLabel = "信用卡",
-                brandCode = "CMB",
-                currency = "CNY",
-                balanceCents = 169_750L,
-                creditLimitCents = 20_000_000L,
-                cardLast4 = null,
-                billingDay = null,
-                repaymentDay = null,
-                aliases = "e 招贷,e招贷,招商银行e招贷",
-                colorHex = 0xFFE65540
-            ),
-            WalletEntity(
-                id = 3,
-                name = "花呗",
-                type = WalletType.CREDIT,
-                subTypeLabel = "蚂蚁花呗",
-                brandCode = "HUABEI",
+                name = "现金",
+                type = WalletType.CASH_OTHER,
+                subTypeLabel = "现金",
+                brandCode = "CASH",
                 currency = "CNY",
                 balanceCents = 0L,
-                creditLimitCents = 3_410_000L,
                 cardLast4 = null,
-                billingDay = 1,
-                repaymentDay = 15,
-                aliases = "花呗,蚂蚁花呗,信用购",
-                colorHex = 0xFF1677FF
-            ),
-            WalletEntity(
-                id = 4,
-                name = "京东白条",
-                type = WalletType.CREDIT,
-                subTypeLabel = "京东白条",
-                brandCode = "JD",
-                currency = "CNY",
-                balanceCents = 296_164L,
-                creditLimitCents = 1_000_000L,
-                cardLast4 = null,
-                billingDay = 10,
-                repaymentDay = 25,
-                aliases = "京东白条,白条,京东金融",
-                colorHex = 0xFFE65540
-            ),
-            WalletEntity(
-                id = 5,
-                name = "微粒贷",
-                type = WalletType.CREDIT,
-                subTypeLabel = "微粒贷",
-                brandCode = "WEILIDAI",
-                currency = "CNY",
-                balanceCents = 0L,
-                creditLimitCents = 2_900_000L,
-                cardLast4 = null,
-                billingDay = 8,
-                repaymentDay = 18,
-                aliases = "微粒贷,微众银行",
-                colorHex = 0xFF1677FF
-            ),
-            WalletEntity(
-                id = 6,
-                name = "度小满",
-                type = WalletType.CREDIT,
-                subTypeLabel = "其他信用",
-                brandCode = "OTHER_CREDIT",
-                currency = "CNY",
-                balanceCents = 0L,
-                creditLimitCents = 13_000_000L,
-                cardLast4 = null,
-                billingDay = 10,
-                repaymentDay = 25,
-                aliases = "度小满,有钱花,度小满金融",
+                aliases = "现金,Cash",
                 colorHex = 0xFFF5B400
             ),
             WalletEntity(
-                id = 7,
-                name = "借呗",
-                type = WalletType.CREDIT,
-                subTypeLabel = "借呗",
-                brandCode = "JIEBEI",
-                currency = "CNY",
-                balanceCents = 0L,
-                creditLimitCents = 2_000_000L,
-                cardLast4 = null,
-                billingDay = 6,
-                repaymentDay = 16,
-                aliases = "借呗,蚂蚁借呗",
-                colorHex = 0xFF1677FF
-            ),
-            // 资金账户 (4) — 1:1 同步 iCost
-            WalletEntity(
-                id = 8,
-                name = "账户余额",
-                type = WalletType.DIGITAL_WALLET,
-                subTypeLabel = "支付宝",
-                brandCode = "ALIPAY",
-                currency = "CNY",
-                balanceCents = 382_858L,
-                aliases = "支付宝,余额宝,账户余额,Alipay",
-                colorHex = 0xFF1677FF
-            ),
-            WalletEntity(
-                id = 9,
+                id = 2,
                 name = "微信零钱",
                 type = WalletType.DIGITAL_WALLET,
                 subTypeLabel = "微信钱包",
                 brandCode = "WECHAT",
                 currency = "CNY",
-                balanceCents = 7_154L,
+                balanceCents = 0L,
+                cardLast4 = null,
                 aliases = "微信,微信支付,零钱,零钱通,微信零钱,WeChat",
                 colorHex = 0xFF07C160
             ),
             WalletEntity(
-                id = 10,
-                name = "招商银行储蓄卡 5021",
-                type = WalletType.DEBIT_BANK,
-                subTypeLabel = "储蓄卡",
-                brandCode = "CMB",
+                id = 3,
+                name = "支付宝",
+                type = WalletType.DIGITAL_WALLET,
+                subTypeLabel = "支付宝",
+                brandCode = "ALIPAY",
                 currency = "CNY",
-                balanceCents = 14_030L,
-                cardLast4 = "5021",
-                aliases = "招商银行储蓄卡,招商银行储蓄卡 5021,招行储蓄卡,一卡通,5021",
-                colorHex = 0xFFE65540
+                balanceCents = 0L,
+                cardLast4 = null,
+                aliases = "支付宝,余额宝,账户余额,Alipay",
+                colorHex = 0xFF1677FF
             ),
             WalletEntity(
-                id = 11,
-                name = "民生银行储蓄卡3625",
+                id = 4,
+                name = "储蓄卡",
                 type = WalletType.DEBIT_BANK,
                 subTypeLabel = "储蓄卡",
-                brandCode = "CMBC",
+                brandCode = "DEBIT_CARD",
                 currency = "CNY",
-                balanceCents = 296_080L,
-                cardLast4 = "3625",
-                aliases = "民生银行储蓄卡,民生银行储蓄卡3625,民生银行,民生储蓄卡,3625",
+                balanceCents = 0L,
+                cardLast4 = null,
+                aliases = "储蓄卡,借记卡,银行卡",
                 colorHex = 0xFF22B573
+            ),
+            WalletEntity(
+                id = 5,
+                name = "信用卡",
+                type = WalletType.CREDIT,
+                subTypeLabel = "信用卡",
+                brandCode = "CREDIT_CARD",
+                currency = "CNY",
+                balanceCents = 0L,
+                creditLimitCents = null,
+                cardLast4 = null,
+                billingDay = null,
+                repaymentDay = null,
+                aliases = "信用卡,贷记卡",
+                colorHex = 0xFFE65540
             )
         )
     }

@@ -12,6 +12,7 @@ import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.SilentBookkeepingNotifier
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,6 +31,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 import kotlin.math.abs
@@ -184,7 +186,9 @@ class CapturePipelineCoordinator(
                             abs(other.timestamp - tx.timestamp) <= 15_000L
                     }
                     if (hasPostDiscountSibling) {
-                        repository.undoAndDeleteTransaction(tx.id)
+                        if (repository.undoAndDeleteTransaction(tx.id)) {
+                            notifier.cancelForTransaction(tx.id)
+                        }
                         continue
                     }
                 }
@@ -200,7 +204,9 @@ class CapturePipelineCoordinator(
                         evidences.any { it.captureSource == "AI_NOTIFICATION" || it.captureSource == "AI_SANDBOX" }
                     val refMillis = tx.capturedAtMillis.takeIf { it > 0L } ?: tx.timestamp
                     if (!isNotificationEvidence && !AiAccountingEngine.hasExplicitOccurredTime(fullSourceText, refMillis)) {
-                        repository.undoAndDeleteTransaction(tx.id)
+                        if (repository.undoAndDeleteTransaction(tx.id)) {
+                            notifier.cancelForTransaction(tx.id)
+                        }
                         continue
                     }
                 }
@@ -256,12 +262,22 @@ class CapturePipelineCoordinator(
                 val isPddTx = fullSourceText.contains("com.xunmeng.pinduoduo") || tx.orderKey.matches(Regex("""^\d{6}-\d{8,}$"""))
                 val isJdTx = fullSourceText.contains("com.jingdong.app.mall") || tx.category == "购物-京东"
                 if (tx.paymentMethodRaw.contains("发票类型")) {
+                    val fallbackCleanedPm = tx.paymentMethodRaw
+                        .replace(Regex("""\s*发票类型.*"""), "")
+                        .trim()
                     val cleanBankPm = evidences.map { it.paymentMethodRaw }
                         .firstOrNull { it.isNotBlank() && !it.contains("发票类型") && it !in setOf("微信支付", "支付宝", "在线支付") }
-                        ?: "招商银行信用卡(3354)"
-                    val cleanedNote = tx.note.replace("微信支付 发票类型 不开发票", cleanBankPm)
-                    val bankWalletId = wallets.firstOrNull { !it.cardLast4.isNullOrBlank() && cleanBankPm.contains(it.cardLast4) }?.id
-                        ?: tx.sourceWalletId
+                        ?: fallbackCleanedPm
+                    val cleanedNote = tx.note
+                        .replace("微信支付 发票类型 不开发票", cleanBankPm)
+                        .replace(Regex("""\s*发票类型\s*不开发票"""), "")
+                        .trim()
+                    val bankWalletId = if (cleanBankPm.isNotBlank()) {
+                        wallets.firstOrNull { !it.cardLast4.isNullOrBlank() && cleanBankPm.contains(it.cardLast4) }?.id
+                            ?: tx.sourceWalletId
+                    } else {
+                        tx.sourceWalletId
+                    }
                     repository.updateExistingTransaction(
                         tx.copy(
                             paymentMethodRaw = cleanBankPm,
@@ -402,7 +418,9 @@ class CapturePipelineCoordinator(
                         for (ev in secEvidences) {
                             repository.insertCaptureEvidence(ev.copy(transactionId = primary.id))
                         }
-                        repository.undoAndDeleteTransaction(secondary.id)
+                        if (repository.undoAndDeleteTransaction(secondary.id)) {
+                            notifier.cancelForTransaction(secondary.id)
+                        }
                         deletedIds.add(secondary.id)
                     }
                 }
@@ -947,15 +965,18 @@ class CapturePipelineCoordinator(
             var effectiveMatchedScreenshotPath = matched.screenshotPath
             var effectiveMatchedScreenshotSha = matched.screenshotSha256
             if (matched.screenshotPath.isBlank() && screenshotPath.isNotBlank()) {
-                effectiveMatchedScreenshotPath = screenshotPath
-                effectiveMatchedScreenshotSha = screenshotSha256
-                repository.updateExistingTransaction(
-                    matched.copy(
-                        screenshotPath = screenshotPath,
-                        screenshotSha256 = screenshotSha256,
-                        updatedAtMillis = capturedAtMillis
-                    )
+                val attached = repository.attachBillScreenshotIfNeeded(
+                    transactionId = matched.id,
+                    screenshotPath = screenshotPath,
+                    screenshotSha256 = screenshotSha256,
+                    nowMillis = capturedAtMillis
                 )
+                if (attached) {
+                    effectiveMatchedScreenshotPath = screenshotPath
+                    effectiveMatchedScreenshotSha = screenshotSha256
+                } else {
+                    BillScreenshotStorage.deleteIfExists(screenshotPath)
+                }
             } else if (screenshotPath.isNotBlank() && screenshotPath != matched.screenshotPath) {
                 BillScreenshotStorage.deleteIfExists(screenshotPath)
             }
@@ -1060,50 +1081,73 @@ class CapturePipelineCoordinator(
             transactionId = savedTx.id
         )
 
-        // 1. 立即弹出一加 120Hz 流体云实况胶囊（带「撤销」按钮）
+        // 1. 若需补抓无障碍账单原图：在弹出流体云胶囊前先做前台宿主复核并抓取 SurfaceFlinger 屏幕帧，
+        //    彻底杜绝切回聊天/桌面后误截隐私页面，且避免将本应用流体云胶囊截入账单原图；WebP 编码写盘继续留在后台异步完成。
+        val pendingSavedScreenshot: CompletableDeferred<SavedScreenshotInfo?>? = if (
+            screenshotPath.isBlank() &&
+            (captureSource == "AI_ACCESSIBILITY" || captureSource == "AI_MERGED")
+        ) {
+            val service = PaymentAccessibilityService.instance
+            if (service != null) {
+                val frameCapturedDeferred = CompletableDeferred<Unit>()
+                val savedDeferred = CompletableDeferred<SavedScreenshotInfo?>()
+                val abortBeforeBanner = AtomicBoolean(false)
+                service.captureBillEvidenceScreenshot(
+                    expectedPackage = packageName,
+                    abortSignal = abortBeforeBanner,
+                    onFrameCaptured = { frameCapturedDeferred.complete(Unit) },
+                    onSaved = { info -> savedDeferred.complete(info) }
+                )
+                val frameDone = withTimeoutOrNull(320L) {
+                    frameCapturedDeferred.await()
+                }
+                if (frameDone == null) {
+                    abortBeforeBanner.set(true)
+                }
+                savedDeferred
+            } else {
+                null
+            }
+        } else {
+            null
+        }
+
+        // 2. 弹出一加 120Hz 流体云实况胶囊（带「撤销」按钮）
         showOverlayBannerForRecordedTransaction(savedTx, walletName, isFused = false)
 
-        // 2. 错峰 680ms（待流体云展开动画完全结束后）在后台静默写入通知栏，并在需要时后台补存账单截图，绝不抢占动画期间的 GPU/SurfaceFlinger
+        // 3. 错峰 680ms（待流体云展开动画完全结束后）在后台静默写入通知栏，并走单列条件原子更新绑定原图，杜绝整行覆写冲掉并发分类/融合更新
         scope.launch {
             delay(680L)
             val updatedWallets = repository.getAllWallets()
             notifier.sendSilentRecordedNotification(savedTx, updatedWallets)
-            if (screenshotPath.isBlank() &&
-                (captureSource == "AI_ACCESSIBILITY" || captureSource == "AI_MERGED")
-            ) {
-                // 等 5 秒流体云胶囊缩回后再静默截屏归档（或立即截屏归档）
-                val accessibilityCaptured = captureCurrentBillScreenSilently()
+            if (pendingSavedScreenshot != null) {
+                val accessibilityCaptured = withTimeoutOrNull(1_800L) {
+                    pendingSavedScreenshot.await()
+                }
                 if (accessibilityCaptured != null) {
-                    val latestTx = repository.getTransactionById(savedTx.id)
-                    if (latestTx == null) {
-                        // 若用户在截屏期间已点击流体云「撤销」删除了该笔账单，立即清理刚生成的截图文件并退出
-                        BillScreenshotStorage.deleteIfExists(accessibilityCaptured.absolutePath)
-                        return@launch
-                    }
-                    val withShot = latestTx.copy(
+                    val attached = repository.attachBillScreenshotIfNeeded(
+                        transactionId = savedTx.id,
                         screenshotPath = accessibilityCaptured.absolutePath,
                         screenshotSha256 = accessibilityCaptured.sha256,
-                        updatedAtMillis = System.currentTimeMillis()
+                        nowMillis = System.currentTimeMillis()
                     )
-                    repository.updateExistingTransaction(withShot)
-                    recentRecordedTransactions[amountTypeFingerprint] = withShot
+                    if (!attached) {
+                        BillScreenshotStorage.deleteIfExists(accessibilityCaptured.absolutePath)
+                    } else {
+                        pipelineMutex.withLock {
+                            val cached = recentRecordedTransactions[amountTypeFingerprint]
+                            if (cached != null && cached.id == savedTx.id && cached.screenshotPath.isBlank()) {
+                                recentRecordedTransactions[amountTypeFingerprint] = cached.copy(
+                                    screenshotPath = accessibilityCaptured.absolutePath,
+                                    screenshotSha256 = accessibilityCaptured.sha256
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
         return savedTx
-    }
-
-    private suspend fun captureCurrentBillScreenSilently(): SavedScreenshotInfo? {
-        val service = PaymentAccessibilityService.instance ?: return null
-        return withTimeoutOrNull(1_200L) {
-            suspendCancellableCoroutine { cont ->
-                service.captureBillEvidenceScreenshot { info ->
-                    if (cont.isActive) {
-                        cont.resume(info)
-                    }
-                }
-            }
-        }
     }
 
     private suspend fun saveEvidenceRecord(
@@ -1686,7 +1730,7 @@ class CapturePipelineCoordinator(
                     captureSource = "AI_ACCESSIBILITY",
                     rawText = "账单详情 | 山东高速 | -7.51 | 支付时间 | 2026-11-05 16:34:54 | 交易单号 | 4200002975202611059216731849",
                     outcome = CaptureEventOutcome.RECORDED,
-                    detailSummary = "[支出] 交通-高速过路 · 山东高速 (7.51 CNY · 1件) -> 招商银行信用卡(3354) · Key:731849"
+                    detailSummary = "[支出] 交通-高速过路 · 山东高速 (7.51 CNY · 1件) -> 储蓄卡 · Key:731849"
                 )
             )
         }

@@ -103,7 +103,10 @@ data class BackupTransactionDto(
     val rawCapturedText: String = "",
     val aiConfidence: Float = 1.0f,
     val updatedAtMillis: Long = 0L,
-    val syncRevision: Long = 1L
+    val syncRevision: Long = 1L,
+    val sourceWalletDeltaCents: Long? = null,
+    val targetWalletDeltaCents: Long? = null,
+    val reimbursedAtMillis: Long? = null
 )
 
 @Serializable
@@ -290,7 +293,10 @@ object BackupAndCsvTransferEngine {
                     rawCapturedText = tx.rawCapturedText,
                     aiConfidence = tx.aiConfidence,
                     updatedAtMillis = tx.updatedAtMillis,
-                    syncRevision = tx.syncRevision
+                    syncRevision = tx.syncRevision,
+                    sourceWalletDeltaCents = tx.sourceWalletDeltaCents,
+                    targetWalletDeltaCents = tx.targetWalletDeltaCents,
+                    reimbursedAtMillis = tx.reimbursedAtMillis
                 )
             },
             recurringRules = recurringRules.map { r ->
@@ -398,7 +404,10 @@ object BackupAndCsvTransferEngine {
                 rawCapturedText = dto.rawCapturedText,
                 aiConfidence = dto.aiConfidence,
                 updatedAtMillis = if (dto.updatedAtMillis > 0L) dto.updatedAtMillis else dto.timestamp,
-                syncRevision = dto.syncRevision
+                syncRevision = dto.syncRevision,
+                sourceWalletDeltaCents = dto.sourceWalletDeltaCents,
+                targetWalletDeltaCents = dto.targetWalletDeltaCents,
+                reimbursedAtMillis = dto.reimbursedAtMillis
             )
         }
         return Triple(wallets, transactions, snapshot)
@@ -551,20 +560,26 @@ object BackupAndCsvTransferEngine {
                     rawIncludeNetWorth !in setOf("否", "false", "False", "0", "不计入")
                 }
 
-                val synthesized = inferWalletEntityFromName(
+                val preSynthesized = inferWalletEntityFromName(
                     rawAccountName = rawName,
                     currency = currencyStr,
                     explicitTypeHint = typeHint,
-                    balanceCents = (kotlin.math.abs(balYuan) * 100.0).roundToLong(),
+                    balanceCents = 0L,
                     creditLimitCents = limitYuan?.takeIf { it > 0.0 }?.let { (it * 100.0).roundToLong() },
                     explicitLast4 = last4Explicit,
                     repaymentDay = repayDay,
                     includeInNetWorth = includeInNetWorth
                 )
+                val signedLiabilityCents = (balYuan * 100.0).roundToLong()
+                val unsignedAssetCents = (kotlin.math.abs(balYuan) * 100.0).roundToLong()
+                val synthesized = preSynthesized.copy(
+                    balanceCents = if (preSynthesized.type.isLiability) signedLiabilityCents else unsignedAssetCents
+                )
                 val existingMatch = findStrictExistingWallet(synthesized.name, synthesized.cardLast4, wallets)
                 if (existingMatch != null) {
+                    val matchedBalCents = if (existingMatch.type.isLiability) signedLiabilityCents else unsignedAssetCents
                     updatedWalletsById[existingMatch.id] = existingMatch.copy(
-                        balanceCents = synthesized.balanceCents,
+                        balanceCents = matchedBalCents,
                         creditLimitCents = synthesized.creditLimitCents ?: existingMatch.creditLimitCents,
                         cardLast4 = synthesized.cardLast4 ?: existingMatch.cardLast4,
                         repaymentDay = synthesized.repaymentDay ?: existingMatch.repaymentDay,
@@ -683,7 +698,9 @@ object BackupAndCsvTransferEngine {
             val finalLedger = ledgerCell.ifBlank { defaultLedger }
             discoveredLedgerSet.add(finalLedger)
 
-            val combinedContext = "$merchant $itemDesc $rawCategory $payMethod $statusStr"
+            val rawTxTypeCol = (colMap["交易类型"] ?: "").trim()
+            // AC-3 ①：交易描述上下文与支付方式列 payMethod 严格解耦，防止零钱通/余额宝日常消费被误判为内部转账
+            val descContext = "$rawTxTypeCol $merchant $itemDesc $rawCategory $statusStr"
 
             val txType = if (isICostNative) {
                 when {
@@ -696,14 +713,37 @@ object BackupAndCsvTransferEngine {
                     else -> TransactionType.EXPENSE
                 }
             } else {
+                val isExplicitRefund = direction.contains("退款") || descContext.contains("退款")
+                val isExplicitRepayment = direction.contains("还款") ||
+                    descContext.contains("信用卡还款") ||
+                    descContext.contains("还信用卡") ||
+                    descContext.contains("还花呗") ||
+                    descContext.contains("花呗还款") ||
+                    descContext.contains("白条还款") ||
+                    descContext.contains("还白条")
+                val isExplicitTransferOrWithdraw = direction.contains("转账") ||
+                    descContext.contains("零钱提现") ||
+                    descContext.contains("提现") ||
+                    descContext.contains("转入零钱通") ||
+                    descContext.contains("转入余额宝") ||
+                    descContext.contains("零钱通转出") ||
+                    descContext.contains("余额宝转出") ||
+                    descContext.contains("充值到零钱") ||
+                    descContext.contains("零钱充值")
+
                 when {
-                    direction.contains("退款") || combinedContext.contains("退款") -> TransactionType.REFUND_OFFSET
-                    direction.contains("还款") || combinedContext.contains("信用卡还款") || combinedContext.contains("还花呗") -> TransactionType.REPAYMENT
-                    direction.contains("转账") || (direction.contains("不计收支") && targetMethod.isNotBlank()) ||
-                        direction.contains("中性") || combinedContext.contains("提现") ||
-                        combinedContext.contains("转入余额宝") || combinedContext.contains("零钱通") -> TransactionType.TRANSFER
+                    isExplicitRefund -> TransactionType.REFUND_OFFSET
+                    isExplicitRepayment -> TransactionType.REPAYMENT
                     direction.contains("借入") -> TransactionType.LOAN_IN
                     direction.contains("借出") -> TransactionType.LOAN_OUT
+                    isExplicitTransferOrWithdraw -> TransactionType.TRANSFER
+                    direction.contains("不计收支") || direction.contains("中性") -> {
+                        if (descContext.contains("收益") || descContext.contains("利息")) {
+                            TransactionType.INCOME
+                        } else {
+                            TransactionType.TRANSFER
+                        }
+                    }
                     direction.contains("收入") -> TransactionType.INCOME
                     else -> TransactionType.EXPENSE
                 }
@@ -744,8 +784,8 @@ object BackupAndCsvTransferEngine {
                 merchant.isBlank() &&
                 payMethod.isNotBlank()
 
-            val memoryHit = merchantMemoryManager?.matchMemory(combinedContext, merchant)
-            val (weightedCat, _) = WeightedCategoryClassifier.classifyExpense(combinedContext, merchant)
+            val memoryHit = merchantMemoryManager?.matchMemory(descContext, merchant)
+            val (weightedCat, _) = WeightedCategoryClassifier.classifyExpense(descContext, merchant)
             val finalCategory = when {
                 isICostBalanceAdjustment -> "平账"
                 txType == TransactionType.REFUND_OFFSET -> if (isICostNative && rawCategory.isNotBlank()) rawCategory else "退款入账"
@@ -753,15 +793,18 @@ object BackupAndCsvTransferEngine {
                 txType == TransactionType.TRANSFER -> "内部转账"
                 memoryHit != null -> memoryHit.category
                 rawCategory.isNotBlank() && rawCategory !in listOf("商户消费", "其他", "其他支出", "日常消费") -> rawCategory
-                txType == TransactionType.INCOME -> if (combinedContext.contains("工资")) "工资" else (rawCategory.ifBlank { "其他收入" })
+                txType == TransactionType.INCOME -> if (descContext.contains("工资")) "工资" else (rawCategory.ifBlank { "其他收入" })
                 else -> weightedCat
             }
 
             val parsedTimestamp = parseFlexibleTimestamp(timeStr)
             val txIdx = results.size
 
-            // 记录原始账户归一化 Key，以便入库新建账户后绑定真实 walletId
-            if (txType == TransactionType.INCOME || txType == TransactionType.REFUND_OFFSET) {
+            // 记录原始账户归一化 Key，以便入库新建账户后绑定真实 walletId（AC-3 ③：LOAN_IN 收款账户绑定至 targetWalletId）
+            if (txType == TransactionType.INCOME ||
+                txType == TransactionType.REFUND_OFFSET ||
+                txType == TransactionType.LOAN_IN
+            ) {
                 val targetKey = strictTargetMatch?.second ?: strictSourceMatch?.second
                 if (targetKey != null) targetWalletNameByIndex[txIdx] = targetKey
             } else {
@@ -794,13 +837,16 @@ object BackupAndCsvTransferEngine {
                     category = finalCategory,
                     merchant = finalMerchant,
                     note = finalNote,
-                    sourceWalletId = if (txType == TransactionType.INCOME || txType == TransactionType.REFUND_OFFSET) {
+                    sourceWalletId = if (txType == TransactionType.INCOME ||
+                        txType == TransactionType.REFUND_OFFSET ||
+                        txType == TransactionType.LOAN_IN
+                    ) {
                         null
                     } else {
                         resolvedSourceWallet?.id?.takeIf { it > 0L } ?: memoryHit?.preferredWalletId
                     },
                     targetWalletId = when (txType) {
-                        TransactionType.INCOME, TransactionType.REFUND_OFFSET ->
+                        TransactionType.INCOME, TransactionType.REFUND_OFFSET, TransactionType.LOAN_IN ->
                             (resolvedTargetWallet ?: resolvedSourceWallet)?.id?.takeIf { it > 0L }
                         TransactionType.TRANSFER, TransactionType.REPAYMENT ->
                             resolvedTargetWallet?.id?.takeIf { it > 0L }
