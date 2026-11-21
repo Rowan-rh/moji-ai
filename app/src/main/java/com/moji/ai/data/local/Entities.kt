@@ -122,7 +122,13 @@ data class TransactionEntity(
     val updatedAtMillis: Long = System.currentTimeMillis(),
     val deletedAtMillis: Long? = null,
     val syncRevision: Long = 1L,
-    val syncDirty: Boolean = true
+    val syncDirty: Boolean = true,
+    /** 源钱包历史实际扣减变动快照（源钱包原币种分值，null 表示 v5 及更早旧数据） */
+    val sourceWalletDeltaCents: Long? = null,
+    /** 目标/收款/报销入账钱包历史实际变动快照（目标钱包原币种分值，null 表示 v5 及更早旧数据） */
+    val targetWalletDeltaCents: Long? = null,
+    /** 已报销核销入账时间戳（毫秒，用于净资产趋势将报销回流归入真实核销时间桶） */
+    val reimbursedAtMillis: Long? = null
 ) {
     fun isSystemBalanceAnchor(): Boolean =
         captureSource == "BALANCE_ANCHOR" || category == CategoryCatalog.SYSTEM_BALANCE_ANCHOR_CATEGORY
