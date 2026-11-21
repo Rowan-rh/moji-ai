@@ -59,6 +59,7 @@ import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.UserProfileConfig
 import com.moji.ai.data.model.UserProfileManager
 import com.moji.ai.notification.DailyReminderScheduler
+import com.moji.ai.notification.SilentBookkeepingNotifier
 import com.moji.ai.service.BillScreenshotStorage
 import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.update.AppUpdateConfig
@@ -706,7 +707,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val onUndo: (() -> Unit)? = if (undoTransactionId != null || extraUndo != null) {
             {
                 viewModelScope.launch {
-                    undoTransactionId?.let { repository.undoAndDeleteTransaction(it) }
+                    undoTransactionId?.let { id ->
+                        if (repository.undoAndDeleteTransaction(id)) {
+                            SilentBookkeepingNotifier.cancelNotificationForTransaction(app, id)
+                        }
+                    }
                     extraUndo?.invoke()
                 }
             }
@@ -1187,10 +1192,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             if (tx.id == 0L) {
                 repository.recordTransaction(tx)
+                app.merchantMemoryManager.learnFromTransaction(tx)
             } else {
-                repository.updateExistingTransaction(tx)
+                val updated = repository.updateExistingTransaction(tx)
+                if (updated) {
+                    app.merchantMemoryManager.learnFromTransaction(tx)
+                } else {
+                    postMessage("编辑失败：已部分退款账单折算金额不能小于已退金额，且不可切换收支类型")
+                }
             }
-            app.merchantMemoryManager.learnFromTransaction(tx)
         }
     }
 
@@ -1565,6 +1575,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteTransaction(txId: Long) {
         viewModelScope.launch {
             if (repository.undoAndDeleteTransaction(txId)) {
+                SilentBookkeepingNotifier.cancelNotificationForTransaction(app, txId)
                 postMessage("账单已删除，余额已回滚")
             }
         }
@@ -1579,9 +1590,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val cents = (refundYuan * 100.0).roundToLong()
             if (cents > 0L) {
+                val origExpense = repository.getTransactionById(expenseId)
                 val refundId = repository.refundExpense(expenseId, cents, receiveWalletId, note)
                 if (refundId != null) {
-                    postMessage("已退款 ¥${String.format("%.2f", cents / 100.0)}")
+                    val sym = CurrencyCode.fromCode(origExpense?.currency ?: "CNY").symbol
+                    postMessage("已退款 $sym${String.format(Locale.US, "%.2f", cents / 100.0)}")
                 }
             }
         }

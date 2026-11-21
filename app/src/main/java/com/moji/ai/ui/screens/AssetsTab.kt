@@ -2815,12 +2815,12 @@ private fun ICostWalletDetailFullScreen(
                                             } else {
                                                 val sign = when (tx.type) {
                                                     TransactionType.EXPENSE, TransactionType.LOAN_OUT -> "-"
-                                                    TransactionType.INCOME -> "+"
+                                                    TransactionType.INCOME, TransactionType.LOAN_IN -> "+"
                                                     else -> ""
                                                 }
                                                 val col = when (tx.type) {
                                                     TransactionType.EXPENSE, TransactionType.LOAN_OUT -> ICostCoralRed
-                                                    TransactionType.INCOME -> ICostGreenIncome
+                                                    TransactionType.INCOME, TransactionType.LOAN_IN -> ICostGreenIncome
                                                     TransactionType.REFUND_OFFSET -> ICostAmberGold
                                                     else -> ICostTextPrimary
                                                 }

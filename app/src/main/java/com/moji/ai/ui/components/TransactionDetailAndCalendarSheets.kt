@@ -77,6 +77,7 @@ import androidx.compose.ui.unit.sp
 import com.moji.ai.ai.AgentBillTriageEngine
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
@@ -238,7 +239,10 @@ fun TransactionDetailSheet(
     }.value
 
     val remainingRefundableCents = (tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)
-    val canRefund = tx.type == TransactionType.EXPENSE && remainingRefundableCents > 0L
+    val remainingRefundableOrigCents = remember(tx) {
+        LedgerRepository.computeRemainingRefundableOrigCents(tx)
+    }
+    val canRefund = tx.type == TransactionType.EXPENSE && remainingRefundableOrigCents > 0L
     val canReimburse = tx.type == TransactionType.EXPENSE && tx.reimbursable && !tx.reimbursed
     var showRefundDialog by remember { mutableStateOf(false) }
     var showSplitDialog by remember { mutableStateOf(false) }
@@ -854,21 +858,27 @@ fun TransactionDetailSheet(
     }
 
     if (showRefundDialog) {
-        var refundYuanStr by remember {
+        val refundCurrency = CurrencyCode.fromCode(tx.currency)
+        var refundYuanStr by remember(tx.id, remainingRefundableOrigCents) {
             mutableStateOf(
-                String.format(Locale.US, "%.2f", remainingRefundableCents / 100.0)
+                String.format(Locale.US, "%.2f", remainingRefundableOrigCents / 100.0)
             )
         }
-        var refundNote by remember { mutableStateOf("") }
+        var refundNote by remember(tx.id) { mutableStateOf("") }
         val refundCents = parseYuanToCents(refundYuanStr)
         val refundError = when {
             refundYuanStr.isBlank() -> "请输入退款金额"
             refundCents == null -> "请输入正确的金额"
             refundCents <= 0L -> "退款金额需大于 0"
-            refundCents > remainingRefundableCents -> "最多可退 ${formatMoneyCents(remainingRefundableCents)}"
+            refundCents > remainingRefundableOrigCents -> "最多可退 ${formatMoneyCents(remainingRefundableOrigCents, tx.currency)}"
             else -> null
         }
         val refundWalletName = formatWalletDisplayName(sourceWallet, "原账户")
+        val amountFieldLabel = if (refundCurrency == CurrencyCode.CNY) {
+            "退款金额（元）"
+        } else {
+            "退款金额（${refundCurrency.name} ${refundCurrency.symbol}）"
+        }
 
         AlertDialog(
             onDismissRequest = { showRefundDialog = false },
@@ -877,14 +887,14 @@ fun TransactionDetailSheet(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        "退款将退回到「$refundWalletName」，并从这笔账单的支出中扣除。最多可退 ${formatMoneyCents(remainingRefundableCents)}。",
+                        "退款将退回到「$refundWalletName」，并从这笔账单的支出中扣除。最多可退 ${formatMoneyCents(remainingRefundableOrigCents, tx.currency)}。",
                         fontSize = 13.sp,
                         color = ICostTextSecondary
                     )
                     ICostFormField(
                         value = refundYuanStr,
                         onValueChange = { refundYuanStr = sanitizeMoneyInput(it) },
-                        label = "退款金额（元）",
+                        label = amountFieldLabel,
                         placeholder = "0.00",
                         isError = refundError != null && refundYuanStr.isNotBlank(),
                         supportingText = refundError,
@@ -1651,6 +1661,7 @@ fun MonthlyCalendarSheet(
                                     )
                                 }
                                 if (isRefunded) {
+                                    val netOrigExpCents = LedgerRepository.computeRemainingRefundableOrigCents(item)
                                     Text(
                                         text = "$sym${AppearanceConfigManager.formatDisplayAmount(item.amountCents / 100.0)}",
                                         fontSize = 12.sp,
@@ -1659,7 +1670,7 @@ fun MonthlyCalendarSheet(
                                     )
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text(
-                                        text = "-¥${AppearanceConfigManager.formatDisplayAmount(netExp / 100.0)}",
+                                        text = "-$sym${AppearanceConfigManager.formatDisplayAmount(netOrigExpCents / 100.0)}",
                                         fontSize = 16.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = ICostExpenseColor
