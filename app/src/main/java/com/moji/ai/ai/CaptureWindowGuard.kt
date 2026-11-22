@@ -53,7 +53,8 @@ data class WindowEvaluationResult(
     val containerRole: WindowContainerRole,
     val sanitizedText: String = "",
     val occurredAtMillis: Long? = null,
-    val hasExplicitOrderNo: Boolean = false
+    val hasExplicitOrderNo: Boolean = false,
+    val isLiveCashierFallback: Boolean = false
 )
 
 /**
@@ -225,10 +226,28 @@ object CaptureWindowGuard {
     )
 
     private val UNIVERSAL_DEDICATED_PAY_OR_DETAIL_MARKERS = listOf(
-        "mspcontaineractivity", "mspunirenderactivity",
+        "mspcontaineractivity", "mspunirenderactivity", "flybirdwindowactivity",
+        "com.alipay.sdk.app.", "com.alipay.android.msp.", "com.alipay.android.app.flybird.",
+        "h5payactivity", "h5payresultactivity", "alipayresultactivity",
+        "uppayplugin", "uppayactivity", ".uppay.", "uppay.payactivity",
         "orderdetailactivity", "orderdetail",
         "billdetail", "tradedetail", "transdetail", "transactiondetail",
         "paysuccess", "payresult", "paymentresult", "cashierresult", "remittancedetail"
+    )
+
+    private val EMBEDDED_ALIPAY_CASHIER_MARKERS = listOf(
+        "com.alipay.sdk.app.",
+        "com.alipay.android.msp.",
+        "com.alipay.android.app.flybird.",
+        ".h5payactivity",
+        ".h5payresultactivity",
+        ".alipayresultactivity"
+    )
+
+    // 聊天/相册/内置看图器界面特征词（防止点开群聊转发的旧付款成功截图或长按识图页误触发入账）
+    private val IMAGE_VIEWER_TEXT_MARKERS = listOf(
+        "保存图片", "保存到相册", "查看原图", "发送给朋友",
+        "转发给朋友", "转发截图", "识别图中二维码", "提取图中文字"
     )
 
     // 付款前收银台或未付款结算页特征词
@@ -303,8 +322,35 @@ object CaptureWindowGuard {
         "退款成功", "已全额退款", "代付成功"
     )
 
+    // 专用收银台无时间戳即时完成页严格状态词（排除纯电商“拼单成功”等非收银台状态）
+    private val STRICT_CASHIER_COMPLETION_KEYWORDS = listOf(
+        "支付成功", "付款成功", "扣款成功", "转账成功", "收款成功",
+        "对方已收钱", "已收钱", "已存入零钱", "还款成功", "代付成功"
+    )
+
     private val COMPLETION_CONTROL_KEYWORDS = listOf(
         "完成", "返回商家", "返回商户", "返回应用", "完成付款", "回首页", "查看订单", "继续购物"
+    )
+
+    private val STRICT_CASHIER_CONTROL_REGEX = Regex(
+        """返回商家|返回商户|返回应用|完成付款|(?<!已|未)完成|(?<!已|自动|交易|订单)关闭"""
+    )
+
+    private val CASHIER_DISCOUNT_LINE_MARKERS = listOf(
+        "优惠", "立减", "减免", "抵扣", "补贴", "红包", "代金券", "满减",
+        "领券", "可领", "积分", "返现", "攒钱", "体验金"
+    )
+
+    private val CASHIER_EXPLICIT_PAID_LABELS = listOf(
+        "实付款", "实付金额", "合计实付", "实扣金额", "实扣", "实际支付", "支付金额", "转账金额", "收款金额", "实付"
+    )
+
+    private val LIVE_CASHIER_DISCOUNT_AMOUNT_REGEX = Regex(
+        """(?:百次立减|随机立减|笔笔立减|支付立减|银行卡立减|碰一下立减|官方立减|多多支付立减|抖音支付优惠|支付优惠|首单立减|立减优惠|满减优惠|优惠金额|已优惠|共减|优惠券|红包抵扣|代金券|优惠|立减|抵扣|减免)\s*(?:[:：,，\s]|\|)*\s*(?:[-−]\s*)?(?:¥|￥)?\s*(?:[-−]\s*)?([0-9]{1,5}(?:\.[0-9]{1,2})?)\s*元?"""
+    )
+
+    private val LIVE_CASHIER_INLINE_AMOUNT_REGEX = Regex(
+        """([-+−])?\s*(?:¥|￥)\s*([0-9]{1,7}(?:\.[0-9]{1,2})?)|([-+−])?\s*([0-9]{1,7}(?:\.[0-9]{1,2})?)\s*元|(?:^|\||\s)([-+−])\s*([0-9]{1,7}\.\d{1,2})(?=\s|\||$)"""
     )
 
     private val PROMO_AMOUNT_LINE_MARKERS = listOf(
@@ -368,6 +414,35 @@ object CaptureWindowGuard {
             }
         }
         return false
+    }
+
+    /**
+     * 判断包名是否属于默认关闭全包无障碍自动扫屏的内置电商/外卖宿主应用
+     */
+    fun isBuiltinEcommerceHostPackage(packageName: String): Boolean =
+        packageName.trim() in ECOMMERCE_PACKAGES
+
+    /**
+     * 判断已通过 PackageManager 核实的真实 Activity 是否属于宿主内嵌的支付宝专用收银台 SDK 容器
+     * （仅放行 `com.alipay.sdk.app.*` / `H5PayActivity` / `H5PayResultActivity` / `AlipayResultActivity` 等专用收银台 Activity，
+     * 严禁放行拼多多 `NewPageActivity` 或普通 WebView 容器）
+     */
+    fun isEmbeddedAlipayCashierActivity(verifiedActivity: String): Boolean {
+        val actLower = verifiedActivity.trim().lowercase(Locale.ROOT)
+        if (actLower.isEmpty()) return false
+        if (SENSITIVE_ACTIVITY_MARKERS.any { actLower.contains(it) }) return false
+        if (UNIVERSAL_MEDIA_OR_SCAN_CLASSES.any { actLower.contains(it) } ||
+            UNIVERSAL_NON_BILL_CLASSES.any { actLower.contains(it) }
+        ) {
+            return false
+        }
+        return EMBEDDED_ALIPAY_CASHIER_MARKERS.any { marker ->
+            if (marker.startsWith(".")) {
+                actLower.endsWith(marker)
+            } else {
+                actLower.startsWith(marker) || actLower.contains(marker)
+            }
+        }
     }
 
     /**
@@ -578,9 +653,16 @@ object CaptureWindowGuard {
             referenceMillis = input.nowMillis
         )
         val hasExplicitOrderNo = hasExplicitOrderNumber(sanitized)
+        val actLower = input.verifiedActivity.trim().lowercase(Locale.ROOT)
+        val isMediaOrScanActivity = actLower.isNotEmpty() &&
+            UNIVERSAL_MEDIA_OR_SCAN_CLASSES.any { actLower.contains(it) }
+        val hasImageViewerMarkers = IMAGE_VIEWER_TEXT_MARKERS.any { sanitized.contains(it) }
 
-        // 手动磁贴强制识屏：跳过自动容器白名单/骨架黑名单门禁，但仍拦截待付款收银台、已关闭订单、多笔账单列表与会话流
+        // 手动磁贴强制识屏：跳过自动容器白名单/骨架黑名单门禁，但仍拦截相册看图预览、待付款收银台、已关闭订单、多笔账单列表与会话流
         if (input.forceManual) {
+            if (isMediaOrScanActivity || hasImageViewerMarkers) {
+                return WindowEvaluationResult(false, WindowRejectReason.NON_TRANSACTION_CONTAINER, containerRole, sanitized)
+            }
             if (CASHIER_OR_UNPAID_BLACKLIST.any { sanitized.contains(it) }) {
                 return WindowEvaluationResult(false, WindowRejectReason.CASHIER_OR_UNPAID_STATE, containerRole, sanitized)
             }
@@ -609,7 +691,13 @@ object CaptureWindowGuard {
                 return WindowEvaluationResult(false, WindowRejectReason.MISSING_BILL_AMOUNT, containerRole, sanitized)
             }
             if (occurredAtMillis == null) {
-                return WindowEvaluationResult(false, WindowRejectReason.MISSING_OCCURRED_TIME, containerRole, sanitized)
+                return evaluateLiveCashierCompletionFallback(
+                    input = input,
+                    containerRole = containerRole,
+                    sanitized = sanitized,
+                    footerStripped = footerStripped,
+                    hasExplicitOrderNo = hasExplicitOrderNo
+                )
             }
             return WindowEvaluationResult(
                 accepted = true,
@@ -621,8 +709,8 @@ object CaptureWindowGuard {
             )
         }
 
-        // 第 2 关：非交易 Activity 容器与用户屏蔽页面指纹门禁
-        if (containerRole == WindowContainerRole.NON_TRANSACTION_BLOCKED) {
+        // 第 2 关：非交易 Activity 容器、看图预览界面特征词与用户屏蔽页面指纹门禁
+        if (containerRole == WindowContainerRole.NON_TRANSACTION_BLOCKED || hasImageViewerMarkers) {
             return WindowEvaluationResult(false, WindowRejectReason.NON_TRANSACTION_CONTAINER, containerRole, sanitized)
         }
         if (input.isSignatureBlocked) {
@@ -709,12 +797,18 @@ object CaptureWindowGuard {
             return WindowEvaluationResult(false, WindowRejectReason.PRODUCT_BROWSING_PAGE, containerRole, sanitized)
         }
 
-        // 第 6 关：有效金额 + 带标签/四位年份时间校验 + 无单号完成页时效校验
+        // 第 6 关：有效金额 + 带标签/四位年份时间校验（专用收银台即时完成页支持 occurredAtMillis == null 窄口闭环回退）+ 无单号完成页时效校验
         if (!hasAmount) {
             return WindowEvaluationResult(false, WindowRejectReason.MISSING_BILL_AMOUNT, containerRole, sanitized)
         }
         if (occurredAtMillis == null) {
-            return WindowEvaluationResult(false, WindowRejectReason.MISSING_OCCURRED_TIME, containerRole, sanitized)
+            return evaluateLiveCashierCompletionFallback(
+                input = input,
+                containerRole = containerRole,
+                sanitized = sanitized,
+                footerStripped = footerStripped,
+                hasExplicitOrderNo = hasExplicitOrderNo
+            )
         }
 
         val hasLabeledBillTime = LABELED_BILL_TIME_KEYWORDS.any { sanitized.contains(it) } ||
@@ -840,12 +934,18 @@ object CaptureWindowGuard {
             .replace("加购物车", " ")
 
         if (SENSITIVE_TEXT_MARKERS.any { cleaned.contains(it) }) return false
+        if (IMAGE_VIEWER_TEXT_MARKERS.any { cleaned.contains(it) }) return false
         if (CASHIER_OR_UNPAID_BLACKLIST.any { cleaned.contains(it) }) return false
         if (CLOSED_FAILED_OR_REFUND_PENDING_BLACKLIST.any { cleaned.contains(it) }) return false
         if (MULTI_BILL_OR_FEED_BLACKLIST.any { cleaned.contains(it) }) return false
 
         val actLower = verifiedActivity.lowercase(Locale.ROOT)
         if (actLower.contains("orderdetailactivity")) {
+            return true
+        }
+        if (role == WindowContainerRole.DEDICATED_PAYMENT_OR_BILL &&
+            STRICT_CASHIER_COMPLETION_KEYWORDS.any { cleaned.contains(it) }
+        ) {
             return true
         }
 
@@ -899,6 +999,184 @@ object CaptureWindowGuard {
         // 若屏幕无唯一主金额（只有促销红包金额，或同时散落 ≥ 2 个不同的无标签金额且含促销词），按花有谱 Fail-Closed 原则拒绝猜测
         if (nonPromoAmounts.isEmpty() && promoAmounts.isNotEmpty()) return true
         if (nonPromoAmounts.size >= 2 && promoAmounts.isNotEmpty()) return true
+        return false
+    }
+
+    /**
+     * 评估无显式发生时间（`occurredAtMillis == null`）的收银台即时完成页闭环：
+     * 1. `OP-1 = 方案A`：自动模式下强制锁定 `containerRole == WindowContainerRole.DEDICATED_PAYMENT_OR_BILL`（绝不放开 `SHARED_OR_WEB_STRICT` 如拼多多 `NewPageActivity`、微信 `WebViewUI`）；`OP-3 = 是`：手动磁贴模式（`forceManual = true`）同样支持无时间戳完成页入账；
+     * 2. 必须包含明确的支付完成词（排除纯电商 `拼单成功`），且不含 `账单详情/交易详情/订单详情/全部账单` 及历史履约词；
+     * 3. 必须包含收银台完成控制词（`完成`/`返回商家`/`返回商户`/`返回应用`/`完成付款`/`关闭`）；
+     * 4. 剔除优惠/红包/立减干扰后有效实付金额必须唯一（或具备明确实付标签，或满足 `实付 + 立减 == 划线原价` 守恒）。
+     */
+    private fun evaluateLiveCashierCompletionFallback(
+        input: WindowInspectionInput,
+        containerRole: WindowContainerRole,
+        sanitized: String,
+        footerStripped: String,
+        hasExplicitOrderNo: Boolean
+    ): WindowEvaluationResult {
+        if (!input.forceManual && containerRole != WindowContainerRole.DEDICATED_PAYMENT_OR_BILL) {
+            return WindowEvaluationResult(false, WindowRejectReason.MISSING_OCCURRED_TIME, containerRole, sanitized)
+        }
+
+        if (input.forceManual) {
+            val hasWalletActionPair = sanitized.contains("充值") && sanitized.contains("提现")
+            val balanceSignalCount = BALANCE_ASSET_MARKERS.count { sanitized.contains(it) }
+            if (hasWalletActionPair || balanceSignalCount >= 2) {
+                return WindowEvaluationResult(false, WindowRejectReason.BALANCE_OR_ASSET_PAGE, containerRole, sanitized)
+            }
+            val hasAddToCartRaw = footerStripped.contains("加入购物车") || footerStripped.contains("加购物车")
+            val hasProductBuyBar = hasAddToCartRaw && (
+                sanitized.contains("立即购买") ||
+                    sanitized.contains("领券") ||
+                    (sanitized.contains("客服") && sanitized.contains("店铺"))
+                )
+            if (PRODUCT_BROWSING_STRONG_MARKERS.any { sanitized.contains(it) } || hasProductBuyBar) {
+                return WindowEvaluationResult(false, WindowRejectReason.PRODUCT_BROWSING_PAGE, containerRole, sanitized)
+            }
+            if (!hasExplicitOrderNo && (
+                    sanitized.contains("交易详情〉") ||
+                        sanitized.contains("账单详情>") ||
+                        sanitized.contains("查看账单详情") ||
+                        sanitized.contains("查看详情") ||
+                        sanitized.contains("查看详情>") ||
+                        sanitized.contains("订单支付成功通知")
+                    )
+            ) {
+                return WindowEvaluationResult(false, WindowRejectReason.CHAT_FEED_OR_BILL_LIST, containerRole, sanitized)
+            }
+        }
+
+        val hasDisallowedDetailOrListHeader = sanitized.contains("账单详情") ||
+            sanitized.contains("交易详情") ||
+            sanitized.contains("订单详情") ||
+            sanitized.contains("转账详情") ||
+            sanitized.contains("收款详情") ||
+            sanitized.contains("全部账单")
+        val hasOrderHistoryIndicators = sanitized.contains("已签收") ||
+            sanitized.contains("物流轨迹") ||
+            sanitized.contains("申请退款") ||
+            sanitized.contains("申请售后") ||
+            sanitized.contains("退换/售后") ||
+            sanitized.contains("售后详情") ||
+            sanitized.contains("钱款去向") ||
+            sanitized.contains("商品快照")
+        val hasStrictCompletionWord = STRICT_CASHIER_COMPLETION_KEYWORDS.any { sanitized.contains(it) }
+
+        if (!hasStrictCompletionWord || hasDisallowedDetailOrListHeader || hasOrderHistoryIndicators) {
+            return WindowEvaluationResult(false, WindowRejectReason.MISSING_OCCURRED_TIME, containerRole, sanitized)
+        }
+
+        if (!STRICT_CASHIER_CONTROL_REGEX.containsMatchIn(sanitized)) {
+            return WindowEvaluationResult(
+                accepted = false,
+                reason = if (input.forceManual) WindowRejectReason.INSUFFICIENT_BILL_STRUCTURE else WindowRejectReason.MISSING_OCCURRED_TIME,
+                containerRole = containerRole,
+                sanitizedText = sanitized
+            )
+        }
+
+        if (!hasUniqueValidCashierPaidAmount(sanitized)) {
+            return WindowEvaluationResult(
+                accepted = false,
+                reason = WindowRejectReason.AMBIGUOUS_PROMO_AMOUNTS,
+                containerRole = containerRole,
+                sanitizedText = sanitized
+            )
+        }
+
+        return WindowEvaluationResult(
+            accepted = true,
+            reason = WindowRejectReason.ACCEPTED,
+            containerRole = containerRole,
+            sanitizedText = sanitized,
+            occurredAtMillis = input.nowMillis,
+            hasExplicitOrderNo = hasExplicitOrderNo,
+            isLiveCashierFallback = true
+        )
+    }
+
+    private fun hasUniqueValidCashierPaidAmount(sanitizedText: String): Boolean {
+        val mergedSplitAmounts = sanitizedText
+            .replace(Regex("""(¥|￥)\s*\|?\s*(\d{1,7})\s*\|\s*(\.\d{1,2})"""), "$1$2$3")
+            .replace(Regex("""(¥|￥)\s*\|?\s*(\d{1,7})\.\s*\|\s*(\d{1,2})"""), "$1$2.$3")
+            .replace(Regex("""(\d{1,7})\s*\|\s*(\.\d{1,2})(?=\s|\||$)"""), "$1$2")
+            .replace(Regex("""(\d{1,7})\.\s*\|\s*(\d{1,2})(?=\s|\||$)"""), "$1.$2")
+            .replace(Regex("""(¥|￥)\s*\|\s*(\d{1,7}(?:\.\d{1,2})?)"""), "$1$2")
+
+        val hasExplicitPaidLabel = CASHIER_EXPLICIT_PAID_LABELS.any { mergedSplitAmounts.contains(it) }
+        if (hasExplicitPaidLabel) {
+            return true
+        }
+
+        val explicitDiscountCents = LIVE_CASHIER_DISCOUNT_AMOUNT_REGEX.findAll(mergedSplitAmounts)
+            .mapNotNull { m -> m.groupValues[1].toDoubleOrNull()?.let { Math.round(it * 100.0) } }
+            .filter { it > 0L }
+            .distinct()
+            .sum()
+
+        val rawSegments = mergedSplitAmounts.split('|', '\n').map { it.trim() }.filter { it.isNotEmpty() }
+        val nonPromoCents = LinkedHashSet<Long>()
+        val promoOrDiscountCents = LinkedHashSet<Long>()
+
+        for (segIdx in rawSegments.indices) {
+            val seg = rawSegments[segIdx]
+            val prevSeg = rawSegments.getOrNull(segIdx - 1).orEmpty()
+            val segHasDiscountWord = CASHIER_DISCOUNT_LINE_MARKERS.any { seg.contains(it) }
+            val prevIsPureDiscountLabel = prevSeg.isNotEmpty() &&
+                !LIVE_CASHIER_INLINE_AMOUNT_REGEX.containsMatchIn(prevSeg) &&
+                CASHIER_DISCOUNT_LINE_MARKERS.any { prevSeg.contains(it) }
+
+            if (rawSegments.size == 1 && segHasDiscountWord) {
+                // 单行空格分隔的 OCR 串：先把显式优惠/立减/红包金额剥离，再提取剩余实付/原价候选
+                val strippedPromoLine = seg
+                    .replace(LIVE_CASHIER_DISCOUNT_AMOUNT_REGEX, " ")
+                    .replace(
+                        Regex("""(?:领券|优惠券|代金券|立减金|红包|补贴|返现|体验金)[^\s，。,；;]{0,10}?(?:¥|￥)?\s*[0-9]{1,6}(?:\.[0-9]{1,2})?\s*元?"""),
+                        " "
+                    )
+                    .replace(
+                        Regex("""(?:¥|￥)?\s*[0-9]{1,6}(?:\.[0-9]{1,2})?\s*元?\s*(?:优惠券|代金券|立减金|红包|补贴|返现|体验金)"""),
+                        " "
+                    )
+                for (m in LIVE_CASHIER_INLINE_AMOUNT_REGEX.findAll(strippedPromoLine)) {
+                    val sign = m.groupValues[1].ifEmpty { m.groupValues[3] }.ifEmpty { m.groupValues[5] }
+                    val numStr = m.groupValues[2].ifEmpty { m.groupValues[4] }.ifEmpty { m.groupValues[6] }
+                    val cents = numStr.toDoubleOrNull()?.let { Math.round(it * 100.0) } ?: continue
+                    if (cents <= 0L) continue
+                    if (sign == "-" || sign == "−") {
+                        // 单独带负号而前文已有无符号金额时多为立减项，但也可能是 `-9.90` 主扣款额
+                        nonPromoCents.add(cents)
+                    } else {
+                        nonPromoCents.add(cents)
+                    }
+                }
+                continue
+            }
+
+            for (m in LIVE_CASHIER_INLINE_AMOUNT_REGEX.findAll(seg)) {
+                val numStr = m.groupValues[2].ifEmpty { m.groupValues[4] }.ifEmpty { m.groupValues[6] }
+                val cents = numStr.toDoubleOrNull()?.let { Math.round(it * 100.0) } ?: continue
+                if (cents <= 0L) continue
+                if (segHasDiscountWord || prevIsPureDiscountLabel) {
+                    promoOrDiscountCents.add(cents)
+                } else {
+                    nonPromoCents.add(cents)
+                }
+            }
+        }
+
+        if (nonPromoCents.size == 1) {
+            return true
+        }
+        if (nonPromoCents.size == 2 && explicitDiscountCents > 0L) {
+            val sorted = nonPromoCents.sorted()
+            // 收银台「实付金额 + 划线原价 + 立减优惠」严格守恒（如 ¥0.08 + 立减¥0.02 == 原价¥0.10）
+            if (sorted[0] + explicitDiscountCents == sorted[1]) {
+                return true
+            }
+        }
         return false
     }
 

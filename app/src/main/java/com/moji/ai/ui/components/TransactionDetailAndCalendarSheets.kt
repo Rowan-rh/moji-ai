@@ -607,6 +607,7 @@ fun TransactionDetailSheet(
                 }
                 if (tx.captureSource != "MANUAL") {
                     val sourceLabel = when (tx.captureSource) {
+                        "AI_LIVE_CASHIER" -> "收银台即时识屏"
                         "AI_ACCESSIBILITY" -> "无障碍页面自动识账"
                         "AI_OCR" -> "端侧截屏 OCR 识账"
                         "AI_NOTIFICATION" -> "通知栏静默识账"
