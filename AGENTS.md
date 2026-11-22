@@ -11,9 +11,9 @@
 - **包名与应用**：`com.moji.ai`（默记 MoJi，正式版 / Debug 包）；`com.moji.ai.qa`（默记 QA，真机独立测试包）
 - **核心架构**：Kotlin + Jetpack Compose（Material 3，对标 iCost 卡片与交互体系）+ Room 本地持久化
 - **核心模块**：
-  - `app/src/main/java/com/moji/ai/data/`：枚举定义、分类目录、Room 实体/DAO、`LedgerRepository` 账务引擎（含真实余额锚点平账、单笔账单多分类拆分 `splitExpenseTransaction`、批量报销结算 `batchSettleReimbursements`）、`BackupAndCsvTransferEngine` 全量备份恢复/CSV 导入导出引擎、`MoJiCloudSyncClient` 专属密钥自建云同步客户端与 `WebDavSyncClient` 自托管云同步客户端
+  - `app/src/main/java/com/moji/ai/data/`：枚举定义、分类目录、Room 实体/DAO、`LedgerRepository` 账务引擎（含真实余额锚点平账、单笔账单多分类拆分 `splitExpenseTransaction`、批量报销结算 `batchSettleReimbursements`、工资条单事务三路自动分账与联动回滚 `recordPayslipTransactions`）、`BackupAndCsvTransferEngine` 全量备份恢复/CSV 导入导出引擎、`MoJiCloudSyncClient` 专属密钥自建云同步客户端与 `WebDavSyncClient` 自托管云同步客户端
   - `server/`：基于 Rust (`Axum + Tokio + Rusqlite WAL`) 的自托管云存储后端 `moji-cloud-server`（支持 Sync Key 免登录绑定、`prod`/`qa` 环境隔离、预留 `user_identities` 多登录扩展、快照历史归档与 WebP 账单原图内容寻址同步）
-  - `app/src/main/java/com/moji/ai/ai/`：OpenAI 兼容接口 / Gemini 官方接口双协议识账引擎、`CaptureAppWhitelistManager` 应用粒度双通道（通知栏 + 无障碍）识账白名单管理器、`CaptureWindowGuard` 五重窗口级防误触与视图骨架指纹守卫、`MerchantMemoryManager` 商户记忆自学习、`WeightedCategoryClassifier` 带排除词权重离线分类器与 `SmartRuleEngine` 可视化条件规则引擎（`When -> Then`）
+  - `app/src/main/java/com/moji/ai/ai/`：OpenAI 兼容接口 / Gemini 官方接口双协议识账引擎、`PayslipImportEngine` 工资条截图离线 OCR（同行聚类）与 CSV/TSV 薪资表多编码解析引擎、`CaptureAppWhitelistManager` 应用粒度双通道（通知栏 + 无障碍）识账白名单管理器、`CaptureWindowGuard` 五重窗口级防误触与视图骨架指纹守卫、`MerchantMemoryManager` 商户记忆自学习、`WeightedCategoryClassifier` 带排除词权重离线分类器与 `SmartRuleEngine` 可视化条件规则引擎（`When -> Then`）
   - `app/src/main/java/com/moji/ai/service/`：通知监听、无障碍节点采集、`CapturePipelineCoordinator`（1.1s 滑动窗口聚合 + 30s 跨通道事后证据融合 + 采集可观测日志）与 `RomKeepAliveGuideHelper` 国产 ROM 保活及 Android 13+ 受限设置诊断向导
   - `app/src/main/java/com/moji/ai/notification/`：静默入账系统通知与一键原子撤销/切换常用分类/标为待报销广播 (`TransactionActionReceiver`)
   - `app/src/main/java/com/moji/ai/widget/`：原生 `AppWidgetProvider + RemoteViews` iCost 风格预算与今日支出桌面小组件 (`MoJiLedgerWidgetProvider`、`LedgerWidgetSnapshotCalculator`，支持 `4×2` / `2×2` 自适应、`+` 一键拉起记账面板、隐私脱敏与 QA 隔离)
