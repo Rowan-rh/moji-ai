@@ -801,12 +801,12 @@ fun ICostAssetsScreen(
                 ) {
                     Column(modifier = Modifier.fillMaxWidth()) {
                         CollapsibleGroupHeaderInsideCard(
-                            title = "专项保障账户（医保/公积金）",
+                            title = "专项保障账户",
                             count = dedicatedFundWallets.size,
                             rightSummary = if (dedicatedFundWallets.isNotEmpty()) {
                                 "专项余额 ${formatMoneyCents(dedicatedGroupBalanceCnyCents, "CNY", hideAmounts)}"
                             } else {
-                                "默认不计净资产"
+                                "医保 / 公积金 · 不计净资产"
                             },
                             expanded = dedicatedExpanded,
                             onToggle = { dedicatedExpanded = !dedicatedExpanded }
@@ -3568,7 +3568,7 @@ private fun DedicatedPayslipImportEntryRow(
         Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
             Text(
-                text = "导入工资条（OCR 截图 / 薪资表）",
+                text = "导入工资条 · 三路分账",
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 color = ICostTextPrimary,
@@ -3577,7 +3577,7 @@ private fun DedicatedPayslipImportEntryRow(
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
-                text = "实发工资 · 医保个账 · 双边公积金 自动三路分账",
+                text = "OCR 截图 / CSV 薪资表自动入账",
                 fontSize = 11.sp,
                 color = ICostTextSecondary,
                 maxLines = 1,
@@ -3589,10 +3589,12 @@ private fun DedicatedPayslipImportEntryRow(
             color = ICostGreenIncome.copy(alpha = 0.12f)
         ) {
             Text(
-                text = "导入工资条",
+                text = "去导入",
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 color = ICostGreenIncome,
+                maxLines = 1,
+                softWrap = false,
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
             )
         }

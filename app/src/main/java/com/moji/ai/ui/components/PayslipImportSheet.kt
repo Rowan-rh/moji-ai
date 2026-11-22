@@ -389,7 +389,7 @@ fun PayslipImportSheet(
         ) {
             ICostSheetHeader(
                 title = "工资条导入 · 三路分账",
-                subtitle = "离线 OCR 截图 / CSV·TSV 薪资表 · 单事务原子入账",
+                subtitle = "截图离线 OCR · CSV/TSV 三路分账",
                 onClose = requestDismiss
             )
 
@@ -404,20 +404,21 @@ fun PayslipImportSheet(
                 item {
                     ICostFormCard {
                         Text(
-                            text = "1. 选择工资条来源（100% 支持端侧离线解析）",
+                            text = "1. 选择工资条来源（支持端侧离线解析）",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
                             color = ICostTextPrimary
                         )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Button(
                                 onClick = { imagePickerLauncher.launch("image/*") },
                                 enabled = !isWorking,
                                 colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
                                 shape = RoundedCornerShape(14.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(44.dp)
@@ -425,10 +426,17 @@ fun PayslipImportSheet(
                                 Icon(
                                     imageVector = Icons.Default.PhotoLibrary,
                                     contentDescription = null,
-                                    modifier = Modifier.size(16.dp)
+                                    modifier = Modifier.size(15.dp)
                                 )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("选工资条截图", fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Text(
+                                    text = "选工资条截图",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                             OutlinedButton(
                                 onClick = {
@@ -445,11 +453,19 @@ fun PayslipImportSheet(
                                 },
                                 enabled = !isWorking,
                                 shape = RoundedCornerShape(14.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                                 modifier = Modifier
                                     .weight(1f)
                                     .height(44.dp)
                             ) {
-                                Text("选 CSV / TSV 表", fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                Text(
+                                    text = "选 CSV/TSV 表",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
                         }
 
@@ -655,28 +671,39 @@ fun PayslipImportSheet(
                 // 2. 薪资与五险一金拆解微调卡
                 item {
                     ICostFormCard {
-                        Row(
+                        FlowRow(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
                             Text(
-                                text = "2. 核对与微调工资条明细（单位：元）",
+                                text = "2. 核对薪资明细（单位：元）",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = ICostTextPrimary
+                                color = ICostTextPrimary,
+                                modifier = Modifier.padding(end = 8.dp)
                             )
                             detectedFormatLabel?.let { fmt ->
+                                val shortBadge = when {
+                                    fmt.contains("CSV", ignoreCase = true) -> "CSV 薪资表"
+                                    fmt.contains("TSV", ignoreCase = true) -> "TSV 薪资表"
+                                    fmt.contains("OCR", ignoreCase = true) -> "截图离线 OCR"
+                                    fmt.contains("AI", ignoreCase = true) -> "AI 结构化校准"
+                                    fmt.contains("双栏") || fmt.contains("纵向") -> "双栏工资条"
+                                    else -> fmt
+                                }
                                 Surface(
                                     shape = RoundedCornerShape(8.dp),
                                     color = ICostBlueAccent.copy(alpha = 0.12f)
                                 ) {
                                     Text(
-                                        text = fmt,
+                                        text = shortBadge,
                                         fontSize = 10.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = ICostBlueAccent,
-                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                        maxLines = 1,
+                                        softWrap = false,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
                                     )
                                 }
                             }
@@ -757,7 +784,7 @@ fun PayslipImportSheet(
                             ICostFormField(
                                 value = taxYuanText,
                                 onValueChange = { taxYuanText = sanitizeMoneyInput(it) },
-                                label = "个人所得税扣款",
+                                label = "个人所得税",
                                 placeholder = "0.00",
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 modifier = Modifier.weight(1f)
@@ -765,7 +792,7 @@ fun PayslipImportSheet(
                             ICostFormField(
                                 value = pensionUnempYuanText,
                                 onValueChange = { pensionUnempYuanText = sanitizeMoneyInput(it) },
-                                label = "养老+失业(个人扣款)",
+                                label = "养老+失业(个人)",
                                 placeholder = "0.00",
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 modifier = Modifier.weight(1f)
@@ -786,7 +813,7 @@ fun PayslipImportSheet(
                                         medicalDepositYuanText = sanitized
                                     }
                                 },
-                                label = "医疗保险(个人扣款)",
+                                label = "医疗保险(个人)",
                                 placeholder = "0.00",
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 modifier = Modifier.weight(1f)
@@ -799,7 +826,7 @@ fun PayslipImportSheet(
                                         enableMedicalBranch = true
                                     }
                                 },
-                                label = "医保个账划入额",
+                                label = "医保个账划入",
                                 placeholder = "0.00",
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 modifier = Modifier.weight(1f)
@@ -818,7 +845,7 @@ fun PayslipImportSheet(
                                         enableProvidentBranch = true
                                     }
                                 },
-                                label = "住房公积金(个人)",
+                                label = "公积金(个人)",
                                 placeholder = "0.00",
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 modifier = Modifier.weight(1f)
@@ -831,7 +858,7 @@ fun PayslipImportSheet(
                                         enableProvidentBranch = true
                                     }
                                 },
-                                label = "住房公积金(单位配缴)",
+                                label = "公积金(单位配缴)",
                                 placeholder = "0.00",
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                                 modifier = Modifier.weight(1f)
@@ -851,22 +878,25 @@ fun PayslipImportSheet(
                 // 3. 三路自动分账路由预览与专项账户自动建档卡
                 item {
                     ICostFormCard {
-                        Row(
+                        FlowRow(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
                             Text(
-                                text = "3. 三路自动分账路由预览",
+                                text = "3. 三路自动分账路由",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = ICostTextPrimary
+                                color = ICostTextPrimary,
+                                modifier = Modifier.padding(end = 8.dp)
                             )
                             Text(
                                 text = "净资产预计 +${formatMoneyCents(netWorthDeltaCents)}",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = ICostIncomeColor
+                                color = ICostIncomeColor,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
 
@@ -1011,16 +1041,24 @@ fun PayslipImportSheet(
                         enabled = activeBranchCount > 0 && !paydayFormatError && !isWorking,
                         colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
                         shape = RoundedCornerShape(16.dp),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(50.dp)
                     ) {
                         val btnText = if (activeBranchCount > 0) {
-                            "确认一步入账（共 $activeBranchCount 路流水 · 支持一键撤销）"
+                            "确认入账（共 $activeBranchCount 路 · 可一键撤销）"
                         } else {
-                            "请先导入工资条或填写至少一路入账金额"
+                            "请先导入工资条或填写金额"
                         }
-                        Text(btnText, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            text = btnText,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                 }
             }
@@ -1134,13 +1172,16 @@ private fun PayslipBranchCard(
                             fontWeight = FontWeight.Bold,
                             color = if (enabled) ICostTextPrimary else ICostTextMuted,
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
                         )
                         Text(
                             text = "+${formatMoneyCents(amountCents)}",
                             fontFamily = ICDinFontFamily,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            softWrap = false,
                             color = if (enabled && amountCents > 0L) accentColor else ICostTextMuted
                         )
                     }
