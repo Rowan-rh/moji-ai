@@ -391,4 +391,189 @@ class CaptureWindowGuardTest {
         )
         assertTrue(jdOrderDetail.accepted)
     }
+
+    @Test
+    fun evaluateBillWindow_acceptsDedicatedLiveCashierCompletionWithoutTimestamp_andEmbeddedAlipaySdk() {
+        // 1. 拼多多跳转支付宝独立收银台（MspUniRenderActivity / FlyBirdWindowActivity）无时间戳完成页 + 划线原价与百次立减
+        val alipayCashierDiscount = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.eg.android.AlipayGphone",
+                verifiedActivity = "com.alipay.android.msp.ui.views.MspUniRenderActivity",
+                rawPageText = "支付成功 | ¥0.08 | 羊驼老头 | ¥0.10 | 百次立减 | -¥0.02 | 付款方式 | 招商银行储蓄卡(8473) | 点击给商家对账 | 完成",
+                nowMillis = nowMillis
+            )
+        )
+        assertTrue(alipayCashierDiscount.accepted)
+        assertTrue(alipayCashierDiscount.isLiveCashierFallback)
+        assertEquals(WindowContainerRole.DEDICATED_PAYMENT_OR_BILL, alipayCashierDiscount.containerRole)
+        assertEquals(nowMillis, alipayCashierDiscount.occurredAtMillis)
+
+        // 2. 支付宝 FlyBirdWindowActivity 完成页（含“返回商家”按钮）
+        val flyBirdCashier = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.eg.android.AlipayGphone",
+                verifiedActivity = "com.alipay.android.app.flybird.ui.window.FlyBirdWindowActivity",
+                rawPageText = "支付成功 | 拼多多平台商户 | ¥19.90 | 付款方式 | 花呗 | 返回商家",
+                nowMillis = nowMillis
+            )
+        )
+        assertTrue(flyBirdCashier.accepted)
+        assertTrue(flyBirdCashier.isLiveCashierFallback)
+        assertEquals(nowMillis, flyBirdCashier.occurredAtMillis)
+
+        // 3. 拼多多/淘宝宿主内嵌支付宝 SDK 收银台（com.alipay.sdk.app.H5PayResultActivity）
+        assertTrue(CaptureWindowGuard.isBuiltinEcommerceHostPackage("com.xunmeng.pinduoduo"))
+        assertTrue(CaptureWindowGuard.isEmbeddedAlipayCashierActivity("com.alipay.sdk.app.H5PayResultActivity"))
+        assertFalse(CaptureWindowGuard.isEmbeddedAlipayCashierActivity("com.xunmeng.pinduoduo.activity.NewPageActivity"))
+
+        val embeddedAlipaySdk = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.xunmeng.pinduoduo",
+                verifiedActivity = "com.alipay.sdk.app.H5PayResultActivity",
+                rawPageText = "付款成功 | 拼多多平台商户 | ¥15.80 | 付款方式 | 余额宝 | 完成",
+                nowMillis = nowMillis
+            )
+        )
+        assertTrue(embeddedAlipaySdk.accepted)
+        assertTrue(embeddedAlipaySdk.isLiveCashierFallback)
+        assertEquals(WindowContainerRole.DEDICATED_PAYMENT_OR_BILL, embeddedAlipaySdk.containerRole)
+
+        // 4. 微信专用支付结果容器与云闪付 UPPayActivity 无时间戳完成页
+        val wechatDedicatedCashier = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.tencent.mm",
+                verifiedActivity = "com.tencent.mm.plugin.wallet_core.ui.WalletOrderInfoNewUI",
+                rawPageText = "支付成功 | 美团平台商户 | ￥26.50 | 支付方式 | 零钱 | 返回商家",
+                nowMillis = nowMillis
+            )
+        )
+        assertTrue(wechatDedicatedCashier.accepted)
+        assertTrue(wechatDedicatedCashier.isLiveCashierFallback)
+
+        val unionPayCashier = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.unionpay",
+                verifiedActivity = "com.unionpay.uppay.PayActivity",
+                rawPageText = "支付成功 | 京东商城 | ¥88.00 | 付款方式 | 工商银行储蓄卡(6612) | 完成",
+                nowMillis = nowMillis
+            )
+        )
+        assertTrue(unionPayCashier.accepted)
+        assertTrue(unionPayCashier.isLiveCashierFallback)
+
+        // 5. OP-3=是：控制中心手动磁贴（forceManual = true）亦支持无时间戳实时付款完成页
+        val manualTileLiveCompletion = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.xunmeng.pinduoduo",
+                verifiedActivity = "com.xunmeng.pinduoduo.activity.NewPageActivity",
+                rawPageText = "支付成功 | 拼多多平台商户 | 实付 ¥12.60 | 完成",
+                forceManual = true,
+                nowMillis = nowMillis
+            )
+        )
+        assertTrue(manualTileLiveCompletion.accepted)
+        assertTrue(manualTileLiveCompletion.isLiveCashierFallback)
+        assertEquals(nowMillis, manualTileLiveCompletion.occurredAtMillis)
+    }
+
+    @Test
+    fun evaluateBillWindow_strictlyBlocksSharedWebStrictImagePreviewAndAmbiguousCashier() {
+        // 1. OP-1=方案A：自动模式下严禁放开 SHARED_OR_WEB_STRICT（拼多多 NewPageActivity 无论是“拼单成功”还是“支付成功”无时间一律拦截）
+        val pddGroupBuySuccess = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.xunmeng.pinduoduo",
+                verifiedActivity = "com.xunmeng.pinduoduo.activity.NewPageActivity",
+                rawPageText = "拼单成功 | 羊驼老头 | ¥0.08 | 邀请好友拼单 | 完成",
+                nowMillis = nowMillis
+            )
+        )
+        assertFalse(pddGroupBuySuccess.accepted)
+
+        val pddSharedWebPaySuccessWithoutTime = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.xunmeng.pinduoduo",
+                verifiedActivity = "com.xunmeng.pinduoduo.activity.NewPageActivity",
+                rawPageText = "支付成功 | 羊驼老头 | ¥0.08 | 付款方式 | 招商银行储蓄卡(8473) | 完成",
+                nowMillis = nowMillis
+            )
+        )
+        assertFalse(pddSharedWebPaySuccessWithoutTime.accepted)
+        assertEquals(WindowContainerRole.SHARED_OR_WEB_STRICT, pddSharedWebPaySuccessWithoutTime.containerRole)
+        assertEquals(WindowRejectReason.MISSING_OCCURRED_TIME, pddSharedWebPaySuccessWithoutTime.reason)
+
+        // 2. 自动模式下微信 WebViewUI / 支付宝 AlipayLogin 共享容器无时间戳页面绝不走收银台兜底（防公众号晒单推文误记）
+        val wechatArticleFakeSuccess = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.tencent.mm",
+                verifiedActivity = "com.tencent.mm.plugin.webview.ui.tools.WebViewUI",
+                rawPageText = "支付成功 | 瑞幸咖啡 | ¥9.90 | 完成",
+                nowMillis = nowMillis
+            )
+        )
+        assertFalse(wechatArticleFakeSuccess.accepted)
+        assertEquals(WindowRejectReason.MISSING_OCCURRED_TIME, wechatArticleFakeSuccess.reason)
+
+        // 3. AC-3：内嵌看图预览特征词（保存图片/查看原图/发送给朋友/转发截图/识别图中二维码/提取图中文字）在自动与手动模式下均 100% 拦截
+        for (marker in listOf("保存图片", "查看原图", "发送给朋友", "转发截图", "识别图中二维码", "提取图中文字")) {
+            val autoPreview = CaptureWindowGuard.evaluateBillWindow(
+                WindowInspectionInput(
+                    packageName = "com.eg.android.AlipayGphone",
+                    verifiedActivity = "com.alipay.android.msp.ui.views.MspUniRenderActivity",
+                    rawPageText = "支付成功 | 瑞幸咖啡 | ¥9.90 | 完成 | $marker",
+                    nowMillis = nowMillis
+                )
+            )
+            assertFalse("Auto mode must reject image viewer marker: $marker", autoPreview.accepted)
+            assertEquals(WindowRejectReason.NON_TRANSACTION_CONTAINER, autoPreview.reason)
+
+            val manualPreview = CaptureWindowGuard.evaluateBillWindow(
+                WindowInspectionInput(
+                    packageName = "com.tencent.mm",
+                    verifiedActivity = "com.tencent.mm.plugin.webview.ui.tools.WebViewUI",
+                    rawPageText = "支付成功 | 瑞幸咖啡 | ¥9.90 | 支付时间 2026-11-18 15:58:00 | 完成 | $marker",
+                    forceManual = true,
+                    nowMillis = nowMillis
+                )
+            )
+            assertFalse("Manual mode must also reject image viewer marker: $marker", manualPreview.accepted)
+            assertEquals(WindowRejectReason.NON_TRANSACTION_CONTAINER, manualPreview.reason)
+        }
+
+        // 4. 缺少完成/返回商家控制词的半截过渡页拦截
+        val missingControlWord = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.eg.android.AlipayGphone",
+                verifiedActivity = "com.alipay.android.msp.ui.views.MspUniRenderActivity",
+                rawPageText = "支付成功 | 瑞幸咖啡 | ¥9.90 | 付款方式 | 花呗",
+                nowMillis = nowMillis
+            )
+        )
+        assertFalse(missingControlWord.accepted)
+        assertEquals(WindowRejectReason.MISSING_OCCURRED_TIME, missingControlWord.reason)
+
+        // 5. 多笔无实付标签的红包/权益金额干扰且不满足原价减优惠守恒时拒绝盲猜
+        val ambiguousPromoCashier = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.eg.android.AlipayGphone",
+                verifiedActivity = "com.alipay.android.msp.ui.views.MspUniRenderActivity",
+                rawPageText = "支付成功 | 瑞幸咖啡 | ¥9.90 | ¥5.00 | 消费金 ¥8.88 | 完成",
+                nowMillis = nowMillis
+            )
+        )
+        assertFalse(ambiguousPromoCashier.accepted)
+        assertEquals(WindowRejectReason.AMBIGUOUS_PROMO_AMOUNTS, ambiguousPromoCashier.reason)
+
+        // 6. 付款前待支付收银台（确认付款 / 立即支付）严禁提前误记
+        val unpaidCashier = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.eg.android.AlipayGphone",
+                verifiedActivity = "com.alipay.android.msp.ui.views.MspContainerActivity",
+                rawPageText = "确认付款 | 拼多多平台商户 | ¥19.90 | 付款方式 | 招商银行信用卡(3354) | 立即付款",
+                forceManual = true,
+                nowMillis = nowMillis
+            )
+        )
+        assertFalse(unpaidCashier.accepted)
+        assertEquals(WindowRejectReason.CASHIER_OR_UNPAID_STATE, unpaidCashier.reason)
+    }
 }

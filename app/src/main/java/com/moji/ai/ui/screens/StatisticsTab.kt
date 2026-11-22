@@ -312,6 +312,114 @@ internal fun netWorthImpact(
     return dA to dL
 }
 
+/**
+ * 将单笔有效账单拆解为按实际资产变动时刻打点的事件序列 `[(eventMillis, (dAssetCents, dLiabilityCents))]`：
+ * 1. 已报销支出（`EXPENSE && reimbursed`）：原消费扣款仍在 `tx.timestamp` 发生，报销回流按
+ *    `reimbursedAtMillis ?: updatedAtMillis.takeIf { it > timestamp } ?: timestamp` 落入对应核销时间桶；
+ * 2. 若账单携带 `sourceWalletDeltaCents` / `targetWalletDeltaCents` 快照，按对应钱包当前有效汇率折算为本位币变动，
+ *    与 `currentAssetsCents` / `currentLiabCents` 全局钱包估值口径严格对齐；旧数据为 `null` 时平滑回退历史本位币金额。
+ */
+internal fun netWorthImpactEvents(
+    tx: TransactionEntity,
+    walletMap: Map<Long, WalletEntity>,
+    requireNetWorthFlag: Boolean = true
+): List<Pair<Long, Pair<Long, Long>>> {
+    if (tx.deletedAtMillis != null) return emptyList()
+    val rate = if (tx.exchangeRateToCny > 0.0) tx.exchangeRateToCny else 1.0
+    val amount = tx.amountCnyCents
+    val fee = (tx.feeCents * rate).roundToLong()
+
+    fun included(id: Long?): WalletEntity? =
+        id?.let { walletMap[it] }?.takeIf { !requireNetWorthFlag || it.includeInNetWorth }
+
+    fun fallbackOutflowImpact(w: WalletEntity, cnyCents: Long): Pair<Long, Long> =
+        if (w.type.isLiability) (0L to cnyCents) else (-cnyCents to 0L)
+
+    fun fallbackInflowImpact(w: WalletEntity, cnyCents: Long): Pair<Long, Long> =
+        if (w.type.isLiability) (0L to -cnyCents) else (cnyCents to 0L)
+
+    fun snapshotOutflowImpact(w: WalletEntity, walletDeltaCents: Long): Pair<Long, Long> {
+        val wRate = CurrencyRateManager.getEffectiveRateToCny(w.currency)
+        val cnyDelta = (walletDeltaCents * wRate).roundToLong()
+        return fallbackOutflowImpact(w, cnyDelta)
+    }
+
+    fun snapshotInflowImpact(w: WalletEntity, walletDeltaCents: Long): Pair<Long, Long> {
+        val wRate = CurrencyRateManager.getEffectiveRateToCny(w.currency)
+        val cnyDelta = (walletDeltaCents * wRate).roundToLong()
+        return fallbackInflowImpact(w, cnyDelta)
+    }
+
+    val events = ArrayList<Pair<Long, Pair<Long, Long>>>(2)
+    fun pushEvent(ts: Long, impact: Pair<Long, Long>) {
+        if (impact.first != 0L || impact.second != 0L) {
+            events.add(ts to impact)
+        }
+    }
+
+    when (tx.type) {
+        TransactionType.EXPENSE -> {
+            included(tx.sourceWalletId)?.let { src ->
+                val expImpact = tx.sourceWalletDeltaCents?.let { snapshotOutflowImpact(src, it) }
+                    ?: fallbackOutflowImpact(src, amount + fee)
+                pushEvent(tx.timestamp, expImpact)
+            }
+            if (tx.reimbursed) {
+                included(tx.targetWalletId ?: tx.sourceWalletId)?.let { dst ->
+                    val reimbTs = tx.reimbursedAtMillis
+                        ?: tx.updatedAtMillis.takeIf { it > tx.timestamp }
+                        ?: tx.timestamp
+                    val reimbImpact = tx.targetWalletDeltaCents?.let { snapshotInflowImpact(dst, it) }
+                        ?: fallbackInflowImpact(dst, netExpenseOf(tx))
+                    pushEvent(reimbTs, reimbImpact)
+                }
+            }
+        }
+        TransactionType.LOAN_OUT -> {
+            included(tx.sourceWalletId)?.let { src ->
+                val impact = tx.sourceWalletDeltaCents?.let { snapshotOutflowImpact(src, it) }
+                    ?: fallbackOutflowImpact(src, amount + fee)
+                pushEvent(tx.timestamp, impact)
+            }
+        }
+        TransactionType.INCOME, TransactionType.LOAN_IN -> {
+            val recvId = tx.targetWalletId ?: tx.sourceWalletId
+            included(recvId)?.let { dst ->
+                val snap = tx.targetWalletDeltaCents ?: tx.sourceWalletDeltaCents
+                val impact = snap?.let { snapshotInflowImpact(dst, it) }
+                    ?: fallbackInflowImpact(dst, amount - fee)
+                pushEvent(tx.timestamp, impact)
+            }
+        }
+        TransactionType.TRANSFER, TransactionType.REPAYMENT -> {
+            var dA = 0L
+            var dL = 0L
+            included(tx.sourceWalletId)?.let { src ->
+                val outImp = tx.sourceWalletDeltaCents?.let { snapshotOutflowImpact(src, it) }
+                    ?: fallbackOutflowImpact(src, amount + fee)
+                dA += outImp.first
+                dL += outImp.second
+            }
+            included(tx.targetWalletId)?.let { dst ->
+                val inImp = tx.targetWalletDeltaCents?.let { snapshotInflowImpact(dst, it) }
+                    ?: fallbackInflowImpact(dst, amount)
+                dA += inImp.first
+                dL += inImp.second
+            }
+            pushEvent(tx.timestamp, dA to dL)
+        }
+        TransactionType.REFUND_OFFSET -> {
+            val recvId = tx.targetWalletId ?: tx.sourceWalletId
+            included(recvId)?.let { dst ->
+                val snap = tx.targetWalletDeltaCents ?: tx.sourceWalletDeltaCents
+                val impact = snap?.let { snapshotInflowImpact(dst, it) }
+                    ?: fallbackInflowImpact(dst, amount)
+                pushEvent(tx.timestamp, impact)
+            }
+        }
+    }
+    return events
+}
 private data class TagBreakdownItem(
     val tagName: String,
     val totalCents: Long,
@@ -379,15 +487,34 @@ fun ICostStatisticsScreen(
         donutProgress.animateTo(1f, tween(durationMillis = 560, easing = FastOutSlowInEasing))
     }
 
-    // 当前账本 + 筛选账户（不含时间）
-    val scopedTxs = remember(transactions, currentLedger, filterWalletId) {
+    // 全账本有效流水（钱包余额为跨账本全局共享，净资产趋势统一基于全账本有效流水倒推）
+    val globalValidTrendTxs = remember(transactions, filterWalletId) {
         transactions.filter { tx ->
-            (currentLedger == null || tx.ledgerName == currentLedger) &&
+            tx.deletedAtMillis == null &&
                 (filterWalletId == null || tx.sourceWalletId == filterWalletId || tx.targetWalletId == filterWalletId)
         }
     }
-    val earliestMillis = remember(scopedTxs) { scopedTxs.minOfOrNull { it.timestamp } }
-    val latestMillis = remember(scopedTxs) { scopedTxs.maxOfOrNull { it.timestamp } }
+    // 当前账本 + 筛选账户（不含时间）
+    val scopedTxs = remember(transactions, currentLedger, filterWalletId) {
+        transactions.filter { tx ->
+            tx.deletedAtMillis == null &&
+                (currentLedger == null || tx.ledgerName == currentLedger) &&
+                (filterWalletId == null || tx.sourceWalletId == filterWalletId || tx.targetWalletId == filterWalletId)
+        }
+    }
+    val earliestMillis = remember(scopedTxs, globalValidTrendTxs) {
+        scopedTxs.minOfOrNull { it.timestamp } ?: globalValidTrendTxs.minOfOrNull { it.timestamp }
+    }
+    val latestMillis = remember(scopedTxs, globalValidTrendTxs) {
+        val scopedMax = scopedTxs.maxOfOrNull { it.timestamp }
+        val globalMax = globalValidTrendTxs.maxOfOrNull {
+            max(it.timestamp, it.reimbursedAtMillis ?: 0L)
+        }
+        when {
+            scopedMax != null && globalMax != null -> max(scopedMax, globalMax)
+            else -> scopedMax ?: globalMax
+        }
+    }
 
     val range = remember(rangeMode, year, month, weekOffset, earliestMillis, latestMillis) {
         periodRange(rangeMode, year, month, weekOffset, earliestMillis, latestMillis)
@@ -533,13 +660,15 @@ fun ICostStatisticsScreen(
         1 -> currentAssetsCents
         else -> currentLiabCents
     }
-    val trendPoints: List<Long> = remember(transactions, walletMap, filterWalletId, buckets, trendMetric, currentAssetsCents, currentLiabCents) {
+    val trendPoints: List<Long> = remember(globalValidTrendTxs, walletMap, filterWalletId, buckets, trendMetric, currentAssetsCents, currentLiabCents, effectiveCustomRates) {
         if (walletMap.isEmpty() || buckets.isEmpty()) return@remember emptyList()
         val now = System.currentTimeMillis()
         val visible = buckets.filter { it.startMillis <= now }
         if (visible.isEmpty()) return@remember emptyList()
         val requireNetWorth = filterWalletId == null
-        val impacts = transactions.map { it.timestamp to netWorthImpact(it, walletMap, requireNetWorth) }
+        val impacts = globalValidTrendTxs.flatMap { tx ->
+            netWorthImpactEvents(tx, walletMap, requireNetWorth)
+        }
         visible.map { b ->
             var a = currentAssetsCents
             var l = currentLiabCents

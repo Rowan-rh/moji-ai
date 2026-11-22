@@ -5,13 +5,17 @@ import com.moji.ai.ai.SmartRuleEngine
 import com.moji.ai.ai.SmartRuleExecutionResult
 import com.moji.ai.data.local.CaptureEvidenceEntity
 import com.moji.ai.data.local.TransactionEntity
+import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.data.repository.CompositeMedicalFusionResult
+import com.moji.ai.data.repository.CompositeMedicalRecordResult
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.SilentBookkeepingNotifier
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -30,6 +34,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.resume
 import kotlin.math.abs
@@ -56,12 +61,226 @@ data class CaptureObservabilityLogEntry(
     val transactionId: Long? = null
 )
 
+internal interface PipelinePersistenceGateway {
+    suspend fun clearAllTransactionsAndEvidences()
+    suspend fun getAllTransactions(): List<TransactionEntity>
+    suspend fun getAllWallets(): List<WalletEntity>
+    suspend fun getRecentRefundableExpenses(limit: Int = 15): List<TransactionEntity>
+    suspend fun getTransactionById(id: Long): TransactionEntity?
+    suspend fun findTransactionByOrderKey(orderKey: String): TransactionEntity?
+    suspend fun findTransactionByNo(txNo: String): TransactionEntity?
+    suspend fun findTransactionByMerchantOrderNo(orderNo: String): TransactionEntity?
+    suspend fun findTransactionsByAmountAndOccurredWindow(
+        amountCents: Long,
+        occurredAtMillis: Long,
+        toleranceMillis: Long
+    ): List<TransactionEntity>
+    suspend fun findTransactionsByAmountAndTimeOrCapturedWindow(
+        amountCents: Long,
+        occurredAtMillis: Long,
+        capturedAtMillis: Long,
+        toleranceMillis: Long
+    ): List<TransactionEntity>
+    suspend fun recordTransaction(tx: TransactionEntity): Long
+    suspend fun recordCompositeMedicalTransaction(
+        mainTx: TransactionEntity,
+        poolSubsidyCents: Long,
+        personalAccountCents: Long,
+        unspecifiedMedicalCents: Long,
+        commercialDiscountCents: Long
+    ): CompositeMedicalRecordResult
+    suspend fun enrichCompositeMedicalOnExistingTransaction(
+        existingMainId: Long,
+        enrichedCandidateMain: TransactionEntity,
+        baseEnrichedFields: List<String>,
+        poolSubsidyCents: Long,
+        personalAccountCents: Long,
+        unspecifiedMedicalCents: Long,
+        commercialDiscountCents: Long
+    ): CompositeMedicalFusionResult
+    suspend fun updateExistingTransaction(updatedTx: TransactionEntity): Boolean
+    suspend fun undoAndDeleteTransaction(id: Long): Boolean
+    suspend fun attachBillScreenshotIfNeeded(
+        transactionId: Long,
+        screenshotPath: String,
+        screenshotSha256: String,
+        nowMillis: Long
+    ): Boolean
+    suspend fun insertCaptureEvidence(evidence: CaptureEvidenceEntity): Long
+    suspend fun getEvidencesForTransaction(txId: Long): List<CaptureEvidenceEntity>
+}
+
+internal interface PipelineUiGateway {
+    fun cancelNotificationForTransaction(txId: Long)
+    fun sendSilentRecordedNotification(tx: TransactionEntity, wallets: List<WalletEntity>)
+    fun sendSuspectedDuplicateNotification(
+        candidateId: Long,
+        tx: TransactionEntity,
+        wallets: List<WalletEntity>,
+        duplicateReason: String,
+        matchedTransactionId: Long?
+    )
+    fun showRecordedBanner(
+        statusTitle: String,
+        amountText: String,
+        subtitle: String,
+        isIncome: Boolean,
+        transactionId: Long
+    )
+    fun showSuspectedDuplicateBanner(
+        amountText: String,
+        subtitle: String,
+        walletName: String,
+        matchedTransactionId: Long?,
+        onForceRecord: () -> Unit
+    )
+}
+
+private class RepositoryPersistenceGateway(
+    private val repository: LedgerRepository
+) : PipelinePersistenceGateway {
+    override suspend fun clearAllTransactionsAndEvidences() {
+        repository.clearAllTransactionsAndEvidences()
+    }
+    override suspend fun getAllTransactions(): List<TransactionEntity> = repository.getAllTransactions()
+    override suspend fun getAllWallets(): List<WalletEntity> = repository.getAllWallets()
+    override suspend fun getRecentRefundableExpenses(limit: Int): List<TransactionEntity> =
+        repository.getRecentRefundableExpenses(limit)
+    override suspend fun getTransactionById(id: Long): TransactionEntity? = repository.getTransactionById(id)
+    override suspend fun findTransactionByOrderKey(orderKey: String): TransactionEntity? =
+        repository.findTransactionByOrderKey(orderKey)
+    override suspend fun findTransactionByNo(txNo: String): TransactionEntity? = repository.findTransactionByNo(txNo)
+    override suspend fun findTransactionByMerchantOrderNo(orderNo: String): TransactionEntity? =
+        repository.findTransactionByMerchantOrderNo(orderNo)
+    override suspend fun findTransactionsByAmountAndOccurredWindow(
+        amountCents: Long,
+        occurredAtMillis: Long,
+        toleranceMillis: Long
+    ): List<TransactionEntity> =
+        repository.findTransactionsByAmountAndOccurredWindow(amountCents, occurredAtMillis, toleranceMillis)
+    override suspend fun findTransactionsByAmountAndTimeOrCapturedWindow(
+        amountCents: Long,
+        occurredAtMillis: Long,
+        capturedAtMillis: Long,
+        toleranceMillis: Long
+    ): List<TransactionEntity> = repository.findTransactionsByAmountAndTimeOrCapturedWindow(
+        amountCents = amountCents,
+        occurredAtMillis = occurredAtMillis,
+        capturedAtMillis = capturedAtMillis,
+        toleranceMillis = toleranceMillis
+    )
+    override suspend fun recordTransaction(tx: TransactionEntity): Long = repository.recordTransaction(tx)
+    override suspend fun recordCompositeMedicalTransaction(
+        mainTx: TransactionEntity,
+        poolSubsidyCents: Long,
+        personalAccountCents: Long,
+        unspecifiedMedicalCents: Long,
+        commercialDiscountCents: Long
+    ): CompositeMedicalRecordResult = repository.recordCompositeMedicalTransaction(
+        mainTx = mainTx,
+        poolSubsidyCents = poolSubsidyCents,
+        personalAccountCents = personalAccountCents,
+        unspecifiedMedicalCents = unspecifiedMedicalCents,
+        commercialDiscountCents = commercialDiscountCents
+    )
+    override suspend fun enrichCompositeMedicalOnExistingTransaction(
+        existingMainId: Long,
+        enrichedCandidateMain: TransactionEntity,
+        baseEnrichedFields: List<String>,
+        poolSubsidyCents: Long,
+        personalAccountCents: Long,
+        unspecifiedMedicalCents: Long,
+        commercialDiscountCents: Long
+    ): CompositeMedicalFusionResult = repository.enrichCompositeMedicalOnExistingTransaction(
+        existingMainId = existingMainId,
+        enrichedCandidateMain = enrichedCandidateMain,
+        baseEnrichedFields = baseEnrichedFields,
+        poolSubsidyCents = poolSubsidyCents,
+        personalAccountCents = personalAccountCents,
+        unspecifiedMedicalCents = unspecifiedMedicalCents,
+        commercialDiscountCents = commercialDiscountCents
+    )
+    override suspend fun updateExistingTransaction(updatedTx: TransactionEntity): Boolean =
+        repository.updateExistingTransaction(updatedTx)
+    override suspend fun undoAndDeleteTransaction(id: Long): Boolean = repository.undoAndDeleteTransaction(id)
+    override suspend fun attachBillScreenshotIfNeeded(
+        transactionId: Long,
+        screenshotPath: String,
+        screenshotSha256: String,
+        nowMillis: Long
+    ): Boolean = repository.attachBillScreenshotIfNeeded(transactionId, screenshotPath, screenshotSha256, nowMillis)
+    override suspend fun insertCaptureEvidence(evidence: CaptureEvidenceEntity): Long =
+        repository.insertCaptureEvidence(evidence)
+    override suspend fun getEvidencesForTransaction(txId: Long): List<CaptureEvidenceEntity> =
+        repository.getEvidencesForTransaction(txId)
+}
+
+private class DefaultPipelineUiGateway(
+    private val notifier: SilentBookkeepingNotifier
+) : PipelineUiGateway {
+    override fun cancelNotificationForTransaction(txId: Long) {
+        notifier.cancelForTransaction(txId)
+    }
+
+    override fun sendSilentRecordedNotification(tx: TransactionEntity, wallets: List<WalletEntity>) {
+        notifier.sendSilentRecordedNotification(tx, wallets)
+    }
+
+    override fun sendSuspectedDuplicateNotification(
+        candidateId: Long,
+        tx: TransactionEntity,
+        wallets: List<WalletEntity>,
+        duplicateReason: String,
+        matchedTransactionId: Long?
+    ) {
+        notifier.sendSuspectedDuplicateNotification(
+            candidateId = candidateId,
+            tx = tx,
+            wallets = wallets,
+            duplicateReason = duplicateReason,
+            matchedTransactionId = matchedTransactionId
+        )
+    }
+
+    override fun showRecordedBanner(
+        statusTitle: String,
+        amountText: String,
+        subtitle: String,
+        isIncome: Boolean,
+        transactionId: Long
+    ) {
+        RecognitionBanner.showRecorded(
+            statusTitle = statusTitle,
+            amountText = amountText,
+            subtitle = subtitle,
+            isIncome = isIncome,
+            transactionId = transactionId
+        )
+    }
+
+    override fun showSuspectedDuplicateBanner(
+        amountText: String,
+        subtitle: String,
+        walletName: String,
+        matchedTransactionId: Long?,
+        onForceRecord: () -> Unit
+    ) {
+        RecognitionBanner.showSuspectedDuplicate(
+            amountText = amountText,
+            subtitle = subtitle,
+            walletName = walletName,
+            matchedTransactionId = matchedTransactionId,
+            onForceRecord = onForceRecord
+        )
+    }
+}
+
 /**
  * 智能防重、三通道滑动窗口聚合与双规则重复判定协调器：
  *
  * 核心留存四要素：
  * 1) 订单唯一 Key (`orderKey`)：从交易单号 / 订单号 / 商户单号提取；
- * 2) 实际购物发生时间 (`timestamp`)：从账单「支付时间/创建时间」提取（绝不用截图时间冒充）；
+ * 2) 实际购物发生时间 (`timestamp`)：从账单「支付时间/创建时间」提取（专用收银台即时完成页以 `AI_LIVE_CASHIER` 标记暂用采集时刻，支持二阶段详情原位校准）；
  * 3) 金额 (`amountCents`)；
  * 4) 购物数量 (`itemQuantity` / `quantityDesc`)。
  *
@@ -71,15 +290,28 @@ data class CaptureObservabilityLogEntry(
  *
  * 判定为重复时的处理策略：
  * - 默认绝不录入数据库；
- * - 若已有账单缺少订单 Key 而新采集到了订单 Key（如用户在支付宝点开“更多”），静默为原账单补全 `orderKey`；
+ * - 若已有账单缺少订单 Key 而新采集到了订单 Key（如用户在支付宝点开“更多”或二阶段进入账单/订单详情），静默为原账单补全 `orderKey` 与精确支付时间；
+ * - 若同时存在 ≥2 笔同金额未绑单号的 `AI_LIVE_CASHIER` 候选导致归属歧义，禁止盲目吞并，走疑似重复弹窗路径交用户确认；
  * - 在一加流体云胶囊弹窗提示「检测到疑似重复」，默认不录入；仅当用户主动点击弹窗上的「录入」按钮时才写入数据库。
  */
-class CapturePipelineCoordinator(
-    private val repository: LedgerRepository,
+class CapturePipelineCoordinator internal constructor(
+    private val repository: PipelinePersistenceGateway,
     private val aiEngine: AiAccountingEngine,
-    private val notifier: SilentBookkeepingNotifier,
+    private val uiGateway: PipelineUiGateway,
     private val smartRuleEngine: SmartRuleEngine? = null
 ) {
+    constructor(
+        repository: LedgerRepository,
+        aiEngine: AiAccountingEngine,
+        notifier: SilentBookkeepingNotifier,
+        smartRuleEngine: SmartRuleEngine? = null
+    ) : this(
+        repository = RepositoryPersistenceGateway(repository),
+        aiEngine = aiEngine,
+        uiGateway = DefaultPipelineUiGateway(notifier),
+        smartRuleEngine = smartRuleEngine
+    )
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val recentProcessedFingerprints = ConcurrentHashMap<String, Long>()
@@ -184,23 +416,32 @@ class CapturePipelineCoordinator(
                             abs(other.timestamp - tx.timestamp) <= 15_000L
                     }
                     if (hasPostDiscountSibling) {
-                        repository.undoAndDeleteTransaction(tx.id)
+                        if (repository.undoAndDeleteTransaction(tx.id)) {
+                            uiGateway.cancelNotificationForTransaction(tx.id)
+                        }
                         continue
                     }
                 }
-                if (tx.captureSource !in setOf("AI_NOTIFICATION", "AI_SANDBOX") &&
+                if (tx.captureSource !in setOf("AI_NOTIFICATION", "AI_SANDBOX", "AI_LIVE_CASHIER") &&
                     tx.orderKey.isBlank() && tx.transactionNo.isBlank() && tx.merchantOrderNo.isBlank()
                 ) {
                     val evidences = repository.getEvidencesForTransaction(tx.id)
                     val fullSourceText = (evidences.map { it.rawText } + listOf(tx.rawCapturedText))
                         .filter { it.isNotBlank() }
                         .joinToString(" | ")
-                    val isNotificationEvidence = fullSourceText.contains("[AI_NOTIFICATION") ||
+                    val isExemptedLiveOrNotifEvidence = fullSourceText.contains("[AI_NOTIFICATION") ||
                         fullSourceText.contains("[AI_SANDBOX") ||
-                        evidences.any { it.captureSource == "AI_NOTIFICATION" || it.captureSource == "AI_SANDBOX" }
+                        fullSourceText.contains("[AI_LIVE_CASHIER") ||
+                        evidences.any {
+                            it.captureSource == "AI_NOTIFICATION" ||
+                                it.captureSource == "AI_SANDBOX" ||
+                                it.captureSource == "AI_LIVE_CASHIER"
+                        }
                     val refMillis = tx.capturedAtMillis.takeIf { it > 0L } ?: tx.timestamp
-                    if (!isNotificationEvidence && !AiAccountingEngine.hasExplicitOccurredTime(fullSourceText, refMillis)) {
-                        repository.undoAndDeleteTransaction(tx.id)
+                    if (!isExemptedLiveOrNotifEvidence && !AiAccountingEngine.hasExplicitOccurredTime(fullSourceText, refMillis)) {
+                        if (repository.undoAndDeleteTransaction(tx.id)) {
+                            uiGateway.cancelNotificationForTransaction(tx.id)
+                        }
                         continue
                     }
                 }
@@ -221,7 +462,9 @@ class CapturePipelineCoordinator(
                     .joinToString(" | ")
                 val refMillis = tx.capturedAtMillis.takeIf { it > 0L } ?: tx.timestamp
                 val explicitTimeFromEvidence = AiAccountingEngine.extractOccurredTimeMillis(fullSourceText, refMillis)
-                if (explicitTimeFromEvidence != null && (tx.timestamp % 1_000L != 0L || tx.note == tx.merchant)) {
+                if (explicitTimeFromEvidence != null &&
+                    (tx.captureSource == "AI_LIVE_CASHIER" || tx.timestamp % 1_000L != 0L || tx.note == tx.merchant)
+                ) {
                     val pkgHintForEvidence = when {
                         fullSourceText.contains("com.tencent.mm") -> "com.tencent.mm"
                         fullSourceText.contains("com.eg.android.AlipayGphone") -> "com.eg.android.AlipayGphone"
@@ -256,12 +499,22 @@ class CapturePipelineCoordinator(
                 val isPddTx = fullSourceText.contains("com.xunmeng.pinduoduo") || tx.orderKey.matches(Regex("""^\d{6}-\d{8,}$"""))
                 val isJdTx = fullSourceText.contains("com.jingdong.app.mall") || tx.category == "购物-京东"
                 if (tx.paymentMethodRaw.contains("发票类型")) {
+                    val fallbackCleanedPm = tx.paymentMethodRaw
+                        .replace(Regex("""\s*发票类型.*"""), "")
+                        .trim()
                     val cleanBankPm = evidences.map { it.paymentMethodRaw }
                         .firstOrNull { it.isNotBlank() && !it.contains("发票类型") && it !in setOf("微信支付", "支付宝", "在线支付") }
-                        ?: "招商银行信用卡(3354)"
-                    val cleanedNote = tx.note.replace("微信支付 发票类型 不开发票", cleanBankPm)
-                    val bankWalletId = wallets.firstOrNull { !it.cardLast4.isNullOrBlank() && cleanBankPm.contains(it.cardLast4) }?.id
-                        ?: tx.sourceWalletId
+                        ?: fallbackCleanedPm
+                    val cleanedNote = tx.note
+                        .replace("微信支付 发票类型 不开发票", cleanBankPm)
+                        .replace(Regex("""\s*发票类型\s*不开发票"""), "")
+                        .trim()
+                    val bankWalletId = if (cleanBankPm.isNotBlank()) {
+                        wallets.firstOrNull { !it.cardLast4.isNullOrBlank() && cleanBankPm.contains(it.cardLast4) }?.id
+                            ?: tx.sourceWalletId
+                    } else {
+                        tx.sourceWalletId
+                    }
                     repository.updateExistingTransaction(
                         tx.copy(
                             paymentMethodRaw = cleanBankPm,
@@ -290,12 +543,15 @@ class CapturePipelineCoordinator(
                         fullSourceText.contains("com.tencent.mm") -> "com.tencent.mm"
                         else -> ""
                     }
+                    val isLiveCashierTx = tx.captureSource == "AI_LIVE_CASHIER" ||
+                        fullSourceText.contains("[AI_LIVE_CASHIER")
                     val reparsed = aiEngine.localSmartFallbackParse(
                         rawText = fullSourceText,
                         sourceAppPackage = pkgHint,
                         wallets = wallets,
                         recentExpenses = recentExpenses,
-                        referenceMillis = tx.capturedAtMillis.takeIf { it > 0L } ?: tx.timestamp
+                        referenceMillis = tx.capturedAtMillis.takeIf { it > 0L } ?: tx.timestamp,
+                        captureMode = if (isLiveCashierTx) "AI_LIVE_CASHIER" else ""
                     )
                     if (reparsed != null) {
                         val newAmountCents = (reparsed.amount * 100.0).roundToLong()
@@ -367,6 +623,30 @@ class CapturePipelineCoordinator(
                     ) continue
                     val priKey = primary.orderKey.ifBlank { primary.transactionNo }.ifBlank { primary.merchantOrderNo }
                     val secKey = secondary.orderKey.ifBlank { secondary.transactionNo }.ifBlank { secondary.merchantOrderNo }
+                    val priIsLiveCashier = isUnnumberedLiveCashierOrigin(primary)
+                    val secIsLiveCashier = isUnnumberedLiveCashierOrigin(secondary)
+                    val priVisit = extractCashierVisitTag(primary.rawCapturedText)
+                    val secVisit = extractCashierVisitTag(secondary.rawCapturedText)
+                    // 保护独立收银台会话产生的连续同金额支付记录，以及存在 ≥2 笔同金额无单号收银台记录的歧义场景
+                    if (priIsLiveCashier && secIsLiveCashier) {
+                        if (priVisit.isNotBlank() && secVisit.isNotBlank() && priVisit != secVisit) {
+                            continue
+                        }
+                        continue
+                    }
+                    if (priIsLiveCashier xor secIsLiveCashier) {
+                        val ambiguousCount = currentTxs.count { cand ->
+                            cand.id !in deletedIds &&
+                                isUnnumberedLiveCashierOrigin(cand) &&
+                                cand.type == primary.type &&
+                                cand.currency == primary.currency &&
+                                cand.amountCents == primary.amountCents &&
+                                abs(cand.timestamp - (if (priIsLiveCashier) secondary.timestamp else primary.timestamp)) <= 180_000L
+                        }
+                        if (ambiguousCount >= 2) {
+                            continue
+                        }
+                    }
                     val hasConflictingSameChannelKey = priKey.isNotBlank() &&
                         secKey.isNotBlank() &&
                         priKey != secKey &&
@@ -402,7 +682,9 @@ class CapturePipelineCoordinator(
                         for (ev in secEvidences) {
                             repository.insertCaptureEvidence(ev.copy(transactionId = primary.id))
                         }
-                        repository.undoAndDeleteTransaction(secondary.id)
+                        if (repository.undoAndDeleteTransaction(secondary.id)) {
+                            uiGateway.cancelNotificationForTransaction(secondary.id)
+                        }
                         deletedIds.add(secondary.id)
                     }
                 }
@@ -441,7 +723,8 @@ class CapturePipelineCoordinator(
         captureSource: String,
         screenshotPath: String = "",
         screenshotSha256: String = "",
-        capturedAtMillis: Long = System.currentTimeMillis()
+        capturedAtMillis: Long = System.currentTimeMillis(),
+        cashierVisitId: Long = 0L
     ) {
         val cleaned = rawText.trim()
         if (cleaned.length < 4) {
@@ -478,19 +761,32 @@ class CapturePipelineCoordinator(
         recentDuplicatePromptCooldown.entries.removeIf { now - it.value > 15_000L }
         pendingDuplicateCandidates.entries.removeIf { now - it.value.capturedAtMillis > 600_000L }
 
-        // 同一页面 15 秒内完全一致的节点快照不重复进入管道
-        val exactHash = "${packageName}_${cleaned.hashCode()}"
+        // 同一页面 15 秒内完全一致的节点快照不重复进入管道；新收银台 Visit 携带独立 visitId 确保 15s 内连续两笔同金额支付不被静默丢弃
+        val exactHash = if (cashierVisitId > 0L) {
+            "${packageName}_v${cashierVisitId}_${cleaned.hashCode()}"
+        } else {
+            "${packageName}_${cleaned.hashCode()}"
+        }
         if (recentProcessedFingerprints.containsKey(exactHash) && screenshotPath.isBlank()) {
             return
         }
         recentProcessedFingerprints[exactHash] = now
 
-        // 无障碍页面与端侧 OCR 已经是完整页面文本，0ms 立即直通解析（消除此前 380ms~850ms 的人为等待延迟）；
+        // 无障碍页面、收银台完成页与端侧 OCR 已经是完整页面文本，0ms 立即直通解析（消除人为等待延迟）；
         // 仅系统通知栏通道保留 220ms 短窗口以合并同一时刻到达的微信+银行双通知。
-        val waitWindowMs = if (captureSource == "AI_ACCESSIBILITY" || captureSource == "AI_OCR") 0L else 220L
+        val waitWindowMs = if (
+            captureSource == "AI_ACCESSIBILITY" ||
+            captureSource == "AI_OCR" ||
+            captureSource == "AI_LIVE_CASHIER"
+        ) 0L else 220L
 
         synchronized(pendingLock) {
-            pendingTexts.add("[$captureSource | $packageName]: $cleaned")
+            val taggedLine = if (cashierVisitId > 0L) {
+                "[$captureSource | $packageName | visit=$cashierVisitId]: $cleaned"
+            } else {
+                "[$captureSource | $packageName]: $cleaned"
+            }
+            pendingTexts.add(taggedLine)
             pendingPackages.add(packageName)
             pendingSources.add(captureSource)
             if (screenshotPath.isNotBlank()) {
@@ -546,6 +842,38 @@ class CapturePipelineCoordinator(
     }
 
     /**
+     * 供单元测试确定性同步执行单次识账管道（可控 `capturedAtMillis` 与收银台 `cashierVisitId`）
+     */
+    internal suspend fun processCapturedEventForTest(
+        rawText: String,
+        packageName: String,
+        captureSource: String,
+        capturedAtMillis: Long,
+        cashierVisitId: Long = 0L,
+        screenshotPath: String = "",
+        screenshotSha256: String = ""
+    ): TransactionEntity? = pipelineMutex.withLock {
+        val merged = if (rawText.startsWith("[AI_")) {
+            rawText
+        } else if (cashierVisitId > 0L) {
+            "[$captureSource | $packageName | visit=$cashierVisitId]: $rawText"
+        } else {
+            "[$captureSource | $packageName]: $rawText"
+        }
+        executeAiPipeline(
+            mergedText = merged,
+            packageName = packageName,
+            captureSource = captureSource,
+            screenshotPath = screenshotPath,
+            screenshotSha256 = screenshotSha256,
+            capturedAtMillis = capturedAtMillis
+        )
+    }
+
+    internal fun getPendingDuplicateCandidateIdsForTest(): Set<Long> =
+        pendingDuplicateCandidates.keys.toSet()
+
+    /**
      * 当用户在「检测到疑似重复」弹窗或通知中主动点击「录入」按钮时调用：
      * 将默认未录入的候选账单正式写入数据库并刷新通知。
      */
@@ -594,7 +922,7 @@ class CapturePipelineCoordinator(
         )
 
         showOverlayBannerForRecordedTransaction(savedTx, walletName, isFused = false)
-        notifier.sendSilentRecordedNotification(savedTx, wallets)
+        uiGateway.sendSilentRecordedNotification(savedTx, wallets)
         savedTx
     }
 
@@ -687,15 +1015,19 @@ class CapturePipelineCoordinator(
             .ifBlank { parsedTx.transactionNo }
             .ifBlank { parsedTx.merchantOrderNo }
         val amountTypeFingerprint = "AMT_${parsedTx.type}_${parsedTx.amountCents}_${parsedTx.currency}"
+        val incomingIsLiveCashier = captureSource == "AI_LIVE_CASHIER" || mergedText.contains("[AI_LIVE_CASHIER")
+        val incomingVisitTag = extractCashierVisitTag(mergedText)
 
         // =========================================================================
         // 识别是否为同一笔账单（按订单唯一 Key 或「相同支付时间 + 相同金额」认定为同一笔钱）：
-        // 1. 若用户点开详情页或点开“更多”露出了新细节（如订单号、商户单号、支付方式、商品说明、具体商户、数量、优惠等），
+        // 1. 若用户点开详情页或点开“更多”露出了新细节（如订单号、商户单号、支付方式、商品说明、具体商户、数量、优惠、真实秒级支付时间等），
         //    自动认定为同一笔账单并将新细节增量合并回原账单，流体云提示「已补全账单详情」；
-        // 2. 若原账单各项细节均已齐全（无任何新信息可补充），则判定为重复扫描，默认不重复录入，流体云提示「检测到疑似重复」（点「录入」才强制入账）。
+        // 2. 若二阶段通知/详情面对 ≥2 笔同金额未绑单号的 `AI_LIVE_CASHIER` 候选导致归属歧义，禁止盲目吞并，直接走疑似重复弹窗交用户确认；
+        // 3. 若原账单各项细节均已齐全（无任何新信息可补充），则判定为重复扫描，默认不重复录入，流体云提示「检测到疑似重复」（点「录入」才强制入账）。
         // =========================================================================
         var duplicateMatchedTx: TransactionEntity? = null
         var duplicateReasonLabel = ""
+        var hasAmbiguousLiveCashierCandidates = false
 
         // 规则 1：检查订单唯一 Key (`orderKey` / `transactionNo` / `merchantOrderNo`) 交叉命中
         if (resolvedOrderKey.isNotBlank()) {
@@ -717,9 +1049,11 @@ class CapturePipelineCoordinator(
         }
 
         // 规则 2：若规则 1 未命中，检查：
-        // (a) 跨端内嵌订单号匹配（如微信账单商品写明「京东-订单编号3673486013948720」与京东订单号 3673486013948720）；
-        // (b) 同一支付时间（timestamp）或同一登记时间（capturedAtMillis）+ 相同金额匹配；
-        // (c) 跨应用同笔购物融合（如拼多多/京东/淘宝/抖音订单详情页 + 支付宝/微信账单详情页扫了同一笔 9.60 元商品）。
+        // (a) 跨端内嵌订单号匹配；
+        // (a2) 二阶段通知/账单详情/电商订单详情 对 无单号 `AI_LIVE_CASHIER` 收银台记录的单向时序窗校准（唯一候选原位升级 AI_FUSED，≥2 候选防误吞走疑似重复确认）；
+        // (b) 同一支付时间（timestamp）或同一登记时间（capturedAtMillis）+ 相同金额匹配（保护不同收银台 Visit 会话的连续同金额支付）；
+        // (c) 跨应用同笔购物融合；
+        // (d) 同一收银台立减动画完成校准实扣金额。
         if (duplicateMatchedTx == null) {
             val sameDayAmountCandidates = repository.findTransactionsByAmountAndOccurredWindow(
                 amountCents = parsedTx.amountCents,
@@ -743,11 +1077,49 @@ class CapturePipelineCoordinator(
                 duplicateReasonLabel = "跨端订单号关联(${resolvedOrderKey.ifBlank { matchedByEmbeddedOrderNo.orderKey }.takeLast(8)})"
             }
 
-            // 2b. (相同支付时间 OR 近距离登记时间) + 相同类型/币种/金额去重（若同渠道且双方均有不同交易单号则绝不误判为重复）
+            // 2a-live. 二阶段通知/详情页回填无单号 `AI_LIVE_CASHIER` 记录（单向时序窗 -15s..180s 或跨端同单规则）
+            if (duplicateMatchedTx == null && !incomingIsLiveCashier) {
+                val liveCashierCandidates = combinedCandidates.filter { existing ->
+                    isMatchingLiveCashierStage1Candidate(
+                        existing = existing,
+                        incoming = parsedTx,
+                        incomingPackage = packageName,
+                        incomingRawText = mergedText
+                    )
+                }
+                if (liveCashierCandidates.size >= 2) {
+                    duplicateMatchedTx = liveCashierCandidates.first()
+                    hasAmbiguousLiveCashierCandidates = true
+                    duplicateReasonLabel = "存在${liveCashierCandidates.size}笔同金额收银台待校准记录，归属存在歧义"
+                } else if (liveCashierCandidates.size == 1) {
+                    duplicateMatchedTx = liveCashierCandidates.single()
+                    duplicateReasonLabel = "收银台记录二阶段详情校准"
+                }
+            }
+
+            // 2b. (相同支付时间 OR 近距离登记时间) + 相同类型/币种/金额去重（若同渠道且双方均有不同交易单号，或属于两次独立收银台 Visit 会话，绝不误判为重复）
             if (duplicateMatchedTx == null) {
                 var matchedByCapturedClock = false
+                fun isDistinctLiveCashierVisitPair(existing: TransactionEntity): Boolean {
+                    if (!incomingIsLiveCashier || !isUnnumberedLiveCashierOrigin(existing)) {
+                        return false
+                    }
+                    val existingVisitTag = extractCashierVisitTag(existing.rawCapturedText)
+                    if (incomingVisitTag.isNotBlank() && existingVisitTag.isNotBlank() && incomingVisitTag != existingVisitTag) {
+                        return true
+                    }
+                    return false
+                }
+
                 fun isSamePaymentOrCapturedEvent(existing: TransactionEntity): Boolean {
                     if (existing.type != parsedTx.type || existing.currency != parsedTx.currency) {
+                        return false
+                    }
+                    if (isDistinctLiveCashierVisitPair(existing)) {
+                        return false
+                    }
+                    // 非 AI_LIVE_CASHIER 的二阶段事件对无单号收银台记录统一由上方 2a-live 按单向窗口严格裁决，避免超窗误吞
+                    if (!incomingIsLiveCashier && isUnnumberedLiveCashierOrigin(existing)) {
                         return false
                     }
                     val existingKey = existing.orderKey
@@ -796,14 +1168,22 @@ class CapturePipelineCoordinator(
 
             // 2c. 跨应用同笔购物识别（如拼多多/京东/淘宝订单详情页 ↔ 支付宝/微信账单详情页扫了同一件商品）
             if (duplicateMatchedTx == null) {
-                val matchedByCrossChannel = sameDayAmountCandidates.firstOrNull { existing ->
-                    isCrossChannelSameOrderPair(
-                        txA = existing,
-                        txB = parsedTx,
-                        txBPackage = packageName,
-                        txBRawText = mergedText
-                    )
+                val crossChannelCandidates = sameDayAmountCandidates.filter { existing ->
+                    if (!incomingIsLiveCashier && isUnnumberedLiveCashierOrigin(existing)) {
+                        false
+                    } else if (incomingIsLiveCashier && isUnnumberedLiveCashierOrigin(existing)) {
+                        val existingVisitTag = extractCashierVisitTag(existing.rawCapturedText)
+                        !(incomingVisitTag.isNotBlank() && existingVisitTag.isNotBlank() && incomingVisitTag != existingVisitTag)
+                    } else {
+                        isCrossChannelSameOrderPair(
+                            txA = existing,
+                            txB = parsedTx,
+                            txBPackage = packageName,
+                            txBRawText = mergedText
+                        )
+                    }
                 }
+                val matchedByCrossChannel = crossChannelCandidates.singleOrNull()
                 if (matchedByCrossChannel != null) {
                     duplicateMatchedTx = matchedByCrossChannel
                     duplicateReasonLabel = "跨应用同笔订单融合(${matchedByCrossChannel.merchant.take(6)}↔${parsedTx.merchant.take(6)})"
@@ -818,10 +1198,15 @@ class CapturePipelineCoordinator(
                     toleranceMillis = 45_000L
                 )
                 val matchedPreDiscount = preDiscountCandidates.firstOrNull { existing ->
+                    val existingVisitTag = extractCashierVisitTag(existing.rawCapturedText)
+                    val sameOrUnsetVisit = incomingVisitTag.isBlank() ||
+                        existingVisitTag.isBlank() ||
+                        incomingVisitTag == existingVisitTag
                     existing.type == parsedTx.type &&
                         existing.currency == parsedTx.currency &&
                         existing.discountCents == 0L &&
                         existing.merchant == parsedTx.merchant &&
+                        sameOrUnsetVisit &&
                         abs(existing.timestamp - parsedTx.timestamp) <= 15_000L
                 }
                 if (matchedPreDiscount != null) {
@@ -846,16 +1231,20 @@ class CapturePipelineCoordinator(
 
         if (duplicateMatchedTx != null) {
             val matched = duplicateMatchedTx
-            val enrichment = buildEnrichedTransactionIfHasNewDetails(
-                existing = matched,
-                incoming = parsedTx,
-                resolvedOrderKey = resolvedOrderKey,
-                screenshotPath = screenshotPath,
-                screenshotSha256 = screenshotSha256,
-                capturedAtMillis = capturedAtMillis
-            )
+            val enrichment = if (hasAmbiguousLiveCashierCandidates) {
+                null
+            } else {
+                buildEnrichedTransactionIfHasNewDetails(
+                    existing = matched,
+                    incoming = parsedTx,
+                    resolvedOrderKey = resolvedOrderKey,
+                    screenshotPath = screenshotPath,
+                    screenshotSha256 = screenshotSha256,
+                    capturedAtMillis = capturedAtMillis
+                )
+            }
 
-            if (isMixedMedicalExpense) {
+            if (!hasAmbiguousLiveCashierCandidates && isMixedMedicalExpense) {
                 val rawBaseMain = enrichment?.first ?: matched
                 val baseMain = if (rawBaseMain.screenshotPath.isBlank() && screenshotPath.isNotBlank()) {
                     rawBaseMain.copy(
@@ -947,23 +1336,29 @@ class CapturePipelineCoordinator(
             var effectiveMatchedScreenshotPath = matched.screenshotPath
             var effectiveMatchedScreenshotSha = matched.screenshotSha256
             if (matched.screenshotPath.isBlank() && screenshotPath.isNotBlank()) {
-                effectiveMatchedScreenshotPath = screenshotPath
-                effectiveMatchedScreenshotSha = screenshotSha256
-                repository.updateExistingTransaction(
-                    matched.copy(
-                        screenshotPath = screenshotPath,
-                        screenshotSha256 = screenshotSha256,
-                        updatedAtMillis = capturedAtMillis
-                    )
+                val attached = repository.attachBillScreenshotIfNeeded(
+                    transactionId = matched.id,
+                    screenshotPath = screenshotPath,
+                    screenshotSha256 = screenshotSha256,
+                    nowMillis = capturedAtMillis
                 )
+                if (attached) {
+                    effectiveMatchedScreenshotPath = screenshotPath
+                    effectiveMatchedScreenshotSha = screenshotSha256
+                } else {
+                    BillScreenshotStorage.deleteIfExists(screenshotPath)
+                }
             } else if (screenshotPath.isNotBlank() && screenshotPath != matched.screenshotPath) {
                 BillScreenshotStorage.deleteIfExists(screenshotPath)
             }
 
-            // 防止同一次页面停留或上下滚动时在 15 秒内重复弹多次胶囊
+            // 防止同一次页面停留或上下滚动时在 15 秒内重复弹多次胶囊（若存在多笔同金额 AI_LIVE_CASHIER 归属歧义，必须立即弹出疑似重复供用户裁决）
             val promptCooldownKey = "DUP_${matched.id}"
             val lastPromptTime = recentDuplicatePromptCooldown[promptCooldownKey] ?: 0L
-            if (capturedAtMillis - lastPromptTime < 15_000L && captureSource != "AI_SANDBOX") {
+            if (!hasAmbiguousLiveCashierCandidates &&
+                capturedAtMillis - lastPromptTime < 15_000L &&
+                captureSource != "AI_SANDBOX"
+            ) {
                 return null
             }
             recentDuplicatePromptCooldown[promptCooldownKey] = capturedAtMillis
@@ -1002,7 +1397,7 @@ class CapturePipelineCoordinator(
             )
             scope.launch {
                 delay(680L)
-                notifier.sendSuspectedDuplicateNotification(
+                uiGateway.sendSuspectedDuplicateNotification(
                     candidateId = candidateId,
                     tx = candidateTx,
                     wallets = wallets,
@@ -1060,50 +1455,75 @@ class CapturePipelineCoordinator(
             transactionId = savedTx.id
         )
 
-        // 1. 立即弹出一加 120Hz 流体云实况胶囊（带「撤销」按钮）
+        // 1. 若需补抓无障碍账单原图：在弹出流体云胶囊前先做前台宿主复核并抓取 SurfaceFlinger 屏幕帧，
+        //    彻底杜绝切回聊天/桌面后误截隐私页面，且避免将本应用流体云胶囊截入账单原图；WebP 编码写盘继续留在后台异步完成。
+        val pendingSavedScreenshot: CompletableDeferred<SavedScreenshotInfo?>? = if (
+            screenshotPath.isBlank() &&
+            (captureSource == "AI_ACCESSIBILITY" ||
+                captureSource == "AI_LIVE_CASHIER" ||
+                captureSource == "AI_MERGED")
+        ) {
+            val service = PaymentAccessibilityService.instance
+            if (service != null) {
+                val frameCapturedDeferred = CompletableDeferred<Unit>()
+                val savedDeferred = CompletableDeferred<SavedScreenshotInfo?>()
+                val abortBeforeBanner = AtomicBoolean(false)
+                service.captureBillEvidenceScreenshot(
+                    expectedPackage = packageName,
+                    abortSignal = abortBeforeBanner,
+                    onFrameCaptured = { frameCapturedDeferred.complete(Unit) },
+                    onSaved = { info -> savedDeferred.complete(info) }
+                )
+                val frameDone = withTimeoutOrNull(320L) {
+                    frameCapturedDeferred.await()
+                }
+                if (frameDone == null) {
+                    abortBeforeBanner.set(true)
+                }
+                savedDeferred
+            } else {
+                null
+            }
+        } else {
+            null
+        }
+
+        // 2. 弹出一加 120Hz 流体云实况胶囊（带「撤销」按钮）
         showOverlayBannerForRecordedTransaction(savedTx, walletName, isFused = false)
 
-        // 2. 错峰 680ms（待流体云展开动画完全结束后）在后台静默写入通知栏，并在需要时后台补存账单截图，绝不抢占动画期间的 GPU/SurfaceFlinger
+        // 3. 错峰 680ms（待流体云展开动画完全结束后）在后台静默写入通知栏，并走单列条件原子更新绑定原图，杜绝整行覆写冲掉并发分类/融合更新
         scope.launch {
             delay(680L)
             val updatedWallets = repository.getAllWallets()
-            notifier.sendSilentRecordedNotification(savedTx, updatedWallets)
-            if (screenshotPath.isBlank() &&
-                (captureSource == "AI_ACCESSIBILITY" || captureSource == "AI_MERGED")
-            ) {
-                // 等 5 秒流体云胶囊缩回后再静默截屏归档（或立即截屏归档）
-                val accessibilityCaptured = captureCurrentBillScreenSilently()
+            uiGateway.sendSilentRecordedNotification(savedTx, updatedWallets)
+            if (pendingSavedScreenshot != null) {
+                val accessibilityCaptured = withTimeoutOrNull(1_800L) {
+                    pendingSavedScreenshot.await()
+                }
                 if (accessibilityCaptured != null) {
-                    val latestTx = repository.getTransactionById(savedTx.id)
-                    if (latestTx == null) {
-                        // 若用户在截屏期间已点击流体云「撤销」删除了该笔账单，立即清理刚生成的截图文件并退出
-                        BillScreenshotStorage.deleteIfExists(accessibilityCaptured.absolutePath)
-                        return@launch
-                    }
-                    val withShot = latestTx.copy(
+                    val attached = repository.attachBillScreenshotIfNeeded(
+                        transactionId = savedTx.id,
                         screenshotPath = accessibilityCaptured.absolutePath,
                         screenshotSha256 = accessibilityCaptured.sha256,
-                        updatedAtMillis = System.currentTimeMillis()
+                        nowMillis = System.currentTimeMillis()
                     )
-                    repository.updateExistingTransaction(withShot)
-                    recentRecordedTransactions[amountTypeFingerprint] = withShot
+                    if (!attached) {
+                        BillScreenshotStorage.deleteIfExists(accessibilityCaptured.absolutePath)
+                    } else {
+                        pipelineMutex.withLock {
+                            val cached = recentRecordedTransactions[amountTypeFingerprint]
+                            if (cached != null && cached.id == savedTx.id && cached.screenshotPath.isBlank()) {
+                                recentRecordedTransactions[amountTypeFingerprint] = cached.copy(
+                                    screenshotPath = accessibilityCaptured.absolutePath,
+                                    screenshotSha256 = accessibilityCaptured.sha256
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
         return savedTx
-    }
-
-    private suspend fun captureCurrentBillScreenSilently(): SavedScreenshotInfo? {
-        val service = PaymentAccessibilityService.instance ?: return null
-        return withTimeoutOrNull(1_200L) {
-            suspendCancellableCoroutine { cont ->
-                service.captureBillEvidenceScreenshot { info ->
-                    if (cont.isActive) {
-                        cont.resume(info)
-                    }
-                }
-            }
-        }
     }
 
     private suspend fun saveEvidenceRecord(
@@ -1271,6 +1691,89 @@ class CapturePipelineCoordinator(
     private fun isSameCalendarDay(tsA: Long, tsB: Long): Boolean {
         val fmt = SimpleDateFormat("yyyy-MM-dd", Locale.CHINA)
         return fmt.format(Date(tsA)) == fmt.format(Date(tsB))
+    }
+
+    private fun isUnnumberedLiveCashierOrigin(tx: TransactionEntity): Boolean {
+        val key = tx.orderKey.ifBlank { tx.transactionNo }.ifBlank { tx.merchantOrderNo }
+        if (key.isNotBlank()) return false
+        return tx.captureSource == "AI_LIVE_CASHIER" || tx.rawCapturedText.contains("[AI_LIVE_CASHIER")
+    }
+
+    private fun extractCashierVisitTag(rawText: String): String {
+        val m = CASHIER_VISIT_TAG_REGEX.find(rawText) ?: return ""
+        val pkg = m.groupValues[1].trim()
+        val visitId = m.groupValues[2].trim()
+        return if (visitId.isNotEmpty()) "$pkg#v$visitId" else ""
+    }
+
+    private fun hasExplicitSecondTimeInText(rawText: String): Boolean =
+        EXPLICIT_SECOND_TIME_REGEX.containsMatchIn(rawText)
+
+    private fun extractExplicitCardTail4(text: String): String =
+        EXPLICIT_CARD_TAIL4_REGEX.find(text)?.let { m ->
+            m.groupValues[1].ifEmpty { m.groupValues[2] }
+        }.orEmpty()
+
+    /**
+     * 判断数据库内尚未绑定单号的 `AI_LIVE_CASHIER` 记录是否属于当前二阶段通知/账单详情/电商订单详情的候选：
+     * - 金额、币种、收支类型一致；
+     * - 满足单向合理时序窗（`existing.timestamp - incoming.timestamp in -15_000L..180_000L`，兼容收银台在支付完成后数秒至 3 分钟内展示或轻微时钟偏差）或跨端同单配对规则；
+     * - 银行卡尾号与具体商户无硬冲突。
+     */
+    private fun isMatchingLiveCashierStage1Candidate(
+        existing: TransactionEntity,
+        incoming: TransactionEntity,
+        incomingPackage: String,
+        incomingRawText: String
+    ): Boolean {
+        if (!isUnnumberedLiveCashierOrigin(existing)) return false
+        if (existing.type != incoming.type ||
+            existing.currency != incoming.currency ||
+            existing.amountCents != incoming.amountCents
+        ) {
+            return false
+        }
+
+        val timeDeltaMs = existing.timestamp - incoming.timestamp
+        val inDirectionalWindow = timeDeltaMs in -15_000L..180_000L
+        val isCrossChannelPair = isCrossChannelSameOrderPair(
+            txA = existing,
+            txB = incoming,
+            txBPackage = incomingPackage,
+            txBRawText = incomingRawText
+        )
+        if (!inDirectionalWindow && !isCrossChannelPair) {
+            return false
+        }
+
+        // 若双方均显式携带了 4 位银行卡尾号且不相同，拒绝串单
+        val existingTail4 = extractExplicitCardTail4(existing.paymentMethodRaw)
+        val incomingTail4 = extractExplicitCardTail4(incoming.paymentMethodRaw)
+        if (existingTail4.isNotBlank() && incomingTail4.isNotBlank() && existingTail4 != incomingTail4) {
+            return false
+        }
+
+        if (isCrossChannelPair || incoming.captureSource == "AI_NOTIFICATION") {
+            return true
+        }
+
+        val genericOrPlatformMerchants = setOf(
+            "日常商户", "收款入账", "商户退款", "个人账户间流转", "消费", "支出",
+            "拼多多", "拼多多平台商户", "上海寻梦信息技术有限公司",
+            "京东", "京东商城平台商户", "江苏京东信息技术有限公司", "北京京东世纪贸易有限公司", "网银在线",
+            "淘宝", "天猫", "支付宝(中国)网络技术有限公司",
+            "抖音商城", "抖音生活服务", "抖音支付", "武汉合众易宝科技有限公司", "合众易宝",
+            "美团", "美团平台商户", "北京三快在线科技有限公司", "饿了么", "支付宝", "微信", "微信支付", "财付通"
+        )
+        val exMerchant = existing.merchant.trim()
+        val inMerchant = incoming.merchant.trim()
+        val exGeneric = exMerchant.isBlank() || exMerchant in genericOrPlatformMerchants || exMerchant.endsWith("平台商户")
+        val inGeneric = inMerchant.isBlank() || inMerchant in genericOrPlatformMerchants || inMerchant.endsWith("平台商户")
+        if (exGeneric || inGeneric) {
+            return true
+        }
+        return exMerchant.contains(inMerchant, ignoreCase = true) ||
+            inMerchant.contains(exMerchant, ignoreCase = true)
     }
 
     /**
@@ -1462,15 +1965,35 @@ class CapturePipelineCoordinator(
             enrichedFields.add("数量(${incoming.quantityDesc})")
         }
 
-        // 如果原账单时间只有整分/日期（如通知栏时间或订单号日期前缀 12:00:00）或原账单时间带非零毫秒（曾用截图时间兜底），而新识别提取到了精确到秒的真实下单时间，同步校准！
-        val existingWasFallbackTime = existing.timestamp % 1_000L != 0L ||
+        // 如果原账单属于 `AI_LIVE_CASHIER`（暂用采集时刻，即使恰好落在 `.000` 整秒也必须视为待校准时间！）、
+        // 或原账单时间只有整分/日期（如通知栏时间或订单号日期前缀 12:00:00）、或带非零毫秒，而新识别提取到了真实支付时间，同步校准！
+        val existingIsLiveCashier = existing.captureSource == "AI_LIVE_CASHIER" ||
+            isUnnumberedLiveCashierOrigin(existing)
+        val incomingIsLiveCashier = incoming.captureSource == "AI_LIVE_CASHIER" ||
+            incoming.rawCapturedText.contains("[AI_LIVE_CASHIER")
+        val existingWasFallbackTime = existingIsLiveCashier ||
+            existing.timestamp % 1_000L != 0L ||
             existing.timestamp % 60_000L == 0L ||
             isDateOnlyFallbackTimestamp(existing.timestamp)
-        val incomingHasExactSecondTime = incoming.timestamp % 1_000L == 0L &&
-            incoming.timestamp % 60_000L != 0L &&
+        val incomingHasExactSecondTime = !incomingIsLiveCashier &&
+            incoming.timestamp % 1_000L == 0L &&
             !isDateOnlyFallbackTimestamp(incoming.timestamp) &&
+            (incoming.timestamp % 60_000L != 0L || hasExplicitSecondTimeInText(incoming.rawCapturedText))
+        val incomingHasExplicitMinuteTimeForLiveCashier = existingIsLiveCashier &&
+            !incomingIsLiveCashier &&
+            !isDateOnlyFallbackTimestamp(incoming.timestamp) &&
+            AiAccountingEngine.hasExplicitOccurredTime(incoming.rawCapturedText, capturedAtMillis)
+        val updatedTimestamp = if (
+            existingWasFallbackTime &&
+            (incomingHasExactSecondTime || incomingHasExplicitMinuteTimeForLiveCashier) &&
             incoming.timestamp != existing.timestamp
-        val updatedTimestamp = if (existingWasFallbackTime && incomingHasExactSecondTime) {
+        ) {
+            enrichedFields.add("支付时间")
+            incoming.timestamp
+        } else if (existingIsLiveCashier &&
+            (incomingHasExactSecondTime || incomingHasExplicitMinuteTimeForLiveCashier) &&
+            incoming.timestamp == existing.timestamp
+        ) {
             enrichedFields.add("支付时间")
             incoming.timestamp
         } else {
@@ -1527,7 +2050,7 @@ class CapturePipelineCoordinator(
         val enrichedSummary = enrichedFields.joinToString("/")
         val subtitle = "已补充 $enrichedSummary · ${tx.merchant.ifBlank { tx.category }} · $walletName"
 
-        RecognitionBanner.showRecorded(
+        uiGateway.showRecordedBanner(
             statusTitle = "已补全账单详情",
             amountText = "$sign$symbol$amtStr",
             subtitle = subtitle,
@@ -1589,7 +2112,7 @@ class CapturePipelineCoordinator(
         }
         val subtitle = "${discountHint}${tx.category} · $merchantPart · $walletName · $occurredShort"
 
-        RecognitionBanner.showRecorded(
+        uiGateway.showRecordedBanner(
             statusTitle = statusText,
             amountText = amountText,
             subtitle = subtitle,
@@ -1615,7 +2138,7 @@ class CapturePipelineCoordinator(
         val merchantPart = tx.merchant.ifBlank { tx.category }
         val subtitle = "$merchantPart · $duplicateReason · 默认未录入"
 
-        RecognitionBanner.showSuspectedDuplicate(
+        uiGateway.showSuspectedDuplicateBanner(
             amountText = "$sign$symbol$amtStr",
             subtitle = subtitle,
             walletName = walletName,
@@ -1654,6 +2177,16 @@ class CapturePipelineCoordinator(
     }
 
     companion object {
+        private val CASHIER_VISIT_TAG_REGEX = Regex(
+            """\[AI_[A-Z0-9_]+\s*\|\s*([^|\]]+?)\s*\|\s*visit=(\d+)\]:"""
+        )
+        private val EXPLICIT_SECOND_TIME_REGEX = Regex(
+            """\b\d{1,2}:\d{2}:\d{2}\b|\d{1,2}时\d{1,2}分\d{1,2}秒"""
+        )
+        private val EXPLICIT_CARD_TAIL4_REGEX = Regex(
+            """[(（]\s*(\d{4})\s*[)）]|(?:尾号|储蓄卡|借记卡|信用卡)\s*(\d{4})(?!\d)"""
+        )
+
         internal fun mergeEnrichedTags(existingTags: String, incomingTags: String): Pair<String, List<String>> {
             val existingTagList = TagCatalog.parseTags(existingTags)
             val incomingTagList = TagCatalog.parseTags(incomingTags)
@@ -1686,7 +2219,7 @@ class CapturePipelineCoordinator(
                     captureSource = "AI_ACCESSIBILITY",
                     rawText = "账单详情 | 山东高速 | -7.51 | 支付时间 | 2026-11-05 16:34:54 | 交易单号 | 4200002975202611059216731849",
                     outcome = CaptureEventOutcome.RECORDED,
-                    detailSummary = "[支出] 交通-高速过路 · 山东高速 (7.51 CNY · 1件) -> 招商银行信用卡(3354) · Key:731849"
+                    detailSummary = "[支出] 交通-高速过路 · 山东高速 (7.51 CNY · 1件) -> 储蓄卡 · Key:731849"
                 )
             )
         }

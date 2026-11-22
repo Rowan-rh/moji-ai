@@ -12,6 +12,8 @@ import com.moji.ai.ai.AiConfig
 import com.moji.ai.ai.CaptureAppGroup
 import com.moji.ai.ai.CaptureAppWhitelistEntry
 import com.moji.ai.ai.CaptureAppWhitelistManager
+import com.moji.ai.ai.PayslipImportEngine
+import com.moji.ai.ai.PayslipParseResult
 import com.moji.ai.ai.WindowPageSignature
 import com.moji.ai.ai.MerchantMemoryEntry
 import com.moji.ai.ai.ProposedCategoryItem
@@ -31,6 +33,8 @@ import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.repository.PayslipCommitOutcome
+import com.moji.ai.data.repository.PayslipCommitRequest
 import com.moji.ai.data.model.AmountColorScheme
 import com.moji.ai.data.model.AppFontScalePreset
 import com.moji.ai.data.model.AppLockManager
@@ -59,11 +63,14 @@ import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.UserProfileConfig
 import com.moji.ai.data.model.UserProfileManager
 import com.moji.ai.notification.DailyReminderScheduler
+import com.moji.ai.notification.SilentBookkeepingNotifier
 import com.moji.ai.service.BillScreenshotStorage
 import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.update.AppUpdateConfig
 import com.moji.ai.update.ReleaseUpdateInfo
 import com.moji.ai.update.UpdateCheckState
+import com.moji.ai.widget.MoJiLedgerWidgetUpdater
+import com.moji.ai.widget.WidgetPinRequestResult
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
@@ -706,7 +713,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val onUndo: (() -> Unit)? = if (undoTransactionId != null || extraUndo != null) {
             {
                 viewModelScope.launch {
-                    undoTransactionId?.let { repository.undoAndDeleteTransaction(it) }
+                    undoTransactionId?.let { id ->
+                        if (repository.undoAndDeleteTransaction(id)) {
+                            SilentBookkeepingNotifier.cancelNotificationForTransaction(app, id)
+                        }
+                    }
                     extraUndo?.invoke()
                 }
             }
@@ -1127,6 +1138,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (sanitized.isEmpty()) return
         _currentLedger.value = sanitized
         uiPrefs.edit().putString("current_ledger", sanitized).apply()
+        MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
     }
 
     fun createLedger(name: String, switchToLedger: Boolean = true) {
@@ -1145,12 +1157,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val next = !_hideAssetAmounts.value
         _hideAssetAmounts.value = next
         uiPrefs.edit().putBoolean("hide_asset_amounts", next).apply()
+        MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
     }
 
     fun updateMonthlyBudgetYuan(budgetYuan: Double) {
         val cents = (budgetYuan * 100.0).roundToLong().coerceAtLeast(0L)
         _monthlyBudgetCents.value = cents
         uiPrefs.edit().putLong("monthly_budget_cents", cents).apply()
+        MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
     }
 
     fun updateAiConfig(newConfig: AiConfig) {
@@ -1187,10 +1201,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             if (tx.id == 0L) {
                 repository.recordTransaction(tx)
+                app.merchantMemoryManager.learnFromTransaction(tx)
             } else {
-                repository.updateExistingTransaction(tx)
+                val updated = repository.updateExistingTransaction(tx)
+                if (updated) {
+                    app.merchantMemoryManager.learnFromTransaction(tx)
+                } else {
+                    postMessage("编辑失败：已部分退款账单折算金额不能小于已退金额，且不可切换收支类型")
+                }
             }
-            app.merchantMemoryManager.learnFromTransaction(tx)
         }
     }
 
@@ -1556,6 +1575,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             MoJiCloudSyncClient.recordRestoredState(restoredSig)
+            MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
             txCount
         } finally {
             MoJiCloudSyncClient.endRestoreSuppression()
@@ -1565,6 +1585,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun deleteTransaction(txId: Long) {
         viewModelScope.launch {
             if (repository.undoAndDeleteTransaction(txId)) {
+                SilentBookkeepingNotifier.cancelNotificationForTransaction(app, txId)
                 postMessage("账单已删除，余额已回滚")
             }
         }
@@ -1579,9 +1600,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val cents = (refundYuan * 100.0).roundToLong()
             if (cents > 0L) {
+                val origExpense = repository.getTransactionById(expenseId)
                 val refundId = repository.refundExpense(expenseId, cents, receiveWalletId, note)
                 if (refundId != null) {
-                    postMessage("已退款 ¥${String.format("%.2f", cents / 100.0)}")
+                    val sym = CurrencyCode.fromCode(origExpense?.currency ?: "CNY").symbol
+                    postMessage("已退款 $sym${String.format(Locale.US, "%.2f", cents / 100.0)}")
                 }
             }
         }
@@ -1817,6 +1840,102 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 postMessage("保存专项保障账户失败：${err.message ?: err.javaClass.simpleName}")
             }
         }
+    }
+
+    suspend fun parsePayslipImageUri(uri: Uri): Result<PayslipParseResult> {
+        return PayslipImportEngine.recognizePayslipImageUri(
+            context = app,
+            imageUri = uri,
+            defaultSettings = DedicatedFundManager.currentSettings
+        )
+    }
+
+    suspend fun parsePayslipDocumentUri(uri: Uri): Result<PayslipParseResult> = withContext(Dispatchers.IO) {
+        val rawBytes = runCatching {
+            app.contentResolver.openInputStream(uri)?.use { stream ->
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(8192)
+                var total = 0
+                while (true) {
+                    val read = stream.read(buf)
+                    if (read < 0) break
+                    total += read
+                    if (total > 12 * 1024 * 1024) {
+                        return@withContext Result.failure(
+                            IllegalArgumentException("薪资表文件超过 12MB 上限，请导出当月 CSV / TSV 后重试")
+                        )
+                    }
+                    out.write(buf, 0, read)
+                }
+                out.toByteArray()
+            }
+        }.getOrNull() ?: return@withContext Result.failure(IllegalArgumentException("无法读取所选薪资表文件"))
+
+        val fileNameHint = uri.lastPathSegment.orEmpty()
+        val decodedText = PayslipImportEngine.decodePayslipBytes(rawBytes, fileNameHint).getOrElse { err ->
+            return@withContext Result.failure(err)
+        }
+        PayslipImportEngine.parsePayslipText(
+            rawText = decodedText,
+            defaultSettings = DedicatedFundManager.currentSettings
+        )
+    }
+
+    suspend fun parsePayslipRawText(rawText: String): Result<PayslipParseResult> = withContext(Dispatchers.Default) {
+        PayslipImportEngine.parsePayslipText(
+            rawText = rawText,
+            defaultSettings = DedicatedFundManager.currentSettings
+        )
+    }
+
+    suspend fun calibratePayslipWithCloudAi(rawText: String): Result<PayslipParseResult> {
+        return PayslipImportEngine.calibrateWithCloudAi(
+            rawText = rawText,
+            config = _aiConfig.value,
+            defaultSettings = DedicatedFundManager.currentSettings
+        )
+    }
+
+    suspend fun commitPayslipImport(request: PayslipCommitRequest): PayslipCommitOutcome {
+        val outcome = withContext(Dispatchers.IO) {
+            repository.recordPayslipTransactions(request)
+        }
+        if (outcome is PayslipCommitOutcome.Success) {
+            MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
+            val createdWalletNames = listOfNotNull(
+                outcome.createdMedicalWallet?.name,
+                outcome.createdProvidentWallet?.name
+            )
+            val walletSuffix = if (createdWalletNames.isNotEmpty()) {
+                "（已自动建档：${createdWalletNames.joinToString("、")}）"
+            } else {
+                ""
+            }
+            val mainTx = outcome.mainTransaction
+            if (mainTx != null) {
+                postMessage(
+                    text = "工资条已三路入账（共 ${outcome.recordedCount} 笔）$walletSuffix",
+                    undoTransactionId = mainTx.id
+                ) {
+                    MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
+                }
+            } else {
+                val childIds = listOfNotNull(
+                    outcome.medicalChildTransaction?.id,
+                    outcome.providentChildTransaction?.id
+                )
+                postMessage(
+                    text = "工资条专项资金已入账（共 ${outcome.recordedCount} 笔）$walletSuffix",
+                    undoTransactionId = childIds.firstOrNull()
+                ) {
+                    for (extraId in childIds.drop(1)) {
+                        repository.undoAndDeleteTransaction(extraId)
+                    }
+                    MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
+                }
+            }
+        }
+        return outcome
     }
 
     fun deleteWallet(wallet: WalletEntity) {
@@ -2310,6 +2429,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ): Result<PasswordProtectionConfig> {
         val res = AppLockManager.enablePasswordProtection(newPin, confirmPin, hint)
         res.onSuccess {
+            MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
             postMessage("已开启密码保护")
         }
         return res
@@ -2330,6 +2450,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun disablePasswordProtection(currentPin: String): Result<PasswordProtectionConfig> {
         val res = AppLockManager.disablePasswordProtection(currentPin)
         res.onSuccess {
+            MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
             postMessage("已关闭密码保护")
         }
         return res
@@ -2342,6 +2463,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateHideRecentTaskPreview(hide: Boolean) {
         AppLockManager.updateHideRecentTaskPreview(hide)
+        MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
         postMessage(if (hide) "已开启多任务模糊与防截屏保护" else "已关闭多任务模糊与防截屏保护")
     }
 
@@ -2444,7 +2566,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun resetAppearanceDefaults() {
         AppearanceConfigManager.resetToDefaults()
+        MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
         postMessage("已恢复默认外观显示设置")
+    }
+
+    fun requestPinDesktopWidget() {
+        when (MoJiLedgerWidgetUpdater.requestPinWidget(app)) {
+            WidgetPinRequestResult.SYSTEM_PROMPT_REQUESTED -> {
+                postMessage("已调起系统桌面小组件面板；若桌面未弹窗，可长按桌面空白处 → 小组件添加")
+            }
+            WidgetPinRequestResult.UNSUPPORTED_BY_LAUNCHER,
+            WidgetPinRequestResult.FAILED -> {
+                postMessage("当前桌面不支持直接固定，请长按手机桌面空白处 → 小组件搜索「默记」添加")
+            }
+        }
     }
 
     fun updateUserNickname(rawNickname: String) {

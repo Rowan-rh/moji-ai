@@ -119,7 +119,7 @@ class AiAccountingEngine(
         fun isMedicalInsuranceWallet(wallet: WalletEntity): Boolean =
             DedicatedFundManager.isMedicalInsuranceWallet(wallet)
 
-        private val MED_PREFIX_TAG_REGEX = Regex("""\[AI_[A-Z_]+\s*\|\s*[^\]]+\]:\s*""")
+        private val MED_PREFIX_TAG_REGEX = Regex("""\[AI_[A-Z0-9_]+\s*\|[^\]]+\]:\s*""")
         private val MED_SPLIT_CUR_DOT_REGEX = Regex("""(¥|￥)\s*\|?\s*(\d{1,7})\s*\|\s*(\.\d{1,2})""")
         private val MED_SPLIT_CUR_DOT2_REGEX = Regex("""(¥|￥)\s*\|?\s*(\d{1,7})\.\s*\|\s*(\d{1,2})""")
         private val MED_SPLIT_NUM_DOT_REGEX = Regex("""(\d{1,7})\s*\|\s*(\.\d{1,2})(?=\s|\||$)""")
@@ -211,6 +211,8 @@ class AiAccountingEngine(
 
         private val KNOWN_FIELD_LABELS = setOf(
             "返回", "关闭", "更多", "完成", "主页", "联系", "账单详情", "交易详情", "服务详情", "订单详情",
+            "返回商家", "返回商户", "返回应用", "完成付款", "付款完成", "回首页", "继续购物",
+            "点击给商家对账", "给商家对账", "出示给商家",
             "当前状态", "交易状态", "支付成功", "付款成功", "交易成功", "拼单成功", "待发货", "待收货", "已签收",
             "对方已收钱", "已收钱", "已存入零钱", "已转账", "退款成功", "已全额退款", "交易关闭", "交易已关闭",
             "商品", "商品说明", "转账说明", "收款方备注", "留言", "备注",
@@ -223,7 +225,8 @@ class AiAccountingEngine(
             "交易单号", "商户单号", "转账单号", "订单号", "商家订单号", "流水号", "订单编号", "支付宝交易号", "快递单号",
             "商品总价", "商品总额", "商品金额", "订单总价", "订单金额", "原价", "总价",
             "实付", "实付款", "实付金额", "实扣", "实际支付", "应付总额", "合计实付",
-            "店铺优惠", "平台优惠", "百亿补贴", "官方立减", "支付优惠", "优惠券", "红包抵扣", "京豆抵扣", "共减", "已优惠", "优惠金额", "运费",
+            "店铺优惠", "平台优惠", "百亿补贴", "官方立减", "百次立减", "随机立减", "笔笔立减", "支付立减", "银行卡立减", "碰一下立减",
+            "支付优惠", "优惠券", "红包抵扣", "京豆抵扣", "共减", "已优惠", "优惠金额", "运费",
             "账单服务", "对订单有疑惑", "对此订单有疑问", "定位到此交易", "在此商户的交易",
             "申请退款", "再来一单", "查看往来记录", "投诉", "常见问题", "全部账单", "复制",
             "添加", "请选择", "开关", "计入收支", "标签", "账单分类", "账单管理",
@@ -233,17 +236,23 @@ class AiAccountingEngine(
 
         private val GENERIC_MERCHANT_BLACKLIST = setOf(
             "微信支付", "微信", "支付宝", "云闪付", "招商银行", "工商银行", "建设银行",
-            "中国银行", "农业银行", "交通银行", "邮储银行", "账单详情", "交易详情", "订单详情", "支付成功",
+            "中国银行", "农业银行", "交通银行", "邮储银行", "平安银行", "浦发银行", "中信银行",
+            "兴业银行", "民生银行", "光大银行", "华夏银行", "广发银行", "北京银行", "上海银行",
+            "花呗", "蚂蚁花呗", "余额宝", "账户余额", "支付宝余额", "零钱", "微信零钱", "零钱通",
+            "白条", "京东白条", "美团月付", "抖音月付", "信用购", "先用后付",
+            "账单详情", "交易详情", "订单详情", "支付成功",
             "付款成功", "交易成功", "转账成功", "收款成功", "还款成功", "提现已发起", "拼单成功", "交易关闭", "交易已关闭",
             "待发货", "待收货", "已签收", "已完成", "买家已付款", "卖家已发货",
             "退款成功", "已全额退款", "扣款成功", "代付成功", "当前状态", "交易状态",
             "医保支付", "医保统筹", "医保个账", "医保个人账户", "医保基金", "统筹支付", "统筹基金", "统筹基金支付",
             "基本医疗统筹", "大病统筹", "公务员补助", "医疗救助", "个账支付", "个人账户支付", "历年账户", "当年账户", "家庭共济", "医疗保险支付",
-            "返回", "完成", "更多", "回首页", "主页", "联系", "留言", "个人", "商户", "消费", "支出", "收入",
+            "返回", "完成", "关闭", "返回商家", "返回商户", "返回应用", "完成付款", "付款完成",
+            "点击给商家对账", "给商家对账", "出示给商家",
+            "更多", "回首页", "主页", "联系", "留言", "个人", "商户", "消费", "支出", "收入",
             "二维码收款", "扫二维码付款", "浮窗", "退出星标", "搜索", "设置", "复制",
             "消息盒子", "最近消息", "全部账单", "服务详情", "账单管理", "账单分类",
             "商品总价", "商品总额", "商品金额", "订单总价", "订单金额", "原价", "总价",
-            "实付款", "实付", "店铺优惠", "平台优惠", "百亿补贴", "运费",
+            "实付款", "实付", "店铺优惠", "平台优惠", "百亿补贴", "百次立减", "随机立减", "笔笔立减", "支付立减", "银行卡立减", "碰一下立减", "运费",
             "我的消费图鉴", "添加", "请选择", "开关", "联系商家", "联系客服", "申请售后", "加入购物车",
             "查看订单", "去商城逛逛", "主要消费项目包括", "主要消费项目包括："
         )
@@ -366,7 +375,7 @@ class AiAccountingEngine(
          * 防止底部推荐商品的价格（如 ¥75、¥19.1、¥259.9）和标签（立减112元、先用后付）污染当前订单。
          */
         fun stripEcommerceRecommendationFooter(rawText: String): String {
-            val segments = rawText.split(Regex("""(?=\[AI_[A-Z_]+\s*\|)""")).filter { it.isNotBlank() }
+            val segments = rawText.split(Regex("""(?=\[AI_[A-Z0-9_]+\s*\|)""")).filter { it.isNotBlank() }
             if (segments.size > 1) {
                 return segments.joinToString(" | ") { stripEcommerceRecommendationFooterSingle(it) }
             }
@@ -540,11 +549,14 @@ class AiAccountingEngine(
             captureMode = captureMode
         )
 
-        // 对于无障碍/OCR 结构化账单详情页，若本地高智商解析器已高置信度提取出金额与字段，直接 0 延迟返回，避免网络请求拖慢流体云弹出速度
+        // 对于无障碍/OCR 结构化账单详情页与专用收银台完成页，若本地高智商解析器已高置信度提取出金额与字段，直接 0 延迟返回，避免网络请求拖慢流体云弹出速度
         val shouldSkipNetworkForFastScreenCapture = localFallback != null &&
             localFallback.isValidTransaction &&
             localFallback.amount > 0.0 &&
-            (captureMode == "AI_ACCESSIBILITY" || captureMode == "AI_OCR" || captureMode == "AI_MERGED")
+            (captureMode == "AI_ACCESSIBILITY" ||
+                captureMode == "AI_OCR" ||
+                captureMode == "AI_LIVE_CASHIER" ||
+                captureMode == "AI_MERGED")
 
         val parsed: AiParsedTransactionResult? = if (
             !shouldSkipNetworkForFastScreenCapture && (
@@ -589,12 +601,15 @@ class AiAccountingEngine(
             .ifBlank { resolvedTxNo }
             .ifBlank { resolvedMerchantNo }
         val resolvedPayMethod = finalResult.paymentMethodRaw.ifBlank { localFallback?.paymentMethodRaw.orEmpty() }
-        // 严禁把屏幕/截图采集时间冒充为历史账单支付时间；但实时系统通知（自带 postTime）与演练沙盒允许回退到事件发生时刻
+        // 严禁把屏幕/截图采集时间冒充为历史账单支付时间；仅实时系统通知（自带 postTime）、专用收银台即时完成页（AI_LIVE_CASHIER）与演练沙盒允许回退到采集时刻
         val resolvedOccurredAt = extractOccurredTimeMillis(rawText, capturedAtMillis)
             ?: localFallback?.occurredAtMillis
             ?: finalResult.occurredAtMillis
             ?: capturedAtMillis.takeIf {
-                captureMode == "AI_NOTIFICATION" || captureMode == "AI_SANDBOX"
+                captureMode == "AI_NOTIFICATION" ||
+                    captureMode == "AI_SANDBOX" ||
+                    captureMode == "AI_LIVE_CASHIER" ||
+                    rawText.contains("[AI_LIVE_CASHIER")
             }
             ?: return@withContext null
 
@@ -744,6 +759,12 @@ class AiAccountingEngine(
                 }
             }
 
+            // 若显式支付方式已明确给出银行卡 4 位尾号（如 `建设银行储蓄卡(9988)`），但当前钱包库中不存在该尾号账户：
+            // 严禁继续往下误匹配无尾号的通用储蓄卡/信用卡或其他银行卡，直接安全挂空返回 null（不关联账户）
+            if (isExplicitPayField && extractedLast4List.isNotEmpty() && preferCredit == null) {
+                return null
+            }
+
             val directLast4Candidates = wallets.filter { w ->
                 val l4 = w.cardLast4?.trim()
                 !l4.isNullOrBlank() &&
@@ -783,6 +804,11 @@ class AiAccountingEngine(
                         }
                         matchesGroup && (preferCredit == null || w.type.isLiability == preferCredit)
                     }?.let { return it }
+
+                    // 若显式支付方式明确为花呗/白条/月付等信用产品，但用户未建对应信用账户，禁止回退误扣支付宝/微信余额
+                    if (isExplicitPayField && (groupKey == "花呗" || groupKey == "白条") && preferCredit == null) {
+                        return null
+                    }
                 }
             }
 
@@ -1030,7 +1056,7 @@ $recentDesc
         }
         // 1. 先截断拼多多/京东/淘宝底部推荐商品瀑布流，修复端侧 OCR 常见形近字，再合并拆分金额（如 "¥ | 29 | .90"、"¥29 | .90"、"¥ | 29. | 90" -> "¥29.90"）
         val strippedText = stripEcommerceRecommendationFooter(rawText)
-            .replace(Regex("""\[AI_[A-Z_]+\s*\|\s*[^\]]+\]:\s*"""), "")
+            .replace(Regex("""\[AI_[A-Z0-9_]+\s*\|[^\]]+\]:\s*"""), "")
             .replace("订单蝙号", "订单编号")
             .replace("订单编亏", "订单编号")
             .replace("支付万式", "支付方式")
@@ -1087,6 +1113,10 @@ $recentDesc
         val merchantFieldVal = findValueAfterLabel("商户名称", "商户全称", "收款方", "收款方全称", "对方账户", "服务详情", "店铺名称").orEmpty()
         val combinedPayMethod = run {
             val payLabels = setOf("支付方式", "付款方式", "收款方式", "扣款方式", "退款方式", "退回方式", "转入账户")
+            val payMethodTailStopWords = setOf(
+                "复制", "完成", "关闭", "返回", "返回商家", "返回商户", "返回应用",
+                "完成付款", "付款完成", "点击给商家对账", "给商家对账", "出示给商家", "查看订单", "回首页"
+            )
             var found = ""
             for (i in tokens.indices) {
                 val tk = tokens[i]
@@ -1094,7 +1124,8 @@ $recentDesc
                     val parts = mutableListOf<String>()
                     for (j in (i + 1) until minOf(tokens.size, i + 6)) {
                         val nextTk = tokens[j].trim().trimEnd('>', '＞', 'へ', '、', 'v', 'V').trim()
-                        if (nextTk.isBlank() || nextTk == "复制" || nextTk in KNOWN_FIELD_LABELS ||
+                        if (nextTk.isBlank() || nextTk in payMethodTailStopWords || nextTk in KNOWN_FIELD_LABELS ||
+                            nextTk.contains("给商家对账") || nextTk.contains("出示给商家") ||
                             nextTk.startsWith("202") || nextTk.all { it.isDigit() } && nextTk.length >= 10
                         ) {
                             break
@@ -1107,12 +1138,20 @@ $recentDesc
                     }
                 }
             }
+            val inlinePayLabelMatch = Regex(
+                """(?:支付方式|付款方式|收款方式|扣款方式)\s*[:：]?\s*([^\s|，。,；;\n]{2,28}(?:\s*[(（]\d{4}[)）])?)"""
+            ).find(strippedText)?.groupValues?.getOrNull(1)?.trim()
+                ?.replace(Regex("""(?:完成付款|返回商家|返回商户|返回应用|点击给商家对账|给商家对账|完成|关闭)$"""), "")
+                ?.trim()
+                ?.takeIf { it.isNotBlank() && it !in KNOWN_FIELD_LABELS && !it.startsWith("202") }
             val inlineBankCardMatch = Regex("""([A-Za-z一-龥]{2,8}银行(?:信用卡|储蓄卡|借记卡))\s*[(（]?\s*(\d{4})\s*[)）]?""")
                 .find(strippedText)
             val smsBankTailMatch = Regex("""【([^】]{2,8}银行)】.*?尾号(\d{4})(?:信用卡|储蓄卡|借记卡|账户|卡)?""")
                 .find(strippedText)
             found.ifBlank {
                 findValueAfterLabel("支付方式", "付款方式", "收款方式", "扣款方式", "退款方式", "退回方式", "转入账户").orEmpty()
+            }.ifBlank {
+                inlinePayLabelMatch.orEmpty()
             }.ifBlank {
                 when {
                     inlineBankCardMatch != null -> "${inlineBankCardMatch.groupValues[1]}(${inlineBankCardMatch.groupValues[2]})"
@@ -1122,6 +1161,8 @@ $recentDesc
                         val cardKind = if (strippedText.contains("信用卡")) "信用卡" else "储蓄卡"
                         "$bankName$cardKind($tail4)"
                     }
+                    strippedText.contains("蚂蚁花呗") || strippedText.contains("花呗") -> "花呗"
+                    strippedText.contains("余额宝") -> "余额宝"
                     strippedText.contains("多多支付") -> "多多支付"
                     strippedText.contains("抖音月付") -> "抖音月付"
                     strippedText.contains("抖音支付") -> "抖音支付"
@@ -1154,8 +1195,10 @@ $recentDesc
         val orderKey = extractedTxNo.ifBlank { extractedMerchantOrderNo }
         val allowReferenceTimeFallback = captureMode == "AI_NOTIFICATION" ||
             captureMode == "AI_SANDBOX" ||
+            captureMode == "AI_LIVE_CASHIER" ||
             rawText.contains("[AI_NOTIFICATION") ||
-            rawText.contains("[AI_SANDBOX")
+            rawText.contains("[AI_SANDBOX") ||
+            rawText.contains("[AI_LIVE_CASHIER")
         val occurredAtMillis = extractOccurredTimeMillis(
             text = if (payTimeVal.isNotBlank()) "$payTimeVal | $strippedText" else strippedText,
             referenceMillis = referenceMillis,
@@ -1424,8 +1467,18 @@ $recentDesc
                 }
             }
             currency == "USD" -> {
-                wallets.firstOrNull { it.currency == "USD" }
-                    ?: matchWalletForPayment(payMethodVal, strippedText, sourceAppPackage, wallets)
+                val matchedByRule = matchWalletForPayment(payMethodVal, strippedText, sourceAppPackage, wallets)
+                val hasExplicitPayHint = payMethodVal.isNotBlank() || wallets.any { w ->
+                    (!w.cardLast4.isNullOrBlank() && strippedText.contains(w.cardLast4)) ||
+                        strippedText.contains(w.name, ignoreCase = true)
+                }
+                if (hasExplicitPayHint && matchedByRule != null) {
+                    matchedByRule
+                } else {
+                    memoryHit?.preferredWalletId?.let { pid -> wallets.firstOrNull { it.id == pid } }
+                        ?: matchedByRule
+                        ?: wallets.firstOrNull { it.currency.equals("USD", ignoreCase = true) }
+                }
             }
             else -> {
                 val matchedByRule = matchWalletForPayment(payMethodVal, strippedText, sourceAppPackage, wallets)
@@ -1433,7 +1486,13 @@ $recentDesc
                     (!w.cardLast4.isNullOrBlank() && strippedText.contains(w.cardLast4)) ||
                         strippedText.contains(w.name, ignoreCase = true)
                 }
-                if (hasExplicitPayHint && matchedByRule != null) {
+                val explicitUnmatchedCardOrCredit = payMethodVal.isNotBlank() && matchedByRule == null && (
+                    Regex("""\d{4}""").containsMatchIn(payMethodVal) ||
+                        listOf("花呗", "白条", "月付", "信用购", "先用后付").any { payMethodVal.contains(it) }
+                    )
+                if (explicitUnmatchedCardOrCredit) {
+                    null
+                } else if (hasExplicitPayHint && matchedByRule != null) {
                     matchedByRule
                 } else {
                     memoryHit?.preferredWalletId?.let { pid -> wallets.firstOrNull { it.id == pid } }
@@ -1621,21 +1680,31 @@ $recentDesc
             )
         }
 
-        // 4. 提取常规主金额（微信/支付宝账单详情或通知栏金额）
-        val fallbackPrimary = extractPrimaryAmount(strippedText, tokens)
-        val primaryCents = if (explicitActualPaidCents > 0L) {
-            explicitActualPaidCents
+        // 4. 提取常规主金额（微信/支付宝账单详情、收银台划线原价+立减组合或通知栏金额）
+        val strikethroughPair = if (explicitActualPaidCents == 0L && explicitOriginalCents == 0L && explicitDiscountCents > 0L && !hasMedicalSignal) {
+            resolveUnlabeledStrikethroughPair(strippedText, tokens, explicitDiscountCents)
         } else {
-            val rawAmt = fallbackPrimary?.amount ?: return null
-            (rawAmt * 100.0).roundToLong()
+            null
+        }
+        val fallbackPrimary = if (strikethroughPair == null) extractPrimaryAmount(strippedText, tokens) else null
+        val primaryCents = when {
+            explicitActualPaidCents > 0L -> explicitActualPaidCents
+            strikethroughPair != null -> strikethroughPair.paidCents
+            else -> {
+                val rawAmt = fallbackPrimary?.amount ?: return null
+                (rawAmt * 100.0).roundToLong()
+            }
         }
         if (primaryCents <= 0L) return null
 
         val combinedDiscountWithMedical = explicitDiscountCents + medicalPaidCents
-        // 若页面同时给出了明确的「原价/单价/商品总价/订单金额」与「实付款」（或医保混合支付自费实扣），且 原价 >= 实扣，直接以 (原价 - 实扣) 作为最精确的优惠/抵扣金额！
+        // 若页面同时给出了明确的「原价/单价/商品总价/订单金额」与「实付款」（或收银台划线原价+立减守恒，或医保混合支付自费实扣），直接以 (原价 - 实扣) 作为最精确的优惠/抵扣金额！
         val resolvedDiscountCents: Long
         val resolvedOriginalCents: Long
-        if ((explicitActualPaidCents > 0L || medicalPaidCents > 0L) && explicitOriginalCents >= primaryCents) {
+        if (strikethroughPair != null) {
+            resolvedOriginalCents = strikethroughPair.originalCents
+            resolvedDiscountCents = explicitDiscountCents
+        } else if ((explicitActualPaidCents > 0L || medicalPaidCents > 0L) && explicitOriginalCents >= primaryCents) {
             resolvedOriginalCents = explicitOriginalCents
             resolvedDiscountCents = explicitOriginalCents - primaryCents
         } else if (combinedDiscountWithMedical > 0L) {
@@ -1651,13 +1720,84 @@ $recentDesc
             actualPaidCents = primaryCents,
             originalPriceCents = resolvedOriginalCents,
             discountCents = resolvedDiscountCents,
-            sign = if (explicitActualPaidCents > 0L) '-' else fallbackPrimary?.sign,
-            primaryTokenIndex = if (explicitActualTokenIdx >= 0) explicitActualTokenIdx else (fallbackPrimary?.tokenIndex ?: -1),
+            sign = when {
+                explicitActualPaidCents > 0L -> '-'
+                strikethroughPair != null -> '-'
+                else -> fallbackPrimary?.sign
+            },
+            primaryTokenIndex = when {
+                explicitActualTokenIdx >= 0 -> explicitActualTokenIdx
+                strikethroughPair != null -> strikethroughPair.anchorTokenIndex
+                else -> fallbackPrimary?.tokenIndex ?: -1
+            },
             hasMedicalInsurance = hasMedicalSignal && medicalPaidCents > 0L,
             isPureMedicalInsurance = false,
             medicalBreakdown = medBreakdown,
             commercialDiscountCents = resolvedCommercialDiscount
         )
+    }
+
+    private data class StrikethroughPairInfo(
+        val paidCents: Long,
+        val originalCents: Long,
+        val anchorTokenIndex: Int
+    )
+
+    private fun resolveUnlabeledStrikethroughPair(
+        strippedText: String,
+        tokens: List<String>,
+        discountCents: Long
+    ): StrikethroughPairInfo? {
+        if (discountCents <= 0L) return null
+        val discountHints = listOf("优惠", "立减", "抵扣", "减免", "补贴", "红包", "代金券", "余额")
+        val amountCandidateRegex = Regex("""(?:¥|￥)\s*([0-9]{1,7}(?:\.[0-9]{1,2})?)|([0-9]{1,7}(?:\.[0-9]{1,2})?)\s*元""")
+        val candidates = mutableListOf<Pair<Long, Int>>()
+
+        for (i in tokens.indices) {
+            val tk = tokens[i].replace(",", "").trim()
+            val prevTk = tokens.getOrNull(i - 1)?.trim().orEmpty()
+            if (discountHints.any { tk.contains(it) } ||
+                (prevTk.isNotEmpty() && !amountCandidateRegex.containsMatchIn(prevTk) && discountHints.any { prevTk.contains(it) })
+            ) {
+                continue
+            }
+            for (m in amountCandidateRegex.findAll(tk)) {
+                val numStr = m.groupValues[1].ifEmpty { m.groupValues[2] }
+                val cents = numStr.toDoubleOrNull()?.let { (it * 100.0).roundToLong() } ?: continue
+                if (cents > 0L) {
+                    candidates.add(cents to i)
+                }
+            }
+        }
+
+        if (candidates.size < 2 && tokens.size <= 2) {
+            val cleanedInline = strippedText
+                .replace(
+                    Regex("""(?:百次立减|随机立减|笔笔立减|支付立减|银行卡立减|碰一下立减|官方立减|支付优惠|优惠|立减|抵扣|减免)\s*[:：]?\s*[-−]?\s*(?:¥|￥)?\s*[-−]?\s*[0-9]{1,5}(?:\.[0-9]{1,2})?\s*元?"""),
+                    " "
+                )
+            candidates.clear()
+            for (m in amountCandidateRegex.findAll(cleanedInline)) {
+                val numStr = m.groupValues[1].ifEmpty { m.groupValues[2] }
+                val cents = numStr.toDoubleOrNull()?.let { (it * 100.0).roundToLong() } ?: continue
+                if (cents > 0L) {
+                    candidates.add(cents to 0)
+                }
+            }
+        }
+
+        for (a in candidates) {
+            for (b in candidates) {
+                if (a.first < b.first && a.first + discountCents == b.first) {
+                    return StrikethroughPairInfo(
+                        paidCents = a.first,
+                        originalCents = b.first,
+                        anchorTokenIndex = minOf(a.second, b.second)
+                    )
+                }
+            }
+        }
+        return null
     }
 
     private fun extractDiscountCents(strippedText: String, tokens: List<String>): Long {
@@ -1673,9 +1813,9 @@ $recentDesc
             }
         }
 
-        // 2. 扫描各分项优惠（店铺优惠、平台优惠、百亿补贴、立减、支付优惠、多多支付立减、抖音支付优惠、优惠券、红包抵扣、京豆抵扣、省钱月卡等）
+        // 2. 扫描各分项优惠（店铺优惠、平台优惠、百亿补贴、百次立减、随机立减、支付立减、立减、支付优惠等）
         val itemDiscountRegex = Regex(
-            """(?:店铺优惠|平台优惠|百亿补贴|官方立减|多多支付立减|抖音支付优惠|支付优惠|首单立减|优惠券|店铺券|平台券|红包抵扣|代金券|京豆抵扣|京豆|淘金币|省钱月卡|优惠|立减|抵扣|减免)\s*(?:[:：,，\s]|\|)*\s*(?:[-−]\s*)?(?:¥|￥)?\s*(?:[-−]\s*)?([0-9]{1,5}(?:\.[0-9]{1,2})?)\s*元?"""
+            """(?:店铺优惠|平台优惠|百亿补贴|百次立减|随机立减|笔笔立减|支付立减|银行卡立减|碰一下立减|支付宝立减|微信立减|云闪付立减|官方立减|多多支付立减|抖音支付优惠|支付优惠|首单立减|立减优惠|优惠券|店铺券|平台券|红包抵扣|代金券|京豆抵扣|京豆|淘金币|省钱月卡|优惠|立减|抵扣|减免)\s*(?:[:：,，\s]|\|)*\s*(?:[-−]\s*)?(?:¥|￥)?\s*(?:[-−]\s*)?([0-9]{1,5}(?:\.[0-9]{1,2})?)\s*元?"""
         )
         var sumCents = 0L
         val seenMatches = mutableSetOf<String>()
@@ -1876,7 +2016,11 @@ $recentDesc
                 s.startsWith("评价得") || s.startsWith("进店") || s.startsWith("共减") || s.startsWith("0到手") || s.startsWith("到手")
             ) return true
             if (s.contains("好评") || s.contains("价保") || s.contains("双倍赔") || s.contains("退款/售后") ||
-                s.contains("判断依据") || s.contains("交易快照") || s.contains("不开发票") || s.contains("微信支付")
+                s.contains("判断依据") || s.contains("交易快照") || s.contains("不开发票") || s.contains("微信支付") ||
+                s.contains("储蓄卡") || s.contains("信用卡") || s.contains("借记卡") || s.contains("银行卡") ||
+                s.contains("付款方式") || s.contains("支付方式") || s.contains("扣款方式") ||
+                s.contains("给商家对账") || s.contains("出示给商家") || s.contains("返回商家") || s.contains("返回商户") ||
+                s.contains("立减") || s.contains("优惠券") || s.contains("红包抵扣") || s.endsWith("银行")
             ) return true
             if (s.contains("****") || (s.contains("路") && (s.contains("院") || s.contains("号") || s.contains("门") || s.contains("小区"))) ||
                 (s.contains("省") && s.contains("市") && s.contains("区"))
@@ -1902,9 +2046,12 @@ $recentDesc
             }
         }
 
-        // 2. 若未命中显式「商品名称：」，扫描常规电商店铺名与商品标题
-        for (tk in tokens) {
-            val clean = tk.trim().removeSuffix(">").removeSuffix("＞").trim()
+        // 2. 若未命中显式「商品名称：」，扫描常规电商店铺名与商品标题（跳过付款方式标签紧随的银行卡/渠道值节点）
+        val paymentFieldLabels = setOf("支付方式", "付款方式", "收款方式", "扣款方式", "退款方式", "退回方式", "转入账户")
+        for (idx in tokens.indices) {
+            val prevLabel = tokens.getOrNull(idx - 1)?.trim().orEmpty()
+            if (prevLabel in paymentFieldLabels) continue
+            val clean = tokens[idx].trim().removeSuffix(">").removeSuffix("＞").trim()
             if (isNoiseOrAddressToken(clean)) continue
 
             if (shopCandidate.isBlank() && clean.length in 2..24 && (
@@ -1995,9 +2142,10 @@ $recentDesc
             }
         }
 
-        // 2. 识别银行扣款/入账短信中的动账摘要与商户（如「您尾号3870账户快捷支付-抖音支付，支出金额...」「您尾号3870账户银联入账，收入金额...」「您尾号3870账户自动还款，支出金额...」）
-        Regex("""尾号\d{4}(?:账户|信用卡|储蓄卡|借记卡|卡)?([^\s|,，。；;\n]{2,24})""").find(strippedText)?.let { m ->
+        // 2. 识别银行扣款/入账短信中的动账摘要与商户（兼容尾号后紧跟商户或夹带「11月22日14:20在...消费人民币...」两种短信语序）
+        Regex("""尾号\d{4}(?:账户|信用卡|储蓄卡|借记卡|卡)?(?:\s*(?:于|在)?(?:\d{2,4}年)?\d{1,2}月\d{1,2}日(?:\s*\d{1,2}[:时]\d{2}(?:[:分]\d{2}秒?)?)?)?\s*(?:在|于|向)?([^\s|,，。；;\n]{2,36})""").find(strippedText)?.let { m ->
             val rawAction = m.groupValues[1].trim()
+                .replace(Regex("""(?:消费|支出|扣款|入账|收入)(?:金额)?(?:人民币|RMB|CNY|[0-9¥￥]).*$"""), "")
             val cleanedAction = rawAction
                 .removePrefix("快捷支付-")
                 .removePrefix("快捷支付—")
@@ -2027,6 +2175,47 @@ $recentDesc
 
         if (!titleBeforeAmount.isNullOrBlank()) {
             return titleBeforeAmount
+        }
+
+        // 2b. 支付宝/云闪付收银台完成页常将收款商户置于主金额正下方（如 `支付成功 | ¥0.08 | 羊驼老头 | ¥0.10 | 百次立减 | -¥0.02 | 付款方式 | ...`）
+        if (amountTokenIndex >= 0 && amountTokenIndex + 1 < tokens.size) {
+            for (idx in (amountTokenIndex + 1)..minOf(tokens.lastIndex, amountTokenIndex + 3)) {
+                val rawNext = tokens[idx].trim()
+                if (rawNext in KNOWN_FIELD_LABELS) break
+                val candidate = unwrapCounterpartyToken(rawNext)
+                if (! candidate.startsWith("¥") &&
+                    !candidate.startsWith("￥") &&
+                    !candidate.startsWith("-") &&
+                    !candidate.startsWith("+") &&
+                    !candidate.startsWith("−") &&
+                    isCleanMerchantCandidate(candidate)
+                ) {
+                    return candidate
+                }
+            }
+        }
+
+        // 2c. 兼容端侧 OCR 单行空格分隔的收银台文本（如 `支付成功 ¥18.50 羊驼老头 付款方式 花呗 完成`）
+        if (tokens.size <= 2) {
+            val spaceParts = strippedText.split(Regex("""\s+""")).map { it.trim() }.filter { it.isNotEmpty() }
+            var skipNextPayValue = false
+            for (part in spaceParts) {
+                if (skipNextPayValue) {
+                    skipNextPayValue = false
+                    continue
+                }
+                if (part in setOf("支付方式", "付款方式", "收款方式", "扣款方式")) {
+                    skipNextPayValue = true
+                    continue
+                }
+                if (part.startsWith("¥") || part.startsWith("￥") || part.startsWith("-") || part.startsWith("+") || part.startsWith("−")) {
+                    continue
+                }
+                val candidate = unwrapCounterpartyToken(part)
+                if (isCleanMerchantCandidate(candidate)) {
+                    return candidate
+                }
+            }
         }
 
         val patterns = listOf(
@@ -2071,9 +2260,17 @@ $recentDesc
         if (AMOUNT_OR_POINTS_MERCHANT_NOISE_REGEX.matches(clean) || REWARD_POINTS_NOISE_REGEX.matches(clean)) return false
         if (clean.startsWith("立即领取") || clean.startsWith("点击领取") || clean.startsWith("去领取")) return false
         if (clean.startsWith("202") && clean.contains(":")) return false
+        if (Regex("""^(?:\d{2,4}年)?\d{1,2}月\d{1,2}日""").containsMatchIn(clean)) return false
         if (clean.startsWith("使用") || clean.startsWith("通过") || clean.startsWith("付款金额") || clean.startsWith("狂降")) return false
         if (clean.contains(".png") || clean.contains(".jpg") || clean.contains("%3E") || clean.contains("****")) return false
-        if (clean.contains("免密支付") || clean.contains("信用卡(") || clean.contains("储蓄卡(") || clean.contains("尾号")) return false
+        if (clean.contains("免密支付") || clean.contains("信用卡") || clean.contains("储蓄卡") ||
+            clean.contains("借记卡") || clean.contains("银行卡") || clean.contains("尾号") || clean.endsWith("银行")
+        ) return false
+        if (clean.contains("付款方式") || clean.contains("支付方式") || clean.contains("扣款方式") ||
+            clean.contains("给商家对账") || clean.contains("出示给商家") ||
+            clean.contains("返回商家") || clean.contains("返回商户") || clean.contains("返回应用") ||
+            clean.contains("立减") || clean.contains("优惠券") || clean.contains("红包抵扣")
+        ) return false
         if (clean.contains("商品总价") || clean.contains("订单金额") || clean.contains("实付款") || clean.contains("实付") || clean.contains("已优惠")) return false
         val merchantNoiseBlacklist = setOf(
             "门卫代收", "退货包运费", "退货包运费保障中", "退货包运费已失效", "正品险", "7天价保",

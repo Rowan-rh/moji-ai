@@ -86,6 +86,7 @@ import androidx.compose.ui.unit.sp
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.AppearanceConfigManager
+import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.data.model.CategoryCatalog
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.DedicatedFundManager
@@ -1278,11 +1279,11 @@ fun ICostLedgerHomeScreen(
 
     // 侧滑全额退款确认弹窗
     refundingTx?.let { targetTx ->
-        val remainCents = (targetTx.amountCnyCents - targetTx.refundedAmountCents).coerceAtLeast(0L)
+        val remainOrigCents = LedgerRepository.computeRemainingRefundableOrigCents(targetTx)
         val walletName = formatWalletDisplayName(targetTx.sourceWalletId?.let { walletMap[it] }, "原账户")
         ICostConfirmDialog(
             title = "全额退款？",
-            message = "「${targetTx.merchant.ifBlank { targetTx.category }}」可退 ${formatMoneyCents(remainCents)}，" +
+            message = "「${targetTx.merchant.ifBlank { targetTx.category }}」可退 ${formatMoneyCents(remainOrigCents, targetTx.currency)}，" +
                 "将退回到「$walletName」。如需部分退款，请在账单详情中操作。",
             confirmText = "退款",
             onConfirm = {

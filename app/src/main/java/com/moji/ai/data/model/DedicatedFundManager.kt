@@ -4,7 +4,9 @@ import android.content.Context
 import android.content.SharedPreferences
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import java.util.Calendar
 import java.util.Locale
+import java.util.TimeZone
 import kotlin.math.roundToLong
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -189,6 +191,12 @@ object DedicatedFundManager {
 
     const val COMPOSITE_MEDICAL_PERSONAL_SUFFIX = "#MED_PERSONAL"
     const val COMPOSITE_CHILD_NOTE_PREFIX = "关联组合支付 · 医保个账扣款"
+
+    const val PAYSLIP_ORDER_PREFIX = "PAYSLIP:"
+    const val PAYSLIP_MEDICAL_CHILD_SUFFIX = "#PAYSLIP_MED"
+    const val PAYSLIP_PROVIDENT_CHILD_SUFFIX = "#PAYSLIP_PROV"
+    const val PAYSLIP_MEDICAL_CHILD_NOTE_PREFIX = "关联工资条 · 医保个账划入"
+    const val PAYSLIP_PROVIDENT_CHILD_NOTE_PREFIX = "关联工资条 · 公积金双边缴存"
 
     private val MEDICAL_WALLET_KEYWORDS = listOf(
         "个人医保", "医保账户", "医保卡", "医保个账", "医疗保险", "社保卡", "医保电子凭证", "医保"
@@ -400,6 +408,145 @@ object DedicatedFundManager {
     }
 
     /**
+     * 生成工资条同月同金额幂等防重 `orderKey`：`PAYSLIP:<yyyyMM>:<netCents>:<grossCents>`
+     */
+    fun formatPayslipYearMonth(
+        paydayTimestampMillis: Long,
+        timeZone: TimeZone = TimeZone.getDefault()
+    ): String {
+        val cal = Calendar.getInstance(timeZone).apply {
+            timeInMillis = paydayTimestampMillis
+        }
+        val year = cal.get(Calendar.YEAR)
+        val month = cal.get(Calendar.MONTH) + 1
+        return String.format(Locale.US, "%04d%02d", year, month)
+    }
+
+    fun buildPayslipOrderKey(
+        paydayTimestampMillis: Long,
+        netTakeHomePayCents: Long,
+        grossSalaryCents: Long,
+        timeZone: TimeZone = TimeZone.getDefault()
+    ): String {
+        val ym = formatPayslipYearMonth(paydayTimestampMillis, timeZone)
+        val net = netTakeHomePayCents.coerceAtLeast(0L)
+        val gross = grossSalaryCents.coerceAtLeast(0L)
+        return "$PAYSLIP_ORDER_PREFIX$ym:$net:$gross"
+    }
+
+    /**
+     * 判断某笔交易是否为工资条分账生成的「医保个账划入子单」（`#PAYSLIP_MED`）
+     */
+    fun isPayslipMedicalChild(tx: TransactionEntity): Boolean {
+        if (tx.orderKey.endsWith(PAYSLIP_MEDICAL_CHILD_SUFFIX)) return true
+        if (tx.dedupFingerprint.endsWith(PAYSLIP_MEDICAL_CHILD_SUFFIX)) return true
+        return tx.note.startsWith(PAYSLIP_MEDICAL_CHILD_NOTE_PREFIX)
+    }
+
+    /**
+     * 判断某笔交易是否为工资条分账生成的「双边公积金缴存子单」（`#PAYSLIP_PROV`）
+     */
+    fun isPayslipProvidentChild(tx: TransactionEntity): Boolean {
+        if (tx.orderKey.endsWith(PAYSLIP_PROVIDENT_CHILD_SUFFIX)) return true
+        if (tx.dedupFingerprint.endsWith(PAYSLIP_PROVIDENT_CHILD_SUFFIX)) return true
+        return tx.note.startsWith(PAYSLIP_PROVIDENT_CHILD_NOTE_PREFIX)
+    }
+
+    /**
+     * 判断某笔交易是否为工资条自动分账生成的专项保障子单（`#PAYSLIP_MED` 或 `#PAYSLIP_PROV`）
+     */
+    fun isPayslipDedicatedChild(tx: TransactionEntity): Boolean {
+        return isPayslipMedicalChild(tx) || isPayslipProvidentChild(tx)
+    }
+
+    /**
+     * 判断某笔交易是否为工资条导入的「实发工资主单」
+     */
+    fun isPayslipMainTransaction(tx: TransactionEntity): Boolean {
+        return !isPayslipDedicatedChild(tx) &&
+            tx.type == TransactionType.INCOME &&
+            tx.orderKey.startsWith(PAYSLIP_ORDER_PREFIX)
+    }
+
+    fun formatPayslipMainNote(
+        draft: PayslipRecognitionDraft,
+        customNote: String = ""
+    ): String {
+        fun fmt(cents: Long): String = String.format(Locale.US, "%.2f", cents.coerceAtLeast(0L) / 100.0)
+        val parts = mutableListOf<String>()
+        if (draft.grossSalaryCents > 0L) {
+            parts.add("应发¥${fmt(draft.grossSalaryCents)}")
+        }
+        if (draft.incomeTaxCents > 0L) {
+            parts.add("个税¥${fmt(draft.incomeTaxCents)}")
+        }
+        val socialPersonal = draft.pensionAndUnemploymentDeductionCents.coerceAtLeast(0L) +
+            draft.personalMedicalDeductionCents.coerceAtLeast(0L)
+        if (socialPersonal > 0L) {
+            parts.add("社保个人¥${fmt(socialPersonal)}")
+        }
+        if (draft.personalProvidentDeductionCents > 0L) {
+            parts.add("公积金个人¥${fmt(draft.personalProvidentDeductionCents)}")
+        }
+        if (draft.netTakeHomePayCents > 0L) {
+            parts.add("实发¥${fmt(draft.netTakeHomePayCents)}")
+        }
+        val summary = parts.joinToString(" · ")
+        val tail = customNote.trim()
+        return when {
+            summary.isNotEmpty() && tail.isNotEmpty() -> "$summary | $tail".take(160)
+            summary.isNotEmpty() -> summary.take(160)
+            tail.isNotEmpty() -> tail.take(160)
+            else -> "工资条导入实发薪资"
+        }
+    }
+
+    fun formatPayslipMedicalChildNote(
+        personalMedicalDeductionCents: Long,
+        depositCents: Long,
+        customTail: String = ""
+    ): String {
+        fun fmt(cents: Long): String = String.format(Locale.US, "%.2f", cents.coerceAtLeast(0L) / 100.0)
+        val base = buildString {
+            append(PAYSLIP_MEDICAL_CHILD_NOTE_PREFIX)
+            append("¥")
+            append(fmt(depositCents))
+            if (personalMedicalDeductionCents > 0L) {
+                append("（工资个人扣缴¥")
+                append(fmt(personalMedicalDeductionCents))
+                append("）")
+            }
+        }
+        val tail = customTail.trim()
+        return if (tail.isNotEmpty()) "$base | $tail".take(160) else base.take(160)
+    }
+
+    fun formatPayslipProvidentChildNote(
+        personalProvidentCents: Long,
+        employerProvidentCents: Long,
+        totalDepositCents: Long,
+        customTail: String = ""
+    ): String {
+        fun fmt(cents: Long): String = String.format(Locale.US, "%.2f", cents.coerceAtLeast(0L) / 100.0)
+        val p = personalProvidentCents.coerceAtLeast(0L)
+        val e = employerProvidentCents.coerceAtLeast(0L)
+        val base = buildString {
+            append(PAYSLIP_PROVIDENT_CHILD_NOTE_PREFIX)
+            append("¥")
+            append(fmt(totalDepositCents))
+            if (p > 0L || e > 0L) {
+                append("（个人¥")
+                append(fmt(p))
+                append(" + 单位¥")
+                append(fmt(e))
+                append("）")
+            }
+        }
+        val tail = customTail.trim()
+        return if (tail.isNotEmpty()) "$base | $tail".take(160) else base.take(160)
+    }
+
+    /**
      * 工资条识别结果 -> 三路目标账户标准路由映射
      */
     fun resolvePayslipTargetWallets(
@@ -425,13 +572,13 @@ object DedicatedFundManager {
         val medicalDepositCents = when {
             draft == null -> settings.medicalPlan.totalMonthlyDepositCents
             draft.medicalPersonalAccountDepositCents > 0L -> draft.medicalPersonalAccountDepositCents
-            settings.medicalPlan.totalMonthlyDepositCents > 0L -> settings.medicalPlan.totalMonthlyDepositCents
-            else -> draft.personalMedicalDeductionCents.coerceAtLeast(0L)
+            draft.personalMedicalDeductionCents > 0L ->
+                draft.personalMedicalDeductionCents + settings.medicalPlan.employerMonthlyCents.coerceAtLeast(0L)
+            else -> 0L
         }
         val providentDepositCents = when {
             draft == null -> settings.providentPlan.totalMonthlyDepositCents
-            draft.bilateralProvidentDepositCents > 0L -> draft.bilateralProvidentDepositCents
-            else -> settings.providentPlan.totalMonthlyDepositCents
+            else -> draft.bilateralProvidentDepositCents.coerceAtLeast(0L)
         }
 
         return PayslipWalletRouting(

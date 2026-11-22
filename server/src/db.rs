@@ -105,10 +105,13 @@ struct SnapshotProbe {
     transactions: Vec<serde_json::Value>,
 }
 
+pub const DEFAULT_MAX_USER_SCREENSHOT_QUOTA_BYTES: usize = 512 * 1024 * 1024;
+
 pub struct CloudStore {
     conn: Mutex<Connection>,
     data_dir: PathBuf,
     max_history_revisions: usize,
+    max_user_screenshot_bytes: usize,
 }
 
 impl CloudStore {
@@ -210,11 +213,24 @@ impl CloudStore {
             [],
         );
 
+        let max_user_screenshot_bytes = std::env::var("MOJI_MAX_USER_SCREENSHOT_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&mb| mb > 0)
+            .and_then(|mb| mb.checked_mul(1024 * 1024))
+            .unwrap_or(DEFAULT_MAX_USER_SCREENSHOT_QUOTA_BYTES);
+
         Ok(Self {
             conn: Mutex::new(conn),
             data_dir: data_dir.to_path_buf(),
             max_history_revisions,
+            max_user_screenshot_bytes,
         })
+    }
+
+    #[cfg(test)]
+    pub fn set_max_user_screenshot_bytes(&mut self, max_bytes: usize) {
+        self.max_user_screenshot_bytes = max_bytes;
     }
 
     pub fn bind_or_login_with_sync_key<F>(
@@ -245,21 +261,21 @@ impl CloudStore {
             .transaction()
             .map_err(|e| AppError::Internal(format!("begin tx: {e}")))?;
 
-        let existing: Option<(String, String, String)> = tx
+        let existing: Option<(String, String, String, String)> = tx
             .query_row(
                 r#"
-                SELECT u.user_id, u.app_env, u.status
+                SELECT u.user_id, u.app_env, u.status, u.display_name
                 FROM user_identities i
                 JOIN users u ON u.user_id = i.user_id
                 WHERE i.provider = 'sync_key' AND i.identifier_hash = ?1
                 "#,
                 params![identifier_hash],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(|e| AppError::Internal(format!("query identity: {e}")))?;
 
-        let (user_id, is_new_account) = if let Some((uid, stored_env, status)) = existing {
+        let (user_id, is_new_account) = if let Some((uid, stored_env, status, existing_display_name)) = existing {
             if status != "active" {
                 return Err(AppError::Forbidden(
                     "account_disabled",
@@ -278,7 +294,10 @@ impl CloudStore {
             )
             .map_err(|e| AppError::Internal(format!("update identity ts: {e}")))?;
 
-            if !clean_member.is_empty() {
+            let should_update_display_name = !clean_member.is_empty()
+                && (existing_display_name.trim().is_empty()
+                    || !is_default_or_device_member_label(&clean_member, &clean_device_name));
+            if should_update_display_name {
                 tx.execute(
                     "UPDATE users SET display_name = ?1, updated_at_ms = ?2 WHERE user_id = ?3",
                     params![clean_member, now, uid],
@@ -870,23 +889,72 @@ impl CloudStore {
             fs::create_dir_all(parent)
                 .map_err(|e| AppError::Internal(format!("create screenshot shard dir: {e}")))?;
         }
-        if !blob_path.exists() {
-            write_file_atomically(&blob_path, webp_bytes)?;
+
+        // 写盘前预检单用户原图配额（同 user_id + sha256 幂等重传放行，不重复占用配额）
+        {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+            ensure_screenshot_quota_available(
+                &conn,
+                user_id,
+                &expected_sha,
+                webp_bytes.len(),
+                self.max_user_screenshot_bytes,
+            )?;
         }
 
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
-        conn.execute(
-            r#"
-            INSERT INTO user_screenshots (user_id, sha256, byte_size, created_at_ms)
-            VALUES (?1, ?2, ?3, ?4)
-            ON CONFLICT(user_id, sha256) DO NOTHING
-            "#,
-            params![user_id, expected_sha, webp_bytes.len() as i64, now_millis()],
-        )
-        .map_err(|e| AppError::Internal(format!("insert user_screenshot: {e}")))?;
+        let mut wrote_new_blob = false;
+        if !blob_path.exists() {
+            write_file_atomically(&blob_path, webp_bytes)?;
+            wrote_new_blob = true;
+        }
+
+        let tx_res: Result<bool, AppError> = (|| {
+            let mut conn = self
+                .conn
+                .lock()
+                .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+            let tx = conn
+                .transaction()
+                .map_err(|e| AppError::Internal(format!("begin screenshot tx: {e}")))?;
+            if let Err(quota_err) = ensure_screenshot_quota_available(
+                &tx,
+                user_id,
+                &expected_sha,
+                webp_bytes.len(),
+                self.max_user_screenshot_bytes,
+            ) {
+                let any_ref: bool = tx
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM user_screenshots WHERE sha256 = ?1)",
+                        params![expected_sha],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(true);
+                drop(tx);
+                if wrote_new_blob && !any_ref {
+                    let _ = fs::remove_file(&blob_path);
+                }
+                return Err(quota_err);
+            }
+
+            tx.execute(
+                r#"
+                INSERT INTO user_screenshots (user_id, sha256, byte_size, created_at_ms)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(user_id, sha256) DO NOTHING
+                "#,
+                params![user_id, expected_sha, webp_bytes.len() as i64, now_millis()],
+            )
+            .map_err(|e| AppError::Internal(format!("insert user_screenshot: {e}")))?;
+
+            tx.commit()
+                .map_err(|e| AppError::Internal(format!("commit screenshot tx: {e}")))?;
+            Ok(true)
+        })();
+        tx_res?;
 
         Ok(webp_bytes.len())
     }
@@ -1062,4 +1130,240 @@ fn write_file_atomically(dest: &Path, bytes: &[u8]) -> Result<(), AppError> {
         )));
     }
     Ok(())
+}
+
+fn is_default_or_device_member_label(member: &str, device_name: &str) -> bool {
+    let m = member.trim();
+    if m.is_empty() {
+        return true;
+    }
+    let dev = device_name.trim();
+    if !dev.is_empty() && m.eq_ignore_ascii_case(dev) {
+        return true;
+    }
+    let lower = m.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "默记用户"
+            | "我的手机"
+            | "android"
+            | "android 设备"
+            | "android设备"
+            | "未知设备"
+            | "unknown"
+            | "unknown device"
+            | "device"
+    ) || lower.starts_with("sdk_gphone")
+        || lower.starts_with("emulator")
+        || lower.starts_with("android ")
+        || lower.starts_with("pixel ")
+        || lower.starts_with("oneplus ")
+        || lower.starts_with("xiaomi ")
+        || lower.starts_with("redmi ")
+        || lower.starts_with("huawei ")
+        || lower.starts_with("honor ")
+        || lower.starts_with("oppo ")
+        || lower.starts_with("vivo ")
+        || lower.starts_with("sm-")
+        || lower.starts_with("rmx")
+}
+
+fn ensure_screenshot_quota_available(
+    conn: &Connection,
+    user_id: &str,
+    expected_sha: &str,
+    incoming_len: usize,
+    max_quota_bytes: usize,
+) -> Result<(), AppError> {
+    let already_linked: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM user_screenshots WHERE user_id = ?1 AND sha256 = ?2)",
+            params![user_id, expected_sha],
+            |r| r.get(0),
+        )
+        .map_err(|e| AppError::Internal(format!("check existing screenshot: {e}")))?;
+    if already_linked {
+        return Ok(());
+    }
+
+    let current_used_i64: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(byte_size), 0) FROM user_screenshots WHERE user_id = ?1",
+            params![user_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| AppError::Internal(format!("sum user screenshot bytes: {e}")))?;
+    let current_used = usize::try_from(current_used_i64.max(0)).unwrap_or(usize::MAX);
+    if current_used.saturating_add(incoming_len) > max_quota_bytes {
+        let quota_mb = (max_quota_bytes as f64) / (1024.0 * 1024.0);
+        return Err(AppError::Forbidden(
+            "screenshot_quota_exceeded",
+            format!(
+                "当前账号云端账单原图存储空间已达配额上限（{quota_mb:.1} MiB），请清理无用原图或联系管理员扩容"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn make_webp(tag: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&(12u32 + tag.len() as u32).to_le_bytes());
+        buf.extend_from_slice(b"WEBP");
+        buf.extend_from_slice(b"VP8 ");
+        buf.extend_from_slice(tag);
+        buf
+    }
+
+    #[test]
+    fn test_screenshot_per_user_quota_and_idempotent_reupload() {
+        let tmp = TempDir::new().unwrap();
+        let mut store = CloudStore::open(tmp.path(), 5).unwrap();
+        // 设定配额上限为 60 字节（每张测试 WebP 24 字节，最多允许 2 张不同原图 = 48B，第 3 张 72B 超限）
+        store.set_max_user_screenshot_bytes(60);
+
+        let bind_a = store
+            .bind_or_login_with_sync_key(
+                "hash_user_a",
+                "MOJI-****-AAAA",
+                "prod",
+                "阿豪",
+                "dev-1",
+                "OnePlus 13",
+                "1.1.6",
+                10,
+                || Ok(()),
+            )
+            .unwrap();
+        let bind_b = store
+            .bind_or_login_with_sync_key(
+                "hash_user_b",
+                "MOJI-****-BBBB",
+                "prod",
+                "家人B",
+                "dev-2",
+                "Xiaomi 15",
+                "1.1.6",
+                10,
+                || Ok(()),
+            )
+            .unwrap();
+
+        let webp1 = make_webp(b"12345678");
+        let sha1 = sha256_hex(&webp1);
+        let webp2 = make_webp(b"87654321");
+        let sha2 = sha256_hex(&webp2);
+        let webp3 = make_webp(b"abcdefgh");
+        let sha3 = sha256_hex(&webp3);
+
+        assert_eq!(webp1.len(), 24);
+        assert_eq!(store.save_screenshot(&bind_a.user_id, &sha1, &webp1).unwrap(), 24);
+        assert_eq!(store.save_screenshot(&bind_a.user_id, &sha2, &webp2).unwrap(), 24);
+
+        // 幂等重传已存在的同 sha256 原图：不重复累加配额，哪怕已用 48B + 24B > 60B 也必须成功
+        assert_eq!(store.save_screenshot(&bind_a.user_id, &sha1, &webp1).unwrap(), 24);
+
+        // 上传第 3 张不同 sha256 原图（48 + 24 = 72 > 60）：触发 screenshot_quota_exceeded 且不残留孤儿文件
+        let err = store.save_screenshot(&bind_a.user_id, &sha3, &webp3).unwrap_err();
+        match err {
+            AppError::Forbidden(code, _) => assert_eq!(code, "screenshot_quota_exceeded"),
+            other => panic!("expected Forbidden(screenshot_quota_exceeded), got {other:?}"),
+        }
+        assert!(!store.screenshot_blob_path(&sha3).unwrap().exists());
+
+        // 配额按单用户独立核算：用户 B 依然可以正常上传 sha3
+        assert_eq!(store.save_screenshot(&bind_b.user_id, &sha3, &webp3).unwrap(), 24);
+    }
+
+    #[test]
+    fn test_bind_or_login_preserves_existing_display_name_against_empty_or_device_defaults() {
+        let tmp = TempDir::new().unwrap();
+        let store = CloudStore::open(tmp.path(), 5).unwrap();
+
+        // 1. 初始注册无昵称（空字符串）
+        let first = store
+            .bind_or_login_with_sync_key(
+                "hash_nick_test",
+                "MOJI-****-1234",
+                "prod",
+                "",
+                "dev-init",
+                "Pixel 8",
+                "1.1.6",
+                10,
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(store.verify_active_user(&first.user_id, "prod").unwrap(), "");
+
+        // 2. 原 display_name 为空时，后续登录可正常初始化昵称
+        store
+            .bind_or_login_with_sync_key(
+                "hash_nick_test",
+                "MOJI-****-1234",
+                "prod",
+                "阿豪",
+                "dev-init",
+                "Pixel 8",
+                "1.1.6",
+                10,
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(store.verify_active_user(&first.user_id, "prod").unwrap(), "阿豪");
+
+        // 3. 换新机登录传入空昵称、默认占位（默记用户/Android 设备）或等于 device_name 的机型特征时，严禁覆盖已有云端昵称
+        for (incoming_member, incoming_dev) in [
+            ("", "Xiaomi 15 Pro"),
+            ("默记用户", "Xiaomi 15 Pro"),
+            ("Android 设备", "Xiaomi 15 Pro"),
+            ("Xiaomi 15 Pro", "Xiaomi 15 Pro"),
+            ("OnePlus 13", "PJZ110"),
+            ("sdk_gphone64_arm64", "emu64a"),
+        ] {
+            store
+                .bind_or_login_with_sync_key(
+                    "hash_nick_test",
+                    "MOJI-****-1234",
+                    "prod",
+                    incoming_member,
+                    "dev-new-phone",
+                    incoming_dev,
+                    "1.1.6",
+                    10,
+                    || Ok(()),
+                )
+                .unwrap();
+            assert_eq!(
+                store.verify_active_user(&first.user_id, "prod").unwrap(),
+                "阿豪",
+                "incoming ({incoming_member:?}, {incoming_dev:?}) should not overwrite existing nickname"
+            );
+        }
+
+        // 4. 用户主动设置明确的新自定义昵称时，允许正常更新
+        store
+            .bind_or_login_with_sync_key(
+                "hash_nick_test",
+                "MOJI-****-1234",
+                "prod",
+                "瑞豪的账本",
+                "dev-new-phone",
+                "Xiaomi 15 Pro",
+                "1.1.6",
+                10,
+                || Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            store.verify_active_user(&first.user_id, "prod").unwrap(),
+            "瑞豪的账本"
+        );
+    }
 }

@@ -135,7 +135,26 @@
             </intent-filter>
         </receiver>
 
-        <!-- 6. 应用内 OTA 更新 APK 安装 FileProvider（支持私有仓库下载 APK 后调起系统安装器） -->
+        <!-- 6. iCost 风格预算与今日支出桌面小组件（4x2 标准态 / 2x2 紧凑态自适应） -->
+        <receiver
+            android:name=".widget.MoJiLedgerWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_ledger_label">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="android.intent.action.DATE_CHANGED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.LOCALE_CHANGED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/moji_ledger_widget_info" />
+        </receiver>
+
+        <!-- 7. 应用内 OTA 更新 APK 安装 FileProvider（支持私有仓库下载 APK 后调起系统安装器） -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
