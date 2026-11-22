@@ -4,4 +4,6 @@
     <string name="accessibility_service_label">默记 MoJi · 支付页面无感识账</string>
     <string name="accessibility_service_description">用于在微信、支付宝、云闪付、银行 App 付款完成或打开账单详情时，自动提取页面金额、商户与支付方式并静默入账；遇到自绘页面时支持免 Root 截屏端侧离线 OCR 兜底。所有数据仅保存在本地。</string>
     <string name="ocr_tile_label">默记识屏记账</string>
+    <string name="widget_ledger_label">默记 · 预算与今日支出</string>
+    <string name="widget_ledger_description">在桌面实时查看今日已花、本月支出与月度预算剩余，点击右上角 + 一键拉起记账键盘。</string>
 </resources>

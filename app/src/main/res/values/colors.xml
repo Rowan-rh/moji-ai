@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="widget_card_bg">#FFFFFF</color>
+    <color name="widget_card_stroke">#ECEEF2</color>
+    <color name="widget_chip_bg">#F4F5F7</color>
+    <color name="widget_add_btn_bg">#1677FF</color>
+    <color name="widget_add_btn_fg">#FFFFFF</color>
+    <color name="widget_text_primary">#141414</color>
+    <color name="widget_text_secondary">#6B7280</color>
+    <color name="widget_text_muted">#9CA3AF</color>
+    <color name="widget_accent_blue">#1677FF</color>
+    <color name="widget_over_budget_red">#E65540</color>
+    <color name="widget_progress_track">#ECEEF2</color>
+    <color name="widget_progress_fill">#1677FF</color>
+    <color name="widget_progress_over_fill">#E65540</color>
+    <color name="widget_divider">#E5E7EB</color>
+</resources>

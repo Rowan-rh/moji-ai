@@ -397,9 +397,10 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         }
     }
 
-    // 响应点击定时记账提醒通知：自动关闭二级全屏页、切回账本首页并拉起记账计算器面板
-    LaunchedEffect(pendingOpenBookkeepingSheet) {
-        if (!pendingOpenBookkeepingSheet) return@LaunchedEffect
+    // 响应点击定时记账提醒通知或桌面小组件「+」按钮：若应用锁处于会话锁定态则先等待解锁，绝不绕过 AppLockOverlayScreen
+    val isLockedByAppLock = isAppSessionLocked && passwordProtectionConfig.enabled
+    LaunchedEffect(pendingOpenBookkeepingSheet, isLockedByAppLock) {
+        if (!pendingOpenBookkeepingSheet || isLockedByAppLock) return@LaunchedEffect
         selectedTab = 0
         showSettingsPage = false
         showSmartBookkeepingPage = false
@@ -962,6 +963,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onToggleShowThousandSeparator = { show -> viewModel.setShowThousandSeparator(show) },
                 onToggleHideTrailingZeroDecimals = { hide -> viewModel.setHideTrailingZeroDecimals(hide) },
                 onResetDefaults = { viewModel.resetAppearanceDefaults() },
+                onRequestPinWidget = { viewModel.requestPinDesktopWidget() },
                 onBack = { showAppearanceManagementPage = false },
                 listState = appearanceListState
             )
