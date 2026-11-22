@@ -24,6 +24,7 @@ import com.moji.ai.ai.CaptureWindowGuard
 import com.moji.ai.ai.WindowCandidate
 import com.moji.ai.ai.WindowContainerRole
 import com.moji.ai.ai.WindowInspectionInput
+import com.moji.ai.ai.WindowRejectReason
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,6 +32,175 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.abs
+import kotlin.math.roundToLong
+
+/**
+ * 收银台单次访问会话防滞留与立减动画刷新追踪器（`AC-5`）：
+ * 1. 同一收银台访问（Visit）内停留或上下滚动推荐区不重复派发（即使停留超过 15s 也不重记）；
+ * 2. 首帧录了原价（无立减优惠）、紧接着立减动画完成刷出更低实付金额与优惠金额时，放行触发协调器原位立减校准；
+ * 3. 若用户在同一页面展开露出了此前未出现的订单号，放行触发原位单号补全；
+ * 4. 离开专用收银台容器、切换应用或进入待付款（`确认付款`）/密码核身页时立即重置会话并分配新 `visitId`，
+ *    确保 15s 内连续两笔同金额真实支付绝不被旧签名误拦。
+ */
+internal class CashierVisitSessionTracker {
+    data class LiveCashierDispatchDecision(
+        val shouldDispatch: Boolean,
+        val visitId: Long
+    )
+
+    private var visitSequence: Long = 0L
+
+    var activeVisitId: Long = 0L
+        private set
+
+    var activePackage: String = ""
+        private set
+
+    var hasDispatchedInCurrentVisit: Boolean = false
+        private set
+
+    private var lastPaidCents: Long = 0L
+    private var lastDiscountCents: Long = 0L
+    private var lastHasExplicitOrderNo: Boolean = false
+
+    @Synchronized
+    fun resetSession(): Boolean {
+        val hadActive = activeVisitId != 0L || hasDispatchedInCurrentVisit
+        activeVisitId = 0L
+        activePackage = ""
+        hasDispatchedInCurrentVisit = false
+        lastPaidCents = 0L
+        lastDiscountCents = 0L
+        lastHasExplicitOrderNo = false
+        return hadActive
+    }
+
+    @Synchronized
+    fun onContainerOrRejectTransition(
+        packageName: String,
+        containerRole: WindowContainerRole,
+        rejectReason: WindowRejectReason? = null
+    ): Boolean {
+        if (activeVisitId == 0L && !hasDispatchedInCurrentVisit) return false
+        if (packageName != activePackage) {
+            return resetSession()
+        }
+        if (containerRole != WindowContainerRole.DEDICATED_PAYMENT_OR_BILL) {
+            return resetSession()
+        }
+        if (rejectReason == WindowRejectReason.CASHIER_OR_UNPAID_STATE ||
+            rejectReason == WindowRejectReason.SENSITIVE_AUTH_PAGE ||
+            rejectReason == WindowRejectReason.CLOSED_FAILED_OR_REFUND_PENDING ||
+            rejectReason == WindowRejectReason.NON_TRANSACTION_CONTAINER
+        ) {
+            return resetSession()
+        }
+        return false
+    }
+
+    @Synchronized
+    fun evaluateLiveCashierFrame(
+        packageName: String,
+        rawText: String,
+        hasExplicitOrderNo: Boolean,
+        forceManual: Boolean = false
+    ): LiveCashierDispatchDecision {
+        if (forceManual) {
+            val manualVisitId = ++visitSequence
+            return LiveCashierDispatchDecision(shouldDispatch = true, visitId = manualVisitId)
+        }
+        if (activeVisitId == 0L || activePackage != packageName) {
+            activeVisitId = ++visitSequence
+            activePackage = packageName
+            hasDispatchedInCurrentVisit = false
+            lastPaidCents = 0L
+            lastDiscountCents = 0L
+            lastHasExplicitOrderNo = false
+        }
+
+        val (paidCents, discountCents) = extractQuickCashierPaidAndDiscountCents(rawText)
+        if (!hasDispatchedInCurrentVisit) {
+            hasDispatchedInCurrentVisit = true
+            lastPaidCents = paidCents
+            lastDiscountCents = discountCents
+            lastHasExplicitOrderNo = hasExplicitOrderNo
+            return LiveCashierDispatchDecision(shouldDispatch = true, visitId = activeVisitId)
+        }
+
+        // 立减动画完成帧：首帧尚未刷出立减（discount=0），当前帧出现明确立减且实付低于首帧原价
+        val isPostDiscountAnimationFrame = lastDiscountCents <= 0L &&
+            discountCents > 0L &&
+            paidCents > 0L &&
+            lastPaidCents > paidCents
+        val revealedNewOrderNo = !lastHasExplicitOrderNo && hasExplicitOrderNo
+
+        if (isPostDiscountAnimationFrame || revealedNewOrderNo) {
+            if (paidCents > 0L) lastPaidCents = paidCents
+            if (discountCents > 0L) lastDiscountCents = discountCents
+            if (hasExplicitOrderNo) lastHasExplicitOrderNo = true
+            return LiveCashierDispatchDecision(shouldDispatch = true, visitId = activeVisitId)
+        }
+
+        return LiveCashierDispatchDecision(shouldDispatch = false, visitId = activeVisitId)
+    }
+
+    companion object {
+        private val DISCOUNT_QUICK_REGEX = Regex(
+            """(?:百次立减|随机立减|笔笔立减|支付立减|银行卡立减|碰一下立减|官方立减|支付优惠|立减优惠|已优惠|共减|优惠|立减|抵扣|减免)\s*(?:[:：,，\s]|\|)*\s*(?:[-−]\s*)?(?:¥|￥)?\s*(?:[-−]\s*)?([0-9]{1,5}(?:\.[0-9]{1,2})?)\s*元?"""
+        )
+        private val EXPLICIT_PAID_QUICK_REGEX = Regex(
+            """(?:实付款|实付金额|合计实付|实扣金额|实扣|实际支付|实付)\s*(?:[:：,，\s]|\|)*\s*(?:¥|￥)?\s*([0-9]{1,7}(?:\.[0-9]{1,2})?)\s*元?"""
+        )
+        private val CURRENCY_QUICK_REGEX = Regex(
+            """(?:¥|￥)\s*([0-9]{1,7}(?:\.[0-9]{1,2})?)|([0-9]{1,7}(?:\.[0-9]{1,2})?)\s*元"""
+        )
+        private val DISCOUNT_TOKEN_HINTS = listOf("优惠", "立减", "抵扣", "减免", "补贴", "红包", "代金券")
+
+        internal fun extractQuickCashierPaidAndDiscountCents(rawText: String): Pair<Long, Long> {
+            val normalized = rawText
+                .replace(Regex("""(¥|￥)\s*\|?\s*(\d{1,7})\s*\|\s*(\.\d{1,2})"""), "$1$2$3")
+                .replace(Regex("""(¥|￥)\s*\|?\s*(\d{1,7})\.\s*\|\s*(\d{1,2})"""), "$1$2.$3")
+                .replace(Regex("""(¥|￥)\s*\|\s*(\d{1,7}(?:\.\d{1,2})?)"""), "$1$2")
+
+            val discountCents = DISCOUNT_QUICK_REGEX.findAll(normalized)
+                .mapNotNull { m -> m.groupValues[1].toDoubleOrNull()?.let { (it * 100.0).roundToLong() } }
+                .filter { it > 0L }
+                .distinct()
+                .sum()
+
+            val explicitPaid = EXPLICIT_PAID_QUICK_REGEX.find(normalized)?.groupValues?.getOrNull(1)
+                ?.toDoubleOrNull()?.let { (it * 100.0).roundToLong() } ?: 0L
+            if (explicitPaid > 0L) {
+                return explicitPaid to discountCents
+            }
+
+            val segments = normalized.split('|', '\n').map { it.trim() }.filter { it.isNotEmpty() }
+            val candidateCents = ArrayList<Long>(4)
+            for (i in segments.indices) {
+                val seg = segments[i]
+                val prev = segments.getOrNull(i - 1).orEmpty()
+                if (DISCOUNT_TOKEN_HINTS.any { seg.contains(it) } ||
+                    (prev.isNotEmpty() && !CURRENCY_QUICK_REGEX.containsMatchIn(prev) && DISCOUNT_TOKEN_HINTS.any { prev.contains(it) })
+                ) {
+                    continue
+                }
+                for (m in CURRENCY_QUICK_REGEX.findAll(seg)) {
+                    val v = m.groupValues[1].ifEmpty { m.groupValues[2] }.toDoubleOrNull() ?: continue
+                    val c = (v * 100.0).roundToLong()
+                    if (c > 0L) candidateCents.add(c)
+                }
+            }
+            if (discountCents > 0L && candidateCents.size >= 2) {
+                for (low in candidateCents) {
+                    if (candidateCents.any { high -> low < high && low + discountCents == high }) {
+                        return low to discountCents
+                    }
+                }
+            }
+            return (candidateCents.firstOrNull() ?: 0L) to discountCents
+        }
+    }
+}
 
 /**
  * 免 Root 微信 / 支付宝 / 云闪付 / 银行 App 自动识账无障碍服务：
@@ -51,11 +221,32 @@ open class PaymentAccessibilityService : AccessibilityService() {
 
         private val PROBE_DELAYS_MS = longArrayOf(60L, 200L, 450L, 850L, 1350L, 1950L)
         private val CONTENT_PROBE_DELAYS_MS = longArrayOf(110L, 320L, 720L, 1300L)
+        private const val ALIPAY_PACKAGE = "com.eg.android.AlipayGphone"
         private const val CONTENT_THROTTLE_MS = 120L
         private const val OCR_COOLDOWN_MS = 4_500L
         private const val MAX_TRAVERSE_DEPTH = 50
         private const val MAX_TRAVERSE_NODES = 550
         private const val MAX_ACTIVITY_CACHE_SIZE = 512
+
+        /**
+         * `AC-2` / `OP-2 = 是`：判断宿主窗口是否允许进入无障碍自动识屏管道。
+         * - 若宿主应用自身已开启无障碍自动识屏（如微信/支付宝/云闪付/银行），直接放行；
+         * - 若宿主属于默认关闭全包无障碍的内置电商/外卖应用（如拼多多/淘宝/京东/天猫/美团/饿了么），
+         *   仅当「支付宝」无障碍处于开启状态，且经 `isVerifiedDeclaredActivity` 核实的真实 Activity
+         *   命中内嵌支付宝专用收银台（如 `com.alipay.sdk.app.*` / `H5PayActivity` / `H5PayResultActivity`）时窄口放行；
+         * - 拼多多 `NewPageActivity`、商品详情、订单列表、拼单活动页维持 100% 拦截。
+         */
+        internal fun shouldAllowHostAccessibility(
+            packageName: String,
+            verifiedActivity: String,
+            isDirectHostAllowed: Boolean,
+            isAlipayAllowed: Boolean
+        ): Boolean {
+            if (isDirectHostAllowed) return true
+            if (!isAlipayAllowed) return false
+            if (!CaptureWindowGuard.isBuiltinEcommerceHostPackage(packageName)) return false
+            return CaptureWindowGuard.isEmbeddedAlipayCashierActivity(verifiedActivity)
+        }
 
         private val PAGE_IDENTITY_ORDER_REGEX = Regex(
             """(?:交易单号|转账单号|订单编号|订单号|商户单号|商家订单号|支付宝交易号|流水号)\s*(?:[:：,，\s]|\|)*\s*([0-9A-Za-z_-]{10,44})"""
@@ -119,6 +310,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
         }
     }
 
+    private val cashierVisitTracker = CashierVisitSessionTracker()
     private var activePackage: String = ""
     private var activeVerifiedActivity: String = ""
     private var lastContentInspectMillis: Long = 0L
@@ -131,6 +323,20 @@ open class PaymentAccessibilityService : AccessibilityService() {
         lastDispatchedSignature = ""
         lastDispatchedMillis = 0L
         isCurrentlyOnBillDetailPage = false
+        cashierVisitTracker.resetSession()
+    }
+
+    private fun isAccessibilityAllowedForWindow(pkg: String, verifiedActivity: String): Boolean {
+        if (pkg.isBlank()) return false
+        val directAllowed = CaptureAppWhitelistManager.isAccessibilityAllowed(pkg, this)
+        if (directAllowed) return true
+        val alipayAllowed = CaptureAppWhitelistManager.isAccessibilityAllowed(ALIPAY_PACKAGE, this)
+        return shouldAllowHostAccessibility(
+            packageName = pkg,
+            verifiedActivity = verifiedActivity,
+            isDirectHostAllowed = false,
+            isAlipayAllowed = alipayAllowed
+        )
     }
 
     override fun onServiceConnected() {
@@ -196,13 +402,24 @@ open class PaymentAccessibilityService : AccessibilityService() {
 
             val normalizedCls = normalizeEventClassName(pkg, rawCls)
             val isRealActivity = isVerifiedDeclaredActivity(pkg, normalizedCls)
+            val isDirectAllowed = CaptureAppWhitelistManager.isAccessibilityAllowed(pkg, this)
+            val candidateVerifiedActivity = when {
+                isRealActivity -> normalizedCls
+                CaptureWindowGuard.isLikelyViewOrDialogClass(normalizedCls) -> resolveActivityForEventWindow(pkg, event.windowId)
+                isDirectAllowed -> lastVerifiedActivityByPkg[pkg].orEmpty()
+                else -> ""
+            }
 
-            if (!CaptureAppWhitelistManager.isAccessibilityAllowed(pkg, this)) {
+            if (!isAccessibilityAllowedForWindow(pkg, candidateVerifiedActivity)) {
                 if (isRealActivity || !CaptureWindowGuard.isLikelyViewOrDialogClass(normalizedCls)) {
                     activePackage = pkg
                     activeVerifiedActivity = if (isRealActivity) normalizedCls else ""
+                    lastVerifiedActivityByPkg.remove(pkg)
+                    clearWindowActivityMappingsForPackage(pkg)
                     isCurrentlyOnBillDetailPage = false
                     lastDispatchedSignature = ""
+                    lastDispatchedMillis = 0L
+                    cashierVisitTracker.resetSession()
                     clearScheduledProbes()
                 }
                 return
@@ -226,16 +443,21 @@ open class PaymentAccessibilityService : AccessibilityService() {
                     clearWindowActivityMappingsForPackage(pkg)
                 }
             } else if (activeVerifiedActivity.isBlank()) {
-                activeVerifiedActivity = lastVerifiedActivityByPkg[pkg].orEmpty()
+                activeVerifiedActivity = candidateVerifiedActivity
             }
 
             val currentRole = CaptureWindowGuard.classifyActivityContainer(pkg, activeVerifiedActivity)
+            if (cashierVisitTracker.onContainerOrRejectTransition(pkg, currentRole)) {
+                lastDispatchedSignature = ""
+                lastDispatchedMillis = 0L
+            }
             if (currentRole == WindowContainerRole.SENSITIVE_AUTH_BLOCKED ||
                 currentRole == WindowContainerRole.NON_TRANSACTION_BLOCKED
             ) {
                 clearScheduledProbes()
                 isCurrentlyOnBillDetailPage = false
                 lastDispatchedSignature = ""
+                lastDispatchedMillis = 0L
                 return
             }
 
@@ -252,17 +474,19 @@ open class PaymentAccessibilityService : AccessibilityService() {
         val pkg = if (eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
             val focusedWin = resolveFocusedApplicationWindow()
             val focused = focusedWin?.packageName?.takeIf { it !in systemOverlayPackages }
+            val focusedAct = if (focused != null) {
+                focusedWin.id.takeIf { it >= 0 }?.let { winId ->
+                    if (windowPackages[winId] == focused) windowActivities[winId] else null
+                } ?: lastVerifiedActivityByPkg[focused].orEmpty()
+            } else {
+                ""
+            }
             when {
-                focused != null && CaptureAppWhitelistManager.isAccessibilityAllowed(focused, this) -> {
+                focused != null && isAccessibilityAllowedForWindow(focused, focusedAct) -> {
                     activePackage = focused
-                    val winAct = focusedWin.id.takeIf { it >= 0 }?.let { winId ->
-                        if (windowPackages[winId] == focused) windowActivities[winId] else null
-                    }
-                    if (!winAct.isNullOrBlank()) {
-                        activeVerifiedActivity = winAct
-                        lastVerifiedActivityByPkg[focused] = winAct
-                    } else if (activeVerifiedActivity.isBlank()) {
-                        activeVerifiedActivity = lastVerifiedActivityByPkg[focused].orEmpty()
+                    if (focusedAct.isNotBlank()) {
+                        activeVerifiedActivity = focusedAct
+                        lastVerifiedActivityByPkg[focused] = focusedAct
                     }
                     focused
                 }
@@ -271,14 +495,16 @@ open class PaymentAccessibilityService : AccessibilityService() {
                     activeVerifiedActivity = ""
                     isCurrentlyOnBillDetailPage = false
                     lastDispatchedSignature = ""
+                    lastDispatchedMillis = 0L
+                    cashierVisitTracker.resetSession()
                     clearScheduledProbes()
                     return
                 }
-                rawPkg.isNotBlank() && CaptureAppWhitelistManager.isAccessibilityAllowed(rawPkg, this) -> {
+                rawPkg.isNotBlank() && isAccessibilityAllowedForWindow(rawPkg, resolveActivityForEventWindow(rawPkg, event.windowId)) -> {
                     activePackage = rawPkg
                     rawPkg
                 }
-                rawPkg.isBlank() && CaptureAppWhitelistManager.isAccessibilityAllowed(activePackage, this) -> {
+                rawPkg.isBlank() && isAccessibilityAllowedForWindow(activePackage, activeVerifiedActivity) -> {
                     activePackage
                 }
                 else -> return
@@ -286,21 +512,23 @@ open class PaymentAccessibilityService : AccessibilityService() {
         } else {
             when {
                 rawPkg.isNotBlank() -> {
-                    if (!CaptureAppWhitelistManager.isAccessibilityAllowed(rawPkg, this)) {
+                    val resolvedRawAct = resolveActivityForEventWindow(rawPkg, event.windowId)
+                    if (!isAccessibilityAllowedForWindow(rawPkg, resolvedRawAct)) {
                         return
                     }
                     if (activePackage != rawPkg) {
                         activePackage = rawPkg
-                        activeVerifiedActivity = lastVerifiedActivityByPkg[rawPkg].orEmpty()
+                        activeVerifiedActivity = resolvedRawAct
                     }
                     rawPkg
                 }
-                CaptureAppWhitelistManager.isAccessibilityAllowed(activePackage, this) -> activePackage
+                isAccessibilityAllowedForWindow(activePackage, activeVerifiedActivity) -> activePackage
                 else -> {
                     val focused = resolveFocusedApplicationPackage()?.takeIf { it !in systemOverlayPackages }
-                    if (focused != null && CaptureAppWhitelistManager.isAccessibilityAllowed(focused, this)) {
+                    val focusedAct = if (focused != null) lastVerifiedActivityByPkg[focused].orEmpty() else ""
+                    if (focused != null && isAccessibilityAllowedForWindow(focused, focusedAct)) {
                         activePackage = focused
-                        activeVerifiedActivity = lastVerifiedActivityByPkg[focused].orEmpty()
+                        activeVerifiedActivity = focusedAct
                         focused
                     } else {
                         return
@@ -399,7 +627,8 @@ open class PaymentAccessibilityService : AccessibilityService() {
                 return@post
             }
             if (expectedPackage.isNotBlank()) {
-                if (!CaptureAppWhitelistManager.isAccessibilityAllowed(expectedPackage, this@PaymentAccessibilityService)) {
+                val currentAct = resolveActivityForEventWindow(expectedPackage, -1)
+                if (!isAccessibilityAllowedForWindow(expectedPackage, currentAct)) {
                     onFrameCaptured?.invoke()
                     onSaved(null)
                     return@post
@@ -410,7 +639,6 @@ open class PaymentAccessibilityService : AccessibilityService() {
                     onSaved(null)
                     return@post
                 }
-                val currentAct = resolveActivityForEventWindow(expectedPackage, -1)
                 val currentRole = CaptureWindowGuard.classifyActivityContainer(expectedPackage, currentAct)
                 if (currentRole == WindowContainerRole.SENSITIVE_AUTH_BLOCKED ||
                     currentRole == WindowContainerRole.NON_TRANSACTION_BLOCKED
@@ -477,7 +705,8 @@ open class PaymentAccessibilityService : AccessibilityService() {
             val isLastProbe = idx == delays.lastIndex
             val task = Runnable {
                 if (RecognitionBanner.isAnimatingNow()) return@Runnable
-                if (!CaptureAppWhitelistManager.isAccessibilityAllowed(pkg, this@PaymentAccessibilityService)) return@Runnable
+                val probeAct = resolveActivityForEventWindow(pkg, -1)
+                if (!isAccessibilityAllowedForWindow(pkg, probeAct)) return@Runnable
                 inspectCurrentScreen(
                     pkg = pkg,
                     eventSource = null,
@@ -511,6 +740,10 @@ open class PaymentAccessibilityService : AccessibilityService() {
             return false
         }
         if (snapshot.hasVisiblePasswordNode) {
+            if (cashierVisitTracker.resetSession()) {
+                lastDispatchedSignature = ""
+                lastDispatchedMillis = 0L
+            }
             if (forceManual) {
                 onManualBlocked?.invoke("当前为密码或身份核验敏感页面，已拦截识屏")
             }
@@ -545,11 +778,17 @@ open class PaymentAccessibilityService : AccessibilityService() {
         )
 
         if (!eval.accepted) {
+            if (cashierVisitTracker.onContainerOrRejectTransition(pkg, eval.containerRole, eval.reason)) {
+                lastDispatchedSignature = ""
+                lastDispatchedMillis = 0L
+            }
             if (forceManual && eval.reason in setOf(
-                    com.moji.ai.ai.WindowRejectReason.SENSITIVE_AUTH_PAGE,
-                    com.moji.ai.ai.WindowRejectReason.CASHIER_OR_UNPAID_STATE,
-                    com.moji.ai.ai.WindowRejectReason.CLOSED_FAILED_OR_REFUND_PENDING,
-                    com.moji.ai.ai.WindowRejectReason.CHAT_FEED_OR_BILL_LIST
+                    WindowRejectReason.SENSITIVE_AUTH_PAGE,
+                    WindowRejectReason.NON_TRANSACTION_CONTAINER,
+                    WindowRejectReason.CASHIER_OR_UNPAID_STATE,
+                    WindowRejectReason.CLOSED_FAILED_OR_REFUND_PENDING,
+                    WindowRejectReason.CHAT_FEED_OR_BILL_LIST,
+                    WindowRejectReason.AMBIGUOUS_PROMO_AMOUNTS
                 )
             ) {
                 onManualBlocked?.invoke("已跳过：${eval.reason.summary}")
@@ -573,12 +812,14 @@ open class PaymentAccessibilityService : AccessibilityService() {
 
         val cleanFullText = stripEcommerceRecommendationFooter(rawJoinedText)
         isCurrentlyOnBillDetailPage = true
+        val resolvedSource = if (eval.isLiveCashierFallback) "AI_LIVE_CASHIER" else "AI_ACCESSIBILITY"
         return dispatchCapturedText(
             fullPageText = cleanFullText,
             pkg = pkg,
             verifiedActivity = snapshot.verifiedActivity,
             structureFingerprint = snapshot.structureFingerprint,
-            captureSource = "AI_ACCESSIBILITY",
+            captureSource = resolvedSource,
+            hasExplicitOrderNo = eval.hasExplicitOrderNo,
             forceManual = forceManual
         )
     }
@@ -591,18 +832,37 @@ open class PaymentAccessibilityService : AccessibilityService() {
         captureSource: String,
         screenshotPath: String = "",
         screenshotSha256: String = "",
+        hasExplicitOrderNo: Boolean = false,
         forceManual: Boolean = false
     ): Boolean {
         val now = System.currentTimeMillis()
-        val pageIdentity = extractStablePageIdentity(pkg, fullPageText)
-        if (!forceManual && pageIdentity == lastDispatchedSignature && (now - lastDispatchedMillis) < 15_000L) {
-            return true
+        var cashierVisitId = 0L
+        if (captureSource == "AI_LIVE_CASHIER") {
+            val visitDecision = cashierVisitTracker.evaluateLiveCashierFrame(
+                packageName = pkg,
+                rawText = fullPageText,
+                hasExplicitOrderNo = hasExplicitOrderNo,
+                forceManual = forceManual
+            )
+            if (!visitDecision.shouldDispatch) {
+                return true
+            }
+            cashierVisitId = visitDecision.visitId
+        } else {
+            val pageIdentity = extractStablePageIdentity(pkg, fullPageText)
+            if (!forceManual && pageIdentity == lastDispatchedSignature && (now - lastDispatchedMillis) < 15_000L) {
+                return true
+            }
+            lastDispatchedSignature = pageIdentity
+            lastDispatchedMillis = now
         }
-        lastDispatchedSignature = pageIdentity
+
+        val pageIdentity = extractStablePageIdentity(pkg, fullPageText)
+        lastDispatchedSignature = if (cashierVisitId > 0L) "$pageIdentity|visit:$cashierVisitId" else pageIdentity
         lastDispatchedMillis = now
         Log.d(
             "MoJiCapture",
-            "Dispatch bill page: pkg=$pkg, act=${verifiedActivity.substringAfterLast('.')}, fp=$structureFingerprint, identity=$pageIdentity"
+            "Dispatch bill page: pkg=$pkg, src=$captureSource, act=${verifiedActivity.substringAfterLast('.')}, fp=$structureFingerprint, visit=$cashierVisitId"
         )
 
         if (!forceManual && structureFingerprint.isNotBlank()) {
@@ -622,7 +882,8 @@ open class PaymentAccessibilityService : AccessibilityService() {
             captureSource = captureSource,
             screenshotPath = screenshotPath,
             screenshotSha256 = screenshotSha256,
-            capturedAtMillis = now
+            capturedAtMillis = now,
+            cashierVisitId = cashierVisitId
         )
         return true
     }
@@ -635,7 +896,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
         partialText: String
     ): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
-        if (!CaptureAppWhitelistManager.isAccessibilityAllowed(snapshot.packageName, this)) return false
+        if (!isAccessibilityAllowedForWindow(snapshot.packageName, snapshot.verifiedActivity)) return false
         val now = System.currentTimeMillis()
         if (now - lastAutoOcrMillis < OCR_COOLDOWN_MS) return false
 
@@ -667,15 +928,15 @@ open class PaymentAccessibilityService : AccessibilityService() {
                 return@postDelayed
             }
             if (!isManualTrigger) {
-                if (!CaptureAppWhitelistManager.isAccessibilityAllowed(pkg, this@PaymentAccessibilityService)) {
+                val currentAct = expectedActivity.ifBlank {
+                    lastVerifiedActivityByPkg[pkg].orEmpty().ifBlank { activeVerifiedActivity }
+                }
+                if (!isAccessibilityAllowedForWindow(pkg, currentAct)) {
                     return@postDelayed
                 }
                 val focusedNow = resolveFocusedApplicationPackage()?.takeIf { it !in systemOverlayPackages }
                 if (focusedNow == null || focusedNow != pkg) {
                     return@postDelayed
-                }
-                val currentAct = expectedActivity.ifBlank {
-                    lastVerifiedActivityByPkg[pkg].orEmpty().ifBlank { activeVerifiedActivity }
                 }
                 val currentRole = CaptureWindowGuard.classifyActivityContainer(pkg, currentAct)
                 if (currentRole == WindowContainerRole.SENSITIVE_AUTH_BLOCKED ||
@@ -763,14 +1024,16 @@ open class PaymentAccessibilityService : AccessibilityService() {
                                         return@addOnSuccessListener
                                     }
 
+                                    val resolvedOcrSource = if (ocrEval.isLiveCashierFallback) "AI_LIVE_CASHIER" else "AI_OCR"
                                     dispatchCapturedText(
                                         fullPageText = orderedText,
                                         pkg = pkg,
                                         verifiedActivity = currentAct,
                                         structureFingerprint = expectedFingerprint,
-                                        captureSource = "AI_OCR",
+                                        captureSource = resolvedOcrSource,
                                         screenshotPath = savedScreenshot?.absolutePath.orEmpty(),
                                         screenshotSha256 = savedScreenshot?.sha256.orEmpty(),
+                                        hasExplicitOrderNo = ocrEval.hasExplicitOrderNo,
                                         forceManual = isManualTrigger
                                     )
                                     if (isManualTrigger && onResultMessage == null) {
@@ -1307,6 +1570,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         clearScheduledProbes()
+        cashierVisitTracker.resetSession()
         windowActivities.clear()
         windowPackages.clear()
         if (instance === this) {
@@ -1318,6 +1582,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         clearScheduledProbes()
+        cashierVisitTracker.resetSession()
         windowActivities.clear()
         windowPackages.clear()
         mainHandler.removeCallbacksAndMessages(null)
