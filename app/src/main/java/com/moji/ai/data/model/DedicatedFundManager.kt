@@ -572,13 +572,13 @@ object DedicatedFundManager {
         val medicalDepositCents = when {
             draft == null -> settings.medicalPlan.totalMonthlyDepositCents
             draft.medicalPersonalAccountDepositCents > 0L -> draft.medicalPersonalAccountDepositCents
-            settings.medicalPlan.totalMonthlyDepositCents > 0L -> settings.medicalPlan.totalMonthlyDepositCents
-            else -> draft.personalMedicalDeductionCents.coerceAtLeast(0L)
+            draft.personalMedicalDeductionCents > 0L ->
+                draft.personalMedicalDeductionCents + settings.medicalPlan.employerMonthlyCents.coerceAtLeast(0L)
+            else -> 0L
         }
         val providentDepositCents = when {
             draft == null -> settings.providentPlan.totalMonthlyDepositCents
-            draft.bilateralProvidentDepositCents > 0L -> draft.bilateralProvidentDepositCents
-            else -> settings.providentPlan.totalMonthlyDepositCents
+            else -> draft.bilateralProvidentDepositCents.coerceAtLeast(0L)
         }
 
         return PayslipWalletRouting(

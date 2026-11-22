@@ -2078,12 +2078,14 @@ class LedgerRepository(private val db: AppDatabase) {
             if (payrollWallet != null) {
                 val curSettings = DedicatedFundManager.currentSettings
                 if (shouldRecordMed) {
+                    val empMedCents = draft.personalMedicalDeductionCents.coerceAtLeast(0L)
+                    val matchMedCents = (medDepositCents - empMedCents).coerceAtLeast(0L)
                     DedicatedFundManager.updatePlan(
                         DedicatedFundKind.MEDICAL_INSURANCE,
                         curSettings.medicalPlan.copy(
                             enabled = true,
-                            employeeMonthlyCents = medDepositCents,
-                            employerMonthlyCents = 0L,
+                            employeeMonthlyCents = if (empMedCents > 0L) empMedCents else medDepositCents,
+                            employerMonthlyCents = matchMedCents,
                             linkedPayrollWalletId = payrollWallet.id
                         )
                     )

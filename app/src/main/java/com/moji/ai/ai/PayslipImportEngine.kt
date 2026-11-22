@@ -934,7 +934,10 @@ object PayslipImportEngine {
                 val signedCents = parseSignedMoneyCents(rawValue) ?: return
                 val absCents = abs(signedCents)
                 if (absCents == 0L) {
-                    // 识别到了合法薪资科目名称但金额为 0（如个税 0.00），计入字段命中数，后续仍受“全 0 草稿拦截”保护
+                    if (slot == FieldSlot.EMPLOYER_PROVIDENT) {
+                        acc.hasExplicitEmployerProvident = true
+                    }
+                    // 识别到了合法薪资科目名称但金额为 0（如个税 0.00、单位公积金 0.00），计入字段命中数，后续仍受“全 0 草稿拦截”保护
                     acc.matchedSalaryFieldCount++
                     return
                 }
@@ -1119,12 +1122,14 @@ object PayslipImportEngine {
             }
         }
 
-        // 医保个账划入：若工资条显式列出了「医保个账划入」则优先采用；否则若专项配置有月划入额则采用配置，否则回退个人医保扣缴额
+        // 医保个账划入：若工资条显式列出了「医保个账划入」则优先采用；
+        // 否则当期存在个人医保扣缴时，取「当期个人医保实扣额 + 专项账户配置的单位/统筹月划入补充额」（绝不用上月旧值覆盖当期调基实扣额）；
+        // 当期无个人医保且无个账划入（如零五险年终奖单）时保持 0。
         val medicalDepositCents = when {
             acc.medicalAccountDepositCents > 0L -> acc.medicalAccountDepositCents
-            defaultSettings.medicalPlan.totalMonthlyDepositCents > 0L && acc.personalMedicalCents > 0L ->
-                defaultSettings.medicalPlan.totalMonthlyDepositCents
-            else -> acc.personalMedicalCents
+            acc.personalMedicalCents > 0L ->
+                acc.personalMedicalCents + defaultSettings.medicalPlan.employerMonthlyCents.coerceAtLeast(0L)
+            else -> 0L
         }
 
         // 实发工资：优先采用显式实发；若仅给出应发与各项个人扣款，则自动推导实发参考值
@@ -1260,7 +1265,7 @@ object PayslipImportEngine {
             medicalAccountDepositCents = yuanToCents(dto.medicalPersonalAccountDepositYuan),
             personalProvidentCents = yuanToCents(dto.personalProvidentDeductionYuan),
             employerProvidentCents = if (dto.hasExplicitEmployerProvident) yuanToCents(dto.employerProvidentMatchYuan) else 0L,
-            hasExplicitEmployerProvident = dto.hasExplicitEmployerProvident && dto.employerProvidentMatchYuan > 0.0,
+            hasExplicitEmployerProvident = dto.hasExplicitEmployerProvident,
             explicitNetPayCents = yuanToCents(dto.netTakeHomePayYuan),
             matchedSalaryFieldCount = 3
         )

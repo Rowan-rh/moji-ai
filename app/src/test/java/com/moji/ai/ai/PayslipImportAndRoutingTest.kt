@@ -3,6 +3,7 @@ package com.moji.ai.ai
 import android.content.SharedPreferences
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.DedicatedFundKind
 import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.DedicatedFundPlanConfig
 import com.moji.ai.data.model.DedicatedFundSettings
@@ -653,5 +654,196 @@ class PayslipImportAndRoutingTest {
         assertTrue(forcedOutcome is PayslipCommitOutcome.Success)
         assertEquals(6, store.getAllTransactions().size)
         assertEquals(42_220_00L, store.getWalletById(cmbPayrollWallet.id)!!.balanceCents)
+    }
+
+    @Test
+    fun `CR-B1 regression 1 - cross-month medical base raise and explicit zero employer provident are not overwritten by stale plan`() = runBlocking {
+        val store = InMemoryPayslipStore(listOf(cmbPayrollWallet))
+
+        // 1. 首月（2026-10）：个人医保扣缴 360.00（无单独个账划入列），公积金双边 1000.00 + 1000.00
+        val octCsv = """
+            发薪日期,发薪单位,应发工资,养老保险(个人),失业保险(个人),医疗保险(个人),住房公积金(个人),住房公积金(单位),个人所得税,实发工资
+            2026-10-15,星辰智造科技,18000.00,-1440.00,-90.00,-360.00,-1000.00,1000.00,-420.00,14690.00
+        """.trimIndent()
+        val octParsed = PayslipImportEngine.parsePayslipText(
+            rawText = octCsv,
+            defaultSettings = DedicatedFundManager.currentSettings
+        ).getOrThrow()
+        assertEquals(360_00L, octParsed.draft.personalMedicalDeductionCents)
+        assertEquals(360_00L, octParsed.draft.medicalPersonalAccountDepositCents)
+
+        val octOutcome = LedgerRepository.recordPayslipOnStore(
+            store = store,
+            request = PayslipCommitRequest(
+                draft = octParsed.draft,
+                payrollWalletId = cmbPayrollWallet.id
+            )
+        ) as PayslipCommitOutcome.Success
+        val medWalletId = octOutcome.createdMedicalWallet!!.id
+        val provWalletId = octOutcome.createdProvidentWallet!!.id
+        assertEquals(360_00L, DedicatedFundManager.currentSettings.medicalPlan.employeeMonthlyCents)
+        assertEquals(0L, DedicatedFundManager.currentSettings.medicalPlan.employerMonthlyCents)
+        assertEquals(1_000_00L, DedicatedFundManager.currentSettings.providentPlan.employerMonthlyCents)
+
+        // 2. 次月（2026-11）调基涨薪：个人医保升至 440.00（无单独个账划入列），且显式标注住房公积金(单位) = 0.00
+        val novCsv = """
+            发薪日期,发薪单位,应发工资,养老保险(个人),失业保险(个人),医疗保险(个人),住房公积金(个人),住房公积金(单位),个人所得税,实发工资
+            2026-11-15,星辰智造科技,22000.00,-1760.00,-110.00,-440.00,-1200.00,0.00,-680.00,17810.00
+        """.trimIndent()
+        val novParsed = PayslipImportEngine.parsePayslipText(
+            rawText = novCsv,
+            defaultSettings = DedicatedFundManager.currentSettings
+        ).getOrThrow()
+
+        // 核心断言：次月医保划入必须精确更新为 440.00（绝不被首月 360.00 旧预设覆盖），显式单位公积金 0.00 不被 1000.00 覆盖
+        assertEquals(440_00L, novParsed.draft.personalMedicalDeductionCents)
+        assertEquals(440_00L, novParsed.draft.medicalPersonalAccountDepositCents)
+        assertEquals(1_200_00L, novParsed.draft.personalProvidentDeductionCents)
+        assertEquals(0L, novParsed.draft.employerProvidentMatchCents)
+        assertFalse(novParsed.isEmployerProvidentFromPlanFallback)
+
+        val novRouting = DedicatedFundManager.resolvePayslipTargetWallets(
+            wallets = store.getAllWallets(),
+            draft = novParsed.draft,
+            settings = DedicatedFundManager.currentSettings
+        )
+        assertEquals(440_00L, novRouting.medicalAccountDepositCents)
+        assertEquals(1_200_00L, novRouting.providentAccountDepositCents)
+
+        val novOutcome = LedgerRepository.recordPayslipOnStore(
+            store = store,
+            request = PayslipCommitRequest(
+                draft = novParsed.draft,
+                payrollWalletId = cmbPayrollWallet.id,
+                medicalWalletId = medWalletId,
+                providentWalletId = provWalletId
+            )
+        ) as PayslipCommitOutcome.Success
+        assertEquals(440_00L, novOutcome.medicalChildTransaction!!.amountCents)
+        assertEquals(1_200_00L, novOutcome.providentChildTransaction!!.amountCents)
+        assertEquals(360_00L + 440_00L, store.getWalletById(medWalletId)!!.balanceCents)
+        assertEquals(440_00L, DedicatedFundManager.currentSettings.medicalPlan.employeeMonthlyCents)
+
+        // 3. 验证用户配置了单位/统筹月划入补充额（如 150.00）时，入账与跨月解析均保留 employerMonthlyCents 而不抹零
+        DedicatedFundManager.updatePlan(
+            DedicatedFundKind.MEDICAL_INSURANCE,
+            DedicatedFundManager.currentSettings.medicalPlan.copy(
+                enabled = true,
+                employeeMonthlyCents = 440_00L,
+                employerMonthlyCents = 150_00L
+            )
+        )
+        val decCsv = """
+            发薪日期,发薪单位,应发工资,养老保险(个人),失业保险(个人),医疗保险(个人),个人所得税,实发工资
+            2026-12-15,星辰智造科技,23000.00,-1840.00,-115.00,-460.00,-720.00,19865.00
+        """.trimIndent()
+        val decParsed = PayslipImportEngine.parsePayslipText(
+            rawText = decCsv,
+            defaultSettings = DedicatedFundManager.currentSettings
+        ).getOrThrow()
+        assertEquals(460_00L + 150_00L, decParsed.draft.medicalPersonalAccountDepositCents)
+
+        LedgerRepository.recordPayslipOnStore(
+            store = store,
+            request = PayslipCommitRequest(
+                draft = decParsed.draft,
+                payrollWalletId = cmbPayrollWallet.id,
+                medicalWalletId = medWalletId,
+                enableProvidentDeposit = false
+            )
+        ) as PayslipCommitOutcome.Success
+        assertEquals(460_00L, DedicatedFundManager.currentSettings.medicalPlan.employeeMonthlyCents)
+        assertEquals(150_00L, DedicatedFundManager.currentSettings.medicalPlan.employerMonthlyCents)
+    }
+
+    @Test
+    fun `CR-B1 regression 2 - zero social insurance bonus payslip does not inject phantom medical or provident deposits from plan`() = runBlocking {
+        val medWallet = WalletEntity(
+            id = 2L,
+            name = "个人医保账户",
+            type = WalletType.CASH_OTHER,
+            subTypeLabel = "医保账户",
+            brandCode = "MEDICAL_CARD",
+            balanceCents = 2_000_00L,
+            includeInNetWorth = false
+        )
+        val provWallet = WalletEntity(
+            id = 3L,
+            name = "住房公积金",
+            type = WalletType.CASH_OTHER,
+            subTypeLabel = "住房公积金",
+            brandCode = "PROVIDENT",
+            balanceCents = 10_000_00L,
+            includeInNetWorth = false
+        )
+        val store = InMemoryPayslipStore(listOf(cmbPayrollWallet, medWallet, provWallet))
+
+        // 预设历史存在非零月度医保与公积金计划
+        DedicatedFundManager.updatePlan(
+            DedicatedFundKind.MEDICAL_INSURANCE,
+            DedicatedFundPlanConfig(
+                enabled = true,
+                employeeMonthlyCents = 360_00L,
+                employerMonthlyCents = 140_00L,
+                linkedPayrollWalletId = cmbPayrollWallet.id
+            )
+        )
+        DedicatedFundManager.updatePlan(
+            DedicatedFundKind.HOUSING_PROVIDENT,
+            DedicatedFundPlanConfig(
+                enabled = true,
+                employeeMonthlyCents = 1_200_00L,
+                employerMonthlyCents = 1_200_00L,
+                linkedPayrollWalletId = cmbPayrollWallet.id
+            )
+        )
+
+        // 导入一笔 0 五险一金的年终奖薪资单
+        val bonusText = """
+            发薪日期 2026-12-28
+            发薪单位 星辰智造科技
+            应发工资 30000.00
+            个人所得税 -900.00
+            实发工资 29100.00
+        """.trimIndent()
+        val parsedBonus = PayslipImportEngine.parsePayslipText(
+            rawText = bonusText,
+            defaultSettings = DedicatedFundManager.currentSettings
+        ).getOrThrow()
+
+        assertEquals(30_000_00L, parsedBonus.draft.grossSalaryCents)
+        assertEquals(29_100_00L, parsedBonus.draft.netTakeHomePayCents)
+        assertEquals(0L, parsedBonus.draft.personalMedicalDeductionCents)
+        assertEquals(0L, parsedBonus.draft.medicalPersonalAccountDepositCents)
+        assertEquals(0L, parsedBonus.draft.bilateralProvidentDepositCents)
+
+        val bonusRouting = DedicatedFundManager.resolvePayslipTargetWallets(
+            wallets = store.getAllWallets(),
+            draft = parsedBonus.draft,
+            settings = DedicatedFundManager.currentSettings
+        )
+        assertEquals(29_100_00L, bonusRouting.netPayDepositCents)
+        assertEquals(0L, bonusRouting.medicalAccountDepositCents)
+        assertEquals(0L, bonusRouting.providentAccountDepositCents)
+
+        val bonusOutcome = LedgerRepository.recordPayslipOnStore(
+            store = store,
+            request = PayslipCommitRequest(
+                draft = parsedBonus.draft,
+                payrollWalletId = cmbPayrollWallet.id,
+                enableMedicalDeposit = bonusRouting.medicalAccountDepositCents > 0L,
+                medicalWalletId = medWallet.id,
+                enableProvidentDeposit = bonusRouting.providentAccountDepositCents > 0L,
+                providentWalletId = provWallet.id
+            )
+        ) as PayslipCommitOutcome.Success
+
+        assertNotNull(bonusOutcome.mainTransaction)
+        assertNull(bonusOutcome.medicalChildTransaction)
+        assertNull(bonusOutcome.providentChildTransaction)
+        assertEquals(1, store.getAllTransactions().size)
+        assertEquals(39_100_00L, store.getWalletById(cmbPayrollWallet.id)!!.balanceCents)
+        assertEquals(2_000_00L, store.getWalletById(medWallet.id)!!.balanceCents)
+        assertEquals(10_000_00L, store.getWalletById(provWallet.id)!!.balanceCents)
     }
 }
