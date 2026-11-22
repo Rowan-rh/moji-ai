@@ -359,6 +359,106 @@ class PayslipImportAndRoutingTest {
     }
 
     @Test
+    fun `AC-B2 regression - image stream decode pipeline succeeds when bounds pass returns null and handles invalid or missing streams`() {
+        data class FakeDecodedImage(
+            val width: Int,
+            val height: Int,
+            val sampleSize: Int,
+            val rotatedDegrees: Int = 0
+        )
+
+        fun buildFakePngHeaderBytes(width: Int, height: Int): ByteArray {
+            val buf = java.nio.ByteBuffer.allocate(24)
+            // PNG 8-byte signature
+            buf.put(byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+            // IHDR length (13) + "IHDR"
+            buf.putInt(13)
+            buf.put("IHDR".toByteArray(Charsets.US_ASCII))
+            buf.putInt(width)
+            buf.putInt(height)
+            return buf.array()
+        }
+
+        fun createSimulatingAndroidAdapter(exifRotation: Int = 0) =
+            object : PayslipImportEngine.ImageStreamDecodeAdapter<FakeDecodedImage> {
+                override fun decodeBounds(stream: java.io.InputStream): Pair<Int, Int> {
+                    val header = stream.readBytes()
+                    // 模拟 Android BitmapFactory.decodeStream(..., inJustDecodeBounds = true)：
+                    // 合法 PNG 仅解析出 outWidth / outHeight，非法流返回 -1 to -1
+                    val isPng = header.size >= 24 &&
+                        header[0] == 0x89.toByte() &&
+                        header[1] == 0x50.toByte() &&
+                        header[2] == 0x4E.toByte() &&
+                        header[3] == 0x47.toByte()
+                    if (!isPng) return -1 to -1
+                    val bb = java.nio.ByteBuffer.wrap(header)
+                    return bb.getInt(16) to bb.getInt(20)
+                }
+
+                override fun readExifRotationDegrees(stream: java.io.InputStream): Int {
+                    stream.readBytes()
+                    return exifRotation
+                }
+
+                override fun decodeSampled(stream: java.io.InputStream, inSampleSize: Int): FakeDecodedImage? {
+                    val (w, h) = decodeBounds(stream)
+                    if (w <= 0 || h <= 0) return null
+                    return FakeDecodedImage(
+                        width = (w / inSampleSize).coerceAtLeast(1),
+                        height = (h / inSampleSize).coerceAtLeast(1),
+                        sampleSize = inSampleSize
+                    )
+                }
+
+                override fun rotateIfNeeded(image: FakeDecodedImage, degrees: Int): FakeDecodedImage {
+                    return if (degrees == 90 || degrees == 270) {
+                        image.copy(width = image.height, height = image.width, rotatedDegrees = degrees)
+                    } else {
+                        image.copy(rotatedDegrees = degrees)
+                    }
+                }
+            }
+
+        // 1. 正常清晰工资条 PNG 截图（1200x2600）：必须成功返回图像，绝不误报「无法读取所选图片文件」
+        val validPngBytes = buildFakePngHeaderBytes(1200, 2600)
+        val normalDecoded = PayslipImportEngine.decodeDownsampledImageWithAdapter(
+            openStream = { java.io.ByteArrayInputStream(validPngBytes) },
+            adapter = createSimulatingAndroidAdapter(exifRotation = 0)
+        )
+        assertTrue(normalDecoded.isSuccess)
+        assertEquals(1, normalDecoded.getOrThrow().sampleSize)
+        assertEquals(1200, normalDecoded.getOrThrow().width)
+        assertEquals(2600, normalDecoded.getOrThrow().height)
+
+        // 2. 4K 原图（4000x6000）+ EXIF 90° 旋转：自动降采样 inSampleSize >= 2 且完成宽高旋转
+        val largePngBytes = buildFakePngHeaderBytes(4000, 6000)
+        val rotatedDecoded = PayslipImportEngine.decodeDownsampledImageWithAdapter(
+            openStream = { java.io.ByteArrayInputStream(largePngBytes) },
+            adapter = createSimulatingAndroidAdapter(exifRotation = 90)
+        ).getOrThrow()
+        assertTrue(rotatedDecoded.sampleSize >= 2)
+        assertEquals(90, rotatedDecoded.rotatedDegrees)
+        assertEquals(6000 / rotatedDecoded.sampleSize, rotatedDecoded.width)
+        assertEquals(4000 / rotatedDecoded.sampleSize, rotatedDecoded.height)
+
+        // 3. ContentResolver.openInputStream(uri) 返回 null：报「无法读取所选图片文件」
+        val missingStreamResult = PayslipImportEngine.decodeDownsampledImageWithAdapter(
+            openStream = { null },
+            adapter = createSimulatingAndroidAdapter()
+        )
+        assertTrue(missingStreamResult.isFailure)
+        assertTrue(missingStreamResult.exceptionOrNull()!!.message!!.contains("无法读取所选图片文件"))
+
+        // 4. 选择了非图片乱码文件（outWidth <= 0）：报「所选文件不是有效的图片格式」
+        val invalidFileResult = PayslipImportEngine.decodeDownsampledImageWithAdapter(
+            openStream = { java.io.ByteArrayInputStream("not-an-image".toByteArray()) },
+            adapter = createSimulatingAndroidAdapter()
+        )
+        assertTrue(invalidFileResult.isFailure)
+        assertTrue(invalidFileResult.exceptionOrNull()!!.message!!.contains("有效的图片格式"))
+    }
+
+    @Test
     fun `AC-B3 and AC-B4 positive - auto-creates missing dedicated wallets with includeInNetWorth false, records 3-way atomically, and cascades main undo`() = runBlocking {
         // 初始仅有一张代发工资卡（无医保卡、无公积金钱包）
         val store = InMemoryPayslipStore(listOf(cmbPayrollWallet))

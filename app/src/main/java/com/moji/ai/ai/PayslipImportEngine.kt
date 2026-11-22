@@ -389,50 +389,95 @@ object PayslipImportEngine {
         }
     }
 
-    private fun decodeDownsampledBitmapFromUri(context: Context, uri: Uri): Result<Bitmap> {
-        val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        context.contentResolver.openInputStream(uri)?.use { stream ->
-            BitmapFactory.decodeStream(stream, null, boundsOpts)
-        } ?: return Result.failure(IllegalArgumentException("无法读取所选图片文件"))
+    internal interface ImageStreamDecodeAdapter<T> {
+        /**
+         * 仅探测图像宽高（注意：Android `BitmapFactory.decodeStream(..., inJustDecodeBounds = true)` 正常时返回 `null`，
+         * 只将宽高写入 `outWidth / outHeight`，切勿把该 `null` 返回值当作输入流打开失败）。
+         */
+        fun decodeBounds(stream: java.io.InputStream): Pair<Int, Int>
+        fun readExifRotationDegrees(stream: java.io.InputStream): Int
+        fun decodeSampled(stream: java.io.InputStream, inSampleSize: Int): T?
+        fun rotateIfNeeded(image: T, degrees: Int): T
+    }
 
-        if (boundsOpts.outWidth <= 0 || boundsOpts.outHeight <= 0) {
+    private val androidBitmapDecodeAdapter = object : ImageStreamDecodeAdapter<Bitmap> {
+        override fun decodeBounds(stream: java.io.InputStream): Pair<Int, Int> {
+            val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            val unexpectedBitmap = BitmapFactory.decodeStream(stream, null, boundsOpts)
+            unexpectedBitmap?.recycle()
+            return boundsOpts.outWidth to boundsOpts.outHeight
+        }
+
+        override fun readExifRotationDegrees(stream: java.io.InputStream): Int {
+            val exif = ExifInterface(stream)
+            return when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
+                ExifInterface.ORIENTATION_ROTATE_90 -> 90
+                ExifInterface.ORIENTATION_ROTATE_180 -> 180
+                ExifInterface.ORIENTATION_ROTATE_270 -> 270
+                else -> 0
+            }
+        }
+
+        override fun decodeSampled(stream: java.io.InputStream, inSampleSize: Int): Bitmap? {
+            val decodeOpts = BitmapFactory.Options().apply {
+                this.inSampleSize = inSampleSize
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+            }
+            return BitmapFactory.decodeStream(stream, null, decodeOpts)
+        }
+
+        override fun rotateIfNeeded(image: Bitmap, degrees: Int): Bitmap {
+            if (degrees == 0) return image
+            val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+            val rotated = runCatching {
+                Bitmap.createBitmap(image, 0, 0, image.width, image.height, matrix, true)
+            }.getOrDefault(image)
+            if (rotated !== image && !image.isRecycled) {
+                image.recycle()
+            }
+            return rotated
+        }
+    }
+
+    internal fun <T> decodeDownsampledImageWithAdapter(
+        openStream: () -> java.io.InputStream?,
+        adapter: ImageStreamDecodeAdapter<T>
+    ): Result<T> {
+        val boundsStream = runCatching { openStream() }.getOrNull()
+            ?: return Result.failure(IllegalArgumentException("无法读取所选图片文件"))
+        val (rawWidth, rawHeight) = try {
+            boundsStream.use { stream -> adapter.decodeBounds(stream) }
+        } catch (_: Exception) {
+            return Result.failure(IllegalArgumentException("无法读取所选图片文件"))
+        }
+
+        if (rawWidth <= 0 || rawHeight <= 0) {
             return Result.failure(IllegalArgumentException("所选文件不是有效的图片格式"))
         }
 
         val rotationDegrees = runCatching {
-            context.contentResolver.openInputStream(uri)?.use { exifStream ->
-                val exif = ExifInterface(exifStream)
-                when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
-                    ExifInterface.ORIENTATION_ROTATE_90 -> 90
-                    ExifInterface.ORIENTATION_ROTATE_180 -> 180
-                    ExifInterface.ORIENTATION_ROTATE_270 -> 270
-                    else -> 0
-                }
-            } ?: 0
+            openStream()?.use { exifStream -> adapter.readExifRotationDegrees(exifStream) } ?: 0
         }.getOrDefault(0)
 
-        val sampleSize = calculateInSampleSize(boundsOpts.outWidth, boundsOpts.outHeight)
-        val decodeOpts = BitmapFactory.Options().apply {
-            inSampleSize = sampleSize
-            inPreferredConfig = Bitmap.Config.ARGB_8888
-        }
-
-        val decoded = context.contentResolver.openInputStream(uri)?.use { stream ->
-            BitmapFactory.decodeStream(stream, null, decodeOpts)
+        val sampleSize = calculateInSampleSize(rawWidth, rawHeight)
+        val pixelStream = runCatching { openStream() }.getOrNull()
+            ?: return Result.failure(IllegalArgumentException("无法读取所选图片文件"))
+        val decoded = try {
+            pixelStream.use { stream -> adapter.decodeSampled(stream, sampleSize) }
+        } catch (_: Exception) {
+            null
         } ?: return Result.failure(IllegalArgumentException("图片解码失败，请重试"))
 
-        if (rotationDegrees == 0) {
-            return Result.success(decoded)
-        }
-        val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
-        val rotated = runCatching {
-            Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
-        }.getOrDefault(decoded)
-        if (rotated !== decoded && !decoded.isRecycled) {
-            decoded.recycle()
-        }
-        return Result.success(rotated)
+        return Result.success(
+            if (rotationDegrees != 0) adapter.rotateIfNeeded(decoded, rotationDegrees) else decoded
+        )
     }
+
+    private fun decodeDownsampledBitmapFromUri(context: Context, uri: Uri): Result<Bitmap> =
+        decodeDownsampledImageWithAdapter(
+            openStream = { context.contentResolver.openInputStream(uri) },
+            adapter = androidBitmapDecodeAdapter
+        )
 
     private suspend fun runLocalChineseOcr(bitmap: Bitmap): Text =
         suspendCancellableCoroutine { cont ->
