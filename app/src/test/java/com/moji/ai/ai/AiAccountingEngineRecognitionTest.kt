@@ -375,4 +375,108 @@ class AiAccountingEngineRecognitionTest {
             tempRoot.deleteRecursively()
         }
     }
+
+    @Test
+    fun liveCashierCompletion_parsesPaidAmountDiscountMerchantAndWalletWithoutTimestamp() {
+        val capturedAtMillis = 1_763_800_005_000L
+        val walletsWithCmb8473 = testWallets + WalletEntity(
+            id = 5L,
+            name = "招商银行储蓄卡",
+            type = WalletType.DEBIT_BANK,
+            subTypeLabel = "储蓄卡",
+            brandCode = "CMB",
+            cardLast4 = "8473",
+            aliases = "招行储蓄卡,8473"
+        )
+
+        // 1. 支付宝收银台无时间完成页：实付 ¥0.08 + 商户“羊驼老头” + 无标签划线原价 ¥0.10 + 百次立减 -¥0.02 + 付款方式 招商银行储蓄卡(8473)
+        val rawAlipayCashier = "[AI_LIVE_CASHIER | com.eg.android.AlipayGphone | visit=1]: 支付成功 | ¥0.08 | 羊驼老头 | ¥0.10 | 百次立减 | -¥0.02 | 付款方式 | 招商银行储蓄卡(8473) | 点击给商家对账 | 完成"
+        val parsed = kotlinx.coroutines.runBlocking {
+            engine.parseCapturedText(
+                rawText = rawAlipayCashier,
+                sourceAppPackage = "com.eg.android.AlipayGphone",
+                captureMode = "AI_LIVE_CASHIER",
+                wallets = walletsWithCmb8473,
+                recentExpenses = emptyList(),
+                capturedAtMillis = capturedAtMillis
+            )
+        }
+        assertNotNull(parsed)
+        assertEquals(TransactionType.EXPENSE, parsed!!.type)
+        assertEquals(8L, parsed.amountCents)
+        assertEquals(2L, parsed.discountCents)
+        assertEquals("羊驼老头", parsed.merchant)
+        assertEquals("招商银行储蓄卡(8473)", parsed.paymentMethodRaw)
+        assertEquals(5L, parsed.sourceWalletId)
+        assertEquals(capturedAtMillis, parsed.timestamp)
+        assertEquals("AI_LIVE_CASHIER", parsed.captureSource)
+        assertTrue("Note should contain structured original/discount/paid template", parsed.note.contains("原价¥0.10"))
+
+        // 2. 原价在前、立减在中、实付在后的收银台布局（¥20.00 | 支付立减 -¥2.00 | ¥18.00）
+        val rawStrikeFirst = "[AI_LIVE_CASHIER | com.eg.android.AlipayGphone | visit=2]: 付款成功 | 瑞幸咖啡 | ¥20.00 | 支付立减 -¥2.00 | ¥18.00 | 付款方式 余额宝 | 返回商家"
+        val parsedStrikeFirst = engine.localSmartFallbackParse(
+            rawText = rawStrikeFirst,
+            sourceAppPackage = "com.eg.android.AlipayGphone",
+            wallets = walletsWithCmb8473,
+            recentExpenses = emptyList(),
+            referenceMillis = capturedAtMillis,
+            captureMode = "AI_LIVE_CASHIER"
+        )
+        assertNotNull(parsedStrikeFirst)
+        assertEquals(18.00, parsedStrikeFirst!!.amount, 0.001)
+        assertEquals(200L, parsedStrikeFirst.discountCents)
+        assertEquals("瑞幸咖啡", parsedStrikeFirst.merchant)
+        assertEquals("余额宝", parsedStrikeFirst.paymentMethodRaw)
+        assertEquals(2L, parsedStrikeFirst.sourceWalletId)
+        assertEquals(capturedAtMillis, parsedStrikeFirst.occurredAtMillis)
+
+        // 3. 普通 AI_ACCESSIBILITY 若无明确时间仍严格返回 null，绝不越界放行
+        val rejectedPlainAccessibility = engine.localSmartFallbackParse(
+            rawText = "支付成功 | ¥0.08 | 羊驼老头 | 付款方式 | 招商银行储蓄卡(8473) | 完成",
+            sourceAppPackage = "com.eg.android.AlipayGphone",
+            wallets = walletsWithCmb8473,
+            recentExpenses = emptyList(),
+            referenceMillis = capturedAtMillis,
+            captureMode = "AI_ACCESSIBILITY"
+        )
+        assertNull(rejectedPlainAccessibility)
+    }
+
+    @Test
+    fun liveCashierWalletMatching_safelyLeavesUnmatchedCardTailOrMissingHuabeiNull() {
+        // 1. 明确写了本机未建档尾号 9988：严禁乱绑到邮储(3870)或招行(3354)，必须返回 null（不关联账户）
+        val unmatchedTail = engine.matchWalletForPayment(
+            payMethodRaw = "建设银行储蓄卡(9988)",
+            fullText = "支付成功 | 拼多多平台商户 | ¥19.90 | 付款方式 | 建设银行储蓄卡(9988) | 完成",
+            sourceAppPackage = "com.eg.android.AlipayGphone",
+            wallets = testWallets
+        )
+        assertNull(unmatchedTail)
+
+        // 2. 明确写了“花呗”，当用户未建花呗钱包时返回 null（绝不误扣招商银行信用卡 3354）；建有花呗钱包时精准命中
+        val unmatchedHuabei = engine.matchWalletForPayment(
+            payMethodRaw = "花呗",
+            fullText = "支付成功 | 拼多多平台商户 | ¥19.90 | 付款方式 | 花呗 | 完成",
+            sourceAppPackage = "com.eg.android.AlipayGphone",
+            wallets = testWallets
+        )
+        assertNull(unmatchedHuabei)
+
+        val walletsWithHuabei = testWallets + WalletEntity(
+            id = 6L,
+            name = "花呗",
+            type = WalletType.CREDIT,
+            subTypeLabel = "花呗",
+            brandCode = "ALIPAY",
+            aliases = "蚂蚁花呗,花呗"
+        )
+        val matchedHuabei = engine.matchWalletForPayment(
+            payMethodRaw = "花呗",
+            fullText = "支付成功 | 拼多多平台商户 | ¥19.90 | 付款方式 | 花呗 | 完成",
+            sourceAppPackage = "com.eg.android.AlipayGphone",
+            wallets = walletsWithHuabei
+        )
+        assertNotNull(matchedHuabei)
+        assertEquals(6L, matchedHuabei!!.id)
+    }
 }
