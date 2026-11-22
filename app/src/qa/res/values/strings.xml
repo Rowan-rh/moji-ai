@@ -3,4 +3,6 @@
     <string name="notification_service_label">默记 QA · 通知栏静默识账</string>
     <string name="accessibility_service_label">默记 QA · 支付页面无感识账</string>
     <string name="ocr_tile_label">默记 QA 识屏</string>
+    <string name="widget_ledger_label">默记 QA · 预算与今日支出</string>
+    <string name="widget_ledger_description">[QA 独立测试包] 预算与今日支出桌面卡片，与正式版数据完全隔离。</string>
 </resources>

@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="240dp"
+    android:height="124dp"
+    android:viewportWidth="240"
+    android:viewportHeight="124">
+
+    <!-- 卡片主体 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:strokeColor="#E6E8EE"
+        android:strokeWidth="1.2"
+        android:pathData="M20,4H220A16,16 0 0,1 236,20V104A16,16 0 0,1 220,120H20A16,16 0 0,1 4,104V20A16,16 0 0,1 20,4Z" />
+
+    <!-- 左上账本胶囊 -->
+    <path
+        android:fillColor="#F4F5F7"
+        android:pathData="M24,16H82A9,9 0 0,1 91,25A9,9 0 0,1 82,34H24A9,9 0 0,1 15,25A9,9 0 0,1 24,16Z" />
+    <path
+        android:fillColor="#E65540"
+        android:pathData="M25,21A4,4 0 1,1 25,29A4,4 0 1,1 25,21Z" />
+    <path
+        android:fillColor="#4B5563"
+        android:pathData="M34,22H76A3,3 0 0,1 79,25A3,3 0 0,1 76,28H34A3,3 0 0,1 31,25A3,3 0 0,1 34,22Z" />
+
+    <!-- 右上 + 记一笔 蓝色胶囊 -->
+    <path
+        android:fillColor="#1677FF"
+        android:pathData="M176,15H213A11,11 0 0,1 224,26A11,11 0 0,1 213,37H176A11,11 0 0,1 165,26A11,11 0 0,1 176,15Z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M180,25H188V27H180Z M183,22H185V30H183Z" />
+    <path
+        android:fillColor="#DBEAFE"
+        android:pathData="M194,23.5H213A2.5,2.5 0 0,1 215.5,26A2.5,2.5 0 0,1 213,28.5H194A2.5,2.5 0 0,1 191.5,26A2.5,2.5 0 0,1 194,23.5Z" />
+
+    <!-- 中部主标题与金额 -->
+    <path
+        android:fillColor="#9CA3AF"
+        android:pathData="M18,44H74A2.5,2.5 0 0,1 76.5,46.5A2.5,2.5 0 0,1 74,49H18A2.5,2.5 0 0,1 15.5,46.5A2.5,2.5 0 0,1 18,44Z" />
+    <path
+        android:fillColor="#141414"
+        android:pathData="M19,55H106A5,5 0 0,1 111,60A5,5 0 0,1 106,65H19A5,5 0 0,1 14,60A5,5 0 0,1 19,55Z" />
+
+    <!-- 预算进度条 -->
+    <path
+        android:fillColor="#ECEEF2"
+        android:pathData="M18,73H222A3,3 0 0,1 225,76A3,3 0 0,1 222,79H18A3,3 0 0,1 15,76A3,3 0 0,1 18,73Z" />
+    <path
+        android:fillColor="#1677FF"
+        android:pathData="M18,73H138A3,3 0 0,1 141,76A3,3 0 0,1 138,79H18A3,3 0 0,1 15,76A3,3 0 0,1 18,73Z" />
+
+    <!-- 底部今日已花 / 本月支出双栏 -->
+    <path
+        android:fillColor="#F4F5F7"
+        android:pathData="M23,86H217A8,8 0 0,1 225,94V103A8,8 0 0,1 217,111H23A8,8 0 0,1 15,103V94A8,8 0 0,1 23,86Z" />
+    <path
+        android:fillColor="#E5E7EB"
+        android:pathData="M119.5,91H120.5V106H119.5Z" />
+    <path
+        android:fillColor="#6B7280"
+        android:pathData="M27,92H64A2,2 0 0,1 66,94A2,2 0 0,1 64,96H27A2,2 0 0,1 25,94A2,2 0 0,1 27,92Z" />
+    <path
+        android:fillColor="#141414"
+        android:pathData="M27,100H82A3,3 0 0,1 85,103A3,3 0 0,1 82,106H27A3,3 0 0,1 24,103A3,3 0 0,1 27,100Z" />
+    <path
+        android:fillColor="#6B7280"
+        android:pathData="M133,92H170A2,2 0 0,1 172,94A2,2 0 0,1 170,96H133A2,2 0 0,1 131,94A2,2 0 0,1 133,92Z" />
+    <path
+        android:fillColor="#141414"
+        android:pathData="M133,100H194A3,3 0 0,1 197,103A3,3 0 0,1 194,106H133A3,3 0 0,1 130,103A3,3 0 0,1 133,100Z" />
+</vector>

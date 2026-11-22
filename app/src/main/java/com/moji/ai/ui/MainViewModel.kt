@@ -65,6 +65,8 @@ import com.moji.ai.service.CaptureObservabilityLogEntry
 import com.moji.ai.update.AppUpdateConfig
 import com.moji.ai.update.ReleaseUpdateInfo
 import com.moji.ai.update.UpdateCheckState
+import com.moji.ai.widget.MoJiLedgerWidgetUpdater
+import com.moji.ai.widget.WidgetPinRequestResult
 import java.io.File
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
@@ -1132,6 +1134,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (sanitized.isEmpty()) return
         _currentLedger.value = sanitized
         uiPrefs.edit().putString("current_ledger", sanitized).apply()
+        MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
     }
 
     fun createLedger(name: String, switchToLedger: Boolean = true) {
@@ -1150,12 +1153,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val next = !_hideAssetAmounts.value
         _hideAssetAmounts.value = next
         uiPrefs.edit().putBoolean("hide_asset_amounts", next).apply()
+        MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
     }
 
     fun updateMonthlyBudgetYuan(budgetYuan: Double) {
         val cents = (budgetYuan * 100.0).roundToLong().coerceAtLeast(0L)
         _monthlyBudgetCents.value = cents
         uiPrefs.edit().putLong("monthly_budget_cents", cents).apply()
+        MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
     }
 
     fun updateAiConfig(newConfig: AiConfig) {
@@ -1566,6 +1571,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }
             MoJiCloudSyncClient.recordRestoredState(restoredSig)
+            MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
             txCount
         } finally {
             MoJiCloudSyncClient.endRestoreSuppression()
@@ -2323,6 +2329,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ): Result<PasswordProtectionConfig> {
         val res = AppLockManager.enablePasswordProtection(newPin, confirmPin, hint)
         res.onSuccess {
+            MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
             postMessage("已开启密码保护")
         }
         return res
@@ -2343,6 +2350,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun disablePasswordProtection(currentPin: String): Result<PasswordProtectionConfig> {
         val res = AppLockManager.disablePasswordProtection(currentPin)
         res.onSuccess {
+            MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
             postMessage("已关闭密码保护")
         }
         return res
@@ -2355,6 +2363,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateHideRecentTaskPreview(hide: Boolean) {
         AppLockManager.updateHideRecentTaskPreview(hide)
+        MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
         postMessage(if (hide) "已开启多任务模糊与防截屏保护" else "已关闭多任务模糊与防截屏保护")
     }
 
@@ -2457,7 +2466,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun resetAppearanceDefaults() {
         AppearanceConfigManager.resetToDefaults()
+        MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
         postMessage("已恢复默认外观显示设置")
+    }
+
+    fun requestPinDesktopWidget() {
+        when (MoJiLedgerWidgetUpdater.requestPinWidget(app)) {
+            WidgetPinRequestResult.SYSTEM_PROMPT_REQUESTED -> {
+                postMessage("已调起系统桌面小组件面板；若桌面未弹窗，可长按桌面空白处 → 小组件添加")
+            }
+            WidgetPinRequestResult.UNSUPPORTED_BY_LAUNCHER,
+            WidgetPinRequestResult.FAILED -> {
+                postMessage("当前桌面不支持直接固定，请长按手机桌面空白处 → 小组件搜索「默记」添加")
+            }
+        }
     }
 
     fun updateUserNickname(rawNickname: String) {

@@ -28,7 +28,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
@@ -77,6 +79,7 @@ fun AppearanceManagementScreen(
     onToggleHideTrailingZeroDecimals: (Boolean) -> Unit,
     onResetDefaults: () -> Unit,
     onBack: () -> Unit,
+    onRequestPinWidget: () -> Unit = {},
     listState: LazyListState = rememberLazyListState()
 ) {
     BackHandler(onBack = onBack)
@@ -143,6 +146,12 @@ fun AppearanceManagementScreen(
         ) {
             item {
                 AppearanceLivePreviewCard(config = config)
+            }
+            item {
+                DesktopWidgetPinCard(
+                    config = config,
+                    onRequestPinWidget = onRequestPinWidget
+                )
             }
             item {
                 ThemeModeSelectorCard(
@@ -800,5 +809,144 @@ private fun FormatSwitchRow(
             onCheckedChange = onCheckedChange,
             colors = iCostUnifiedSwitchColors()
         )
+    }
+}
+
+@Composable
+private fun DesktopWidgetPinCard(
+    config: AppearanceSettingsConfig,
+    onRequestPinWidget: () -> Unit
+) {
+    val sampleToday = AppearanceConfigManager.formatDisplayAmount(38.50, config)
+    val sampleRemaining = AppearanceConfigManager.formatDisplayAmount(2040.00, config)
+
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = ICostCardWhite,
+        shadowElevation = 2.dp,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(28.dp)
+                            .clip(CircleShape)
+                            .background(ICostBlueAccent.copy(alpha = 0.12f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Widgets,
+                            contentDescription = null,
+                            tint = ICostBlueAccent,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "桌面小组件",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ICostTextPrimary
+                        )
+                        Text(
+                            text = "支持 4×2 标准卡片与 2×2 紧凑卡片自适应",
+                            fontSize = 11.sp,
+                            color = ICostTextSecondary
+                        )
+                    }
+                }
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(ICostPillGray)
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = "4×2 · 2×2",
+                        fontFamily = ICDinFontFamily,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextSecondary
+                    )
+                }
+            }
+
+            // 缩略桌面小组件示意图
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(ICostCellGray)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "本月剩余预算 · 今日 ¥$sampleToday",
+                        fontSize = 11.sp,
+                        color = ICostTextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "¥$sampleRemaining",
+                        fontFamily = ICDinFontFamily,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(999.dp),
+                    color = ICostBlueAccent,
+                    modifier = Modifier.iCostPressScale(onClick = onRequestPinWidget)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Add,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Text(
+                            text = "添加桌面小组件",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                }
+            }
+
+            Text(
+                text = "点小组件右上角「+」可直接拉起记账键盘；开启隐藏金额或应用锁预览保护时自动脱敏为 ¥****。",
+                fontSize = 11.sp,
+                color = ICostTextMuted
+            )
+        }
     }
 }

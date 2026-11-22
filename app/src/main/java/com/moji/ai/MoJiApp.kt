@@ -2,6 +2,7 @@ package com.moji.ai
 
 import android.app.Application
 import android.content.SharedPreferences
+import android.content.res.Configuration
 import android.util.Log
 import com.moji.ai.ai.AiAccountingEngine
 import com.moji.ai.ai.AiConfigManager
@@ -25,6 +26,7 @@ import com.moji.ai.notification.SilentBookkeepingNotifier
 import com.moji.ai.service.BillScreenshotStorage
 import com.moji.ai.service.CapturePipelineCoordinator
 import com.moji.ai.update.AppUpdateManager
+import com.moji.ai.widget.MoJiLedgerWidgetUpdater
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -89,6 +91,9 @@ class MoJiApp : Application() {
 
     private val syncedPrefsChangeListener =
         SharedPreferences.OnSharedPreferenceChangeListener { sp, key ->
+            if (sp === uiPrefsRef && (key == null || key in WIDGET_UI_PREF_KEYS)) {
+                MoJiLedgerWidgetUpdater.enqueueUpdateAll(this)
+            }
             if (!startupMaintenanceCompleted || MoJiCloudSyncClient.isRestoringNow()) {
                 return@OnSharedPreferenceChangeListener
             }
@@ -108,6 +113,11 @@ class MoJiApp : Application() {
             "saved_templates_json",
             "saved_saving_plans_json",
             "saved_installments_json"
+        )
+        private val WIDGET_UI_PREF_KEYS = setOf(
+            "current_ledger",
+            "monthly_budget_cents",
+            "hide_asset_amounts"
         )
     }
 
@@ -168,6 +178,25 @@ class MoJiApp : Application() {
         }
 
         startBackgroundCloudAutoSync()
+        startBackgroundWidgetAutoRefresh()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        MoJiLedgerWidgetUpdater.enqueueUpdateAll(this)
+    }
+
+    private fun startBackgroundWidgetAutoRefresh() {
+        appScope.launch {
+            combine(
+                repository.transactionsFlow,
+                AppearanceConfigManager.configFlow,
+                AppLockManager.configFlow
+            ) { _, _, _ -> System.nanoTime() }
+                .collect {
+                    MoJiLedgerWidgetUpdater.enqueueUpdateAll(this@MoJiApp)
+                }
+        }
     }
 
     private fun registerSyncedPreferenceListeners() {
