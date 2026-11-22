@@ -148,6 +148,7 @@ import com.moji.ai.data.backup.WebDavConfig
 import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.ui.components.PayslipImportSheet
 import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.AppearanceSettingsConfig
@@ -346,6 +347,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var showBudgetDialog by remember { mutableStateOf(false) }
     var showBackupTransferSheet by remember { mutableStateOf(false) }
     var backupInitialTab by remember { mutableIntStateOf(0) } // 0: 导入CSV, 1: 导出CSV, 2: 全量备份恢复, 3: WebDAV云同步
+    var showPayslipImportSheet by rememberSaveable { mutableStateOf(false) }
     var showKeepAliveGuideSheet by remember { mutableStateOf(false) }
     var showBatchReimburseSheet by remember { mutableStateOf(false) }
     var showAppUpdateSheet by remember { mutableStateOf(false) }
@@ -565,6 +567,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     dedicatedFundSettings = dedicatedFundSettings,
                     onSaveDedicatedFundSetup = { kind, walletDraft, planDraft ->
                         viewModel.saveDedicatedFundSetup(kind, walletDraft, planDraft)
+                    },
+                    onOpenPayslipImport = {
+                        showPayslipImportSheet = true
                     }
             )
         }
@@ -667,6 +672,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onOpenCsvImport = {
                     backupInitialTab = 0
                     showBackupTransferSheet = true
+                },
+                onOpenPayslipImport = {
+                    showPayslipImportSheet = true
                 },
                 onOpenCsvExport = {
                     backupInitialTab = 1
@@ -1219,9 +1227,29 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onRestoreWebDav = { cfg, onDone ->
                         viewModel.restoreBackupFromWebDav(cfg, onDone)
                     },
+                    onOpenPayslipImport = {
+                        showBackupTransferSheet = false
+                        showPayslipImportSheet = true
+                    },
                     onClose = requestDismiss
                 )
             }
+        }
+
+        if (showPayslipImportSheet) {
+            PayslipImportSheet(
+                visible = showPayslipImportSheet,
+                currentLedger = currentLedger,
+                wallets = wallets,
+                dedicatedFundSettings = dedicatedFundSettings,
+                aiConfig = aiConfig,
+                onParseImageUri = { uri -> viewModel.parsePayslipImageUri(uri) },
+                onParseDocumentUri = { uri -> viewModel.parsePayslipDocumentUri(uri) },
+                onParseRawText = { text -> viewModel.parsePayslipRawText(text) },
+                onCalibrateWithCloudAi = { text -> viewModel.calibratePayslipWithCloudAi(text) },
+                onCommitPayslip = { req -> viewModel.commitPayslipImport(req) },
+                onDismiss = { showPayslipImportSheet = false }
+            )
         }
 
         // 国产 ROM 保活与 Android 13+ 受限设置一站式诊断向导面板
@@ -1645,6 +1673,7 @@ private fun ICostSettingsFullScreen(
     onOpenSmartBookkeeping: () -> Unit,
     onOpenBudgetDialog: () -> Unit,
     onOpenCsvImport: () -> Unit = {},
+    onOpenPayslipImport: () -> Unit = {},
     onOpenCsvExport: () -> Unit = {},
     mojiCloudConfig: MoJiCloudConfig = MoJiCloudConfig(),
     onOpenMoJiCloudSync: () -> Unit = {},
@@ -1890,6 +1919,7 @@ private fun ICostSettingsFullScreen(
                     rows = listOf(
                         SettingRowDef("setting_backup.webp", "默记云存储", cloudRowTrailing, onClick = onOpenMoJiCloudSync),
                         SettingRowDef("setting_import.webp", "数据导入", "iCost / 微信 / 支付宝", onClick = onOpenCsvImport),
+                        SettingRowDef("cat_salary.webp", "工资条导入", "OCR / 薪资表三路分账", onClick = onOpenPayslipImport),
                         SettingRowDef("setting_export.webp", "数据导出", "CSV", onClick = onOpenCsvExport),
                         SettingRowDef("setting_backup.webp", "本地快照与 WebDAV", "备份 / WebDAV", onClick = onOpenWebDavSync),
                         SettingRowDef("setting_vip.webp", "版本与自动更新", updateRowTrailing, onClick = onOpenAppUpdate)
@@ -3194,6 +3224,7 @@ private fun BackupAndCsvTransferSheet(
     onRestoreMoJiCloud: (MoJiCloudConfig, (String) -> Unit) -> Unit = { _, _ -> },
     onUploadWebDav: (WebDavConfig, (String) -> Unit) -> Unit = { _, _ -> },
     onRestoreWebDav: (WebDavConfig, (String) -> Unit) -> Unit = { _, _ -> },
+    onOpenPayslipImport: () -> Unit = {},
     onClose: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -3486,6 +3517,17 @@ private fun BackupAndCsvTransferSheet(
                                     }
                                 },
                                 label = { Text("微信账单示例", fontSize = 12.sp) }
+                            )
+                            AssistChip(
+                                onClick = onOpenPayslipImport,
+                                label = {
+                                    Text(
+                                        "工资条三路分账 ›",
+                                        fontSize = 12.sp,
+                                        color = ICostBlueAccent,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
                             )
                             if (csvText.isNotEmpty()) {
                                 AssistChip(

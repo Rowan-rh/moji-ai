@@ -13,9 +13,11 @@ import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.DedicatedFundKind
 import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.DedicatedFundPlanConfig
+import com.moji.ai.data.model.PayslipRecognitionDraft
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.data.model.WalletType
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.Calendar
@@ -42,9 +44,55 @@ data class CompositeMedicalFusionResult(
     val wasModified: Boolean = false
 )
 
+data class PayslipCommitRequest(
+    val ledgerName: String = "日常账本",
+    val draft: PayslipRecognitionDraft,
+    val enableNetPay: Boolean = true,
+    val payrollWalletId: Long? = null,
+    val enableMedicalDeposit: Boolean = true,
+    val medicalWalletId: Long? = null,
+    val autoCreateMedicalWallet: Boolean = true,
+    val medicalDepositCents: Long = draft.medicalPersonalAccountDepositCents,
+    val enableProvidentDeposit: Boolean = true,
+    val providentWalletId: Long? = null,
+    val autoCreateProvidentWallet: Boolean = true,
+    val providentDepositCents: Long = draft.bilateralProvidentDepositCents,
+    val customNote: String = "",
+    val captureSource: String = "PAYSLIP_IMPORT",
+    val forceDuplicate: Boolean = false,
+    val nowMillis: Long = System.currentTimeMillis()
+)
+
+sealed interface PayslipCommitOutcome {
+    data class Success(
+        val mainTransaction: TransactionEntity?,
+        val medicalChildTransaction: TransactionEntity?,
+        val providentChildTransaction: TransactionEntity?,
+        val createdMedicalWallet: WalletEntity?,
+        val createdProvidentWallet: WalletEntity?,
+        val orderKey: String
+    ) : PayslipCommitOutcome {
+        val primaryUndoTransactionId: Long?
+            get() = mainTransaction?.id ?: medicalChildTransaction?.id ?: providentChildTransaction?.id
+        val recordedCount: Int
+            get() = listOfNotNull(mainTransaction, medicalChildTransaction, providentChildTransaction).size
+    }
+
+    data class DuplicateDetected(
+        val orderKey: String,
+        val existingTransaction: TransactionEntity
+    ) : PayslipCommitOutcome
+
+    data class ValidationError(
+        val message: String
+    ) : PayslipCommitOutcome
+}
+
 internal interface LedgerTransactionStore {
     suspend fun getWalletById(id: Long): WalletEntity?
     suspend fun getAllWallets(): List<WalletEntity>
+    suspend fun insertWallet(wallet: WalletEntity): Long =
+        throw UnsupportedOperationException("insertWallet is not supported in this store")
     suspend fun updateWallet(wallet: WalletEntity)
     suspend fun getTransactionById(id: Long): TransactionEntity?
     suspend fun getAllTransactions(): List<TransactionEntity>
@@ -63,6 +111,7 @@ class LedgerRepository(private val db: AppDatabase) {
     private val roomStore: LedgerTransactionStore = object : LedgerTransactionStore {
         override suspend fun getWalletById(id: Long): WalletEntity? = db.walletDao().getWalletById(id)
         override suspend fun getAllWallets(): List<WalletEntity> = db.walletDao().getAllWallets()
+        override suspend fun insertWallet(wallet: WalletEntity): Long = db.walletDao().insertWallet(wallet)
         override suspend fun updateWallet(wallet: WalletEntity) = db.walletDao().updateWallet(wallet)
         override suspend fun getTransactionById(id: Long): TransactionEntity? = db.transactionDao().getTransactionById(id)
         override suspend fun getAllTransactions(): List<TransactionEntity> = db.transactionDao().getAllTransactions()
@@ -922,6 +971,18 @@ class LedgerRepository(private val db: AppDatabase) {
         savedWallet to finalPlan
     }
 
+    /**
+     * 工资条三路自动分账单事务原子入账（`AC-B3` / `AC-B4` / `AC-B5`）：
+     * - 基于 `PAYSLIP:<yyyyMM>:<netCents>:<grossCents>` 拦截同月同金额重复导入；
+     * - 当勾选医保/公积金支路而专项账户尚不存在时，按预设在同一事务内自动创建（`includeInNetWorth = false`）；
+     * - 原子写入实发工资主单（`INCOME`，`#工资`）+ 关联 `#PAYSLIP_MED` 医保个账子单 + 关联 `#PAYSLIP_PROV` 双边公积金子单。
+     */
+    suspend fun recordPayslipTransactions(
+        request: PayslipCommitRequest
+    ): PayslipCommitOutcome = db.withTransaction {
+        recordPayslipOnStore(roomStore, request)
+    }
+
     private fun TransactionType.matchesDirectionFilter(isExpense: Boolean?): Boolean = when (isExpense) {
         true -> this == TransactionType.EXPENSE
         false -> this == TransactionType.INCOME
@@ -1773,6 +1834,291 @@ class LedgerRepository(private val db: AppDatabase) {
             )
         }
 
+        internal suspend fun recordPayslipOnStore(
+            store: LedgerTransactionStore,
+            request: PayslipCommitRequest
+        ): PayslipCommitOutcome {
+            val draft = request.draft
+            val netPayCents = draft.netTakeHomePayCents.coerceAtLeast(0L)
+            val medDepositCents = request.medicalDepositCents.coerceAtLeast(0L)
+            val provDepositCents = request.providentDepositCents.coerceAtLeast(0L)
+
+            val shouldRecordNet = request.enableNetPay && netPayCents > 0L
+            val shouldRecordMed = request.enableMedicalDeposit && medDepositCents > 0L
+            val shouldRecordProv = request.enableProvidentDeposit && provDepositCents > 0L
+
+            if (!shouldRecordNet && !shouldRecordMed && !shouldRecordProv) {
+                return PayslipCommitOutcome.ValidationError("请至少开启一条金额大于 0 的工资条入账支路")
+            }
+
+            val baseOrderKey = DedicatedFundManager.buildPayslipOrderKey(
+                paydayTimestampMillis = draft.paydayTimestampMillis,
+                netTakeHomePayCents = netPayCents,
+                grossSalaryCents = draft.grossSalaryCents
+            )
+            val existingSameMonth = store.findTransactionByOrderKey(baseOrderKey)
+                ?: store.findTransactionByOrderKey(baseOrderKey + DedicatedFundManager.PAYSLIP_MEDICAL_CHILD_SUFFIX)
+                ?: store.findTransactionByOrderKey(baseOrderKey + DedicatedFundManager.PAYSLIP_PROVIDENT_CHILD_SUFFIX)
+
+            if (existingSameMonth != null && !request.forceDuplicate) {
+                return PayslipCommitOutcome.DuplicateDetected(
+                    orderKey = baseOrderKey,
+                    existingTransaction = existingSameMonth
+                )
+            }
+
+            val effectiveOrderKey = if (existingSameMonth != null) {
+                "${baseOrderKey}#FORCE_${request.nowMillis}"
+            } else {
+                baseOrderKey
+            }
+
+            val now = request.nowMillis
+            val existingWallets = store.getAllWallets()
+
+            val payrollWallet: WalletEntity? = if (shouldRecordNet && request.payrollWalletId != null) {
+                val found = existingWallets.firstOrNull { it.id == request.payrollWalletId }
+                    ?: return PayslipCommitOutcome.ValidationError("所选代发工资账户不存在，请重新选择")
+                if (found.type.isLiability) {
+                    return PayslipCommitOutcome.ValidationError("实发工资不能存入信用负债账户，请选择储蓄卡或资产账户")
+                }
+                found
+            } else {
+                null
+            }
+
+            var createdMedicalWallet: WalletEntity? = null
+            val targetMedicalWallet: WalletEntity? = if (shouldRecordMed) {
+                val explicitMed = request.medicalWalletId?.let { id -> existingWallets.firstOrNull { it.id == id } }
+                    ?: DedicatedFundManager.findPersonalMedicalWallet(existingWallets)
+                if (explicitMed != null) {
+                    explicitMed
+                } else if (request.autoCreateMedicalWallet) {
+                    val kind = DedicatedFundKind.MEDICAL_INSURANCE
+                    val draftWallet = WalletEntity(
+                        name = kind.defaultName,
+                        type = WalletType.CASH_OTHER,
+                        subTypeLabel = kind.subTypeLabel,
+                        brandCode = kind.brandCode,
+                        balanceCents = 0L,
+                        currency = "CNY",
+                        colorHex = kind.defaultColorHex,
+                        includeInNetWorth = false,
+                        aliases = kind.defaultAliases,
+                        updatedAtMillis = now,
+                        syncDirty = true
+                    )
+                    val newId = store.insertWallet(draftWallet)
+                    draftWallet.copy(id = newId).also { createdMedicalWallet = it }
+                } else {
+                    return PayslipCommitOutcome.ValidationError("尚未选择个人医保账户，请先选择或开启自动新建专项账户")
+                }
+            } else {
+                null
+            }
+
+            var createdProvidentWallet: WalletEntity? = null
+            val targetProvidentWallet: WalletEntity? = if (shouldRecordProv) {
+                val explicitProv = request.providentWalletId?.let { id -> existingWallets.firstOrNull { it.id == id } }
+                    ?: DedicatedFundManager.findHousingProvidentWallet(existingWallets)
+                if (explicitProv != null) {
+                    explicitProv
+                } else if (request.autoCreateProvidentWallet) {
+                    val kind = DedicatedFundKind.HOUSING_PROVIDENT
+                    val draftWallet = WalletEntity(
+                        name = kind.defaultName,
+                        type = WalletType.CASH_OTHER,
+                        subTypeLabel = kind.subTypeLabel,
+                        brandCode = kind.brandCode,
+                        balanceCents = 0L,
+                        currency = "CNY",
+                        colorHex = kind.defaultColorHex,
+                        includeInNetWorth = false,
+                        aliases = kind.defaultAliases,
+                        updatedAtMillis = now,
+                        syncDirty = true
+                    )
+                    val newId = store.insertWallet(draftWallet)
+                    draftWallet.copy(id = newId).also { createdProvidentWallet = it }
+                } else {
+                    return PayslipCommitOutcome.ValidationError("尚未选择住房公积金账户，请先选择或开启自动新建专项账户")
+                }
+            } else {
+                null
+            }
+
+            val cleanLedger = request.ledgerName.ifBlank { "日常账本" }
+            val cleanEmployer = draft.employerName.trim()
+            val discoveredTags = mutableListOf<String>()
+
+            val savedMainTx: TransactionEntity? = if (shouldRecordNet) {
+                val mainCurrency = payrollWallet?.currency ?: "CNY"
+                val mainRate = CurrencyRateManager.getEffectiveRateToCny(mainCurrency)
+                val mainCnyCents = (netPayCents * mainRate).roundToLong()
+                val mainTags = TagCatalog.joinTags(listOf("工资"))
+                discoveredTags.add(mainTags)
+                val mainMerchant = if (cleanEmployer.isNotEmpty()) "$cleanEmployer · 工资" else "工资收入"
+                val mainNote = DedicatedFundManager.formatPayslipMainNote(draft, request.customNote)
+                val rawMain = TransactionEntity(
+                    ledgerName = cleanLedger,
+                    type = TransactionType.INCOME,
+                    amountCents = netPayCents,
+                    currency = mainCurrency,
+                    exchangeRateToCny = mainRate,
+                    amountCnyCents = mainCnyCents,
+                    category = "工资",
+                    merchant = mainMerchant,
+                    note = mainNote,
+                    tags = mainTags,
+                    sourceWalletId = null,
+                    targetWalletId = payrollWallet?.id,
+                    timestamp = draft.paydayTimestampMillis,
+                    capturedAtMillis = now,
+                    orderKey = effectiveOrderKey,
+                    paymentMethodRaw = payrollWallet?.name.orEmpty(),
+                    dedupFingerprint = "KEY:${effectiveOrderKey}_$netPayCents",
+                    captureSource = request.captureSource,
+                    updatedAtMillis = now,
+                    syncDirty = true
+                )
+                val appliedMain = applyWalletImpactOnStore(store, rawMain)
+                val mainId = store.insertTransaction(appliedMain)
+                appliedMain.copy(id = mainId)
+            } else {
+                null
+            }
+
+            val savedMedicalChildTx: TransactionEntity? = if (shouldRecordMed && targetMedicalWallet != null) {
+                val medCurrency = targetMedicalWallet.currency
+                val medRate = CurrencyRateManager.getEffectiveRateToCny(medCurrency)
+                val medCnyCents = (medDepositCents * medRate).roundToLong()
+                val medOrderKey = effectiveOrderKey + DedicatedFundManager.PAYSLIP_MEDICAL_CHILD_SUFFIX
+                val medTags = TagCatalog.joinTags(listOf("医保", "工资条"))
+                discoveredTags.add(medTags)
+                val medMerchant = if (cleanEmployer.isNotEmpty()) "$cleanEmployer · 医保个账划入" else "个人医保月度划入"
+                val medNote = DedicatedFundManager.formatPayslipMedicalChildNote(
+                    personalMedicalDeductionCents = draft.personalMedicalDeductionCents,
+                    depositCents = medDepositCents,
+                    customTail = request.customNote
+                )
+                val rawMed = TransactionEntity(
+                    ledgerName = cleanLedger,
+                    type = TransactionType.INCOME,
+                    amountCents = medDepositCents,
+                    currency = medCurrency,
+                    exchangeRateToCny = medRate,
+                    amountCnyCents = medCnyCents,
+                    category = DedicatedFundKind.MEDICAL_INSURANCE.defaultIncomeCategory,
+                    merchant = medMerchant,
+                    note = medNote,
+                    tags = medTags,
+                    sourceWalletId = null,
+                    targetWalletId = targetMedicalWallet.id,
+                    relatedTransactionId = savedMainTx?.id,
+                    timestamp = draft.paydayTimestampMillis,
+                    capturedAtMillis = now,
+                    orderKey = medOrderKey,
+                    paymentMethodRaw = targetMedicalWallet.name,
+                    dedupFingerprint = "KEY:${effectiveOrderKey}_$medDepositCents${DedicatedFundManager.PAYSLIP_MEDICAL_CHILD_SUFFIX}",
+                    captureSource = request.captureSource,
+                    updatedAtMillis = now,
+                    syncDirty = true
+                )
+                val appliedMed = applyWalletImpactOnStore(store, rawMed)
+                val medId = store.insertTransaction(appliedMed)
+                appliedMed.copy(id = medId)
+            } else {
+                null
+            }
+
+            val savedProvidentChildTx: TransactionEntity? = if (shouldRecordProv && targetProvidentWallet != null) {
+                val provCurrency = targetProvidentWallet.currency
+                val provRate = CurrencyRateManager.getEffectiveRateToCny(provCurrency)
+                val provCnyCents = (provDepositCents * provRate).roundToLong()
+                val provOrderKey = effectiveOrderKey + DedicatedFundManager.PAYSLIP_PROVIDENT_CHILD_SUFFIX
+                val provTags = TagCatalog.joinTags(listOf("公积金", "工资条"))
+                discoveredTags.add(provTags)
+                val provMerchant = if (cleanEmployer.isNotEmpty()) "$cleanEmployer · 住房公积金缴存" else "住房公积金月度缴存"
+                val provNote = DedicatedFundManager.formatPayslipProvidentChildNote(
+                    personalProvidentCents = draft.personalProvidentDeductionCents,
+                    employerProvidentCents = draft.employerProvidentMatchCents,
+                    totalDepositCents = provDepositCents,
+                    customTail = request.customNote
+                )
+                val rawProv = TransactionEntity(
+                    ledgerName = cleanLedger,
+                    type = TransactionType.INCOME,
+                    amountCents = provDepositCents,
+                    currency = provCurrency,
+                    exchangeRateToCny = provRate,
+                    amountCnyCents = provCnyCents,
+                    category = DedicatedFundKind.HOUSING_PROVIDENT.defaultIncomeCategory,
+                    merchant = provMerchant,
+                    note = provNote,
+                    tags = provTags,
+                    sourceWalletId = null,
+                    targetWalletId = targetProvidentWallet.id,
+                    relatedTransactionId = savedMainTx?.id,
+                    timestamp = draft.paydayTimestampMillis,
+                    capturedAtMillis = now,
+                    orderKey = provOrderKey,
+                    paymentMethodRaw = targetProvidentWallet.name,
+                    dedupFingerprint = "KEY:${effectiveOrderKey}_$provDepositCents${DedicatedFundManager.PAYSLIP_PROVIDENT_CHILD_SUFFIX}",
+                    captureSource = request.captureSource,
+                    updatedAtMillis = now,
+                    syncDirty = true
+                )
+                val appliedProv = applyWalletImpactOnStore(store, rawProv)
+                val provId = store.insertTransaction(appliedProv)
+                appliedProv.copy(id = provId)
+            } else {
+                null
+            }
+
+            if (payrollWallet != null) {
+                val curSettings = DedicatedFundManager.currentSettings
+                if (shouldRecordMed) {
+                    val empMedCents = draft.personalMedicalDeductionCents.coerceAtLeast(0L)
+                    val matchMedCents = (medDepositCents - empMedCents).coerceAtLeast(0L)
+                    DedicatedFundManager.updatePlan(
+                        DedicatedFundKind.MEDICAL_INSURANCE,
+                        curSettings.medicalPlan.copy(
+                            enabled = true,
+                            employeeMonthlyCents = if (empMedCents > 0L) empMedCents else medDepositCents,
+                            employerMonthlyCents = matchMedCents,
+                            linkedPayrollWalletId = payrollWallet.id
+                        )
+                    )
+                }
+                if (shouldRecordProv) {
+                    val empCents = draft.personalProvidentDeductionCents.coerceAtLeast(0L)
+                    val matchCents = (provDepositCents - empCents).coerceAtLeast(0L)
+                    DedicatedFundManager.updatePlan(
+                        DedicatedFundKind.HOUSING_PROVIDENT,
+                        DedicatedFundManager.currentSettings.providentPlan.copy(
+                            enabled = true,
+                            employeeMonthlyCents = if (empCents > 0L) empCents else provDepositCents,
+                            employerMonthlyCents = matchCents,
+                            linkedPayrollWalletId = payrollWallet.id
+                        )
+                    )
+                }
+            }
+
+            if (discoveredTags.isNotEmpty()) {
+                TagCatalog.syncDiscoveredTagsFromHistory(discoveredTags)
+            }
+
+            return PayslipCommitOutcome.Success(
+                mainTransaction = savedMainTx,
+                medicalChildTransaction = savedMedicalChildTx,
+                providentChildTransaction = savedProvidentChildTx,
+                createdMedicalWallet = createdMedicalWallet,
+                createdProvidentWallet = createdProvidentWallet,
+                orderKey = effectiveOrderKey
+            )
+        }
+
         internal suspend fun undoAndDeleteTransactionOnStore(
             store: LedgerTransactionStore,
             transactionId: Long
@@ -1780,6 +2126,20 @@ class LedgerRepository(private val db: AppDatabase) {
             val tx = store.getTransactionById(transactionId) ?: return false to emptyList()
             val candidateScreenshots = mutableSetOf<String>()
             if (tx.screenshotPath.isNotBlank()) candidateScreenshots.add(tx.screenshotPath)
+
+            if (!DedicatedFundManager.isPayslipDedicatedChild(tx)) {
+                // 若删除的是工资条主单，在同一事务内查找并联动回滚删除关联的 `#PAYSLIP_MED` 与 `#PAYSLIP_PROV` 专项入账子单
+                val linkedPayslipChildren = store.getAllTransactions().filter { other ->
+                    other.id != tx.id &&
+                        other.relatedTransactionId == tx.id &&
+                        DedicatedFundManager.isPayslipDedicatedChild(other)
+                }
+                for (child in linkedPayslipChildren) {
+                    if (child.screenshotPath.isNotBlank()) candidateScreenshots.add(child.screenshotPath)
+                    revertWalletImpactOnStore(store, child)
+                    store.deleteTransaction(child)
+                }
+            }
 
             if (!DedicatedFundManager.isCompositeMedicalPersonalChild(tx)) {
                 // 若删除的是组合支付主单，在同一事务内查找并联动回滚所有 `#MED_PERSONAL` 关联医保个账子单

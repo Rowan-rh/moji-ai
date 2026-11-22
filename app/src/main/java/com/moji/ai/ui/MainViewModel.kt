@@ -12,6 +12,8 @@ import com.moji.ai.ai.AiConfig
 import com.moji.ai.ai.CaptureAppGroup
 import com.moji.ai.ai.CaptureAppWhitelistEntry
 import com.moji.ai.ai.CaptureAppWhitelistManager
+import com.moji.ai.ai.PayslipImportEngine
+import com.moji.ai.ai.PayslipParseResult
 import com.moji.ai.ai.WindowPageSignature
 import com.moji.ai.ai.MerchantMemoryEntry
 import com.moji.ai.ai.ProposedCategoryItem
@@ -31,6 +33,8 @@ import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.repository.PayslipCommitOutcome
+import com.moji.ai.data.repository.PayslipCommitRequest
 import com.moji.ai.data.model.AmountColorScheme
 import com.moji.ai.data.model.AppFontScalePreset
 import com.moji.ai.data.model.AppLockManager
@@ -1836,6 +1840,102 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 postMessage("保存专项保障账户失败：${err.message ?: err.javaClass.simpleName}")
             }
         }
+    }
+
+    suspend fun parsePayslipImageUri(uri: Uri): Result<PayslipParseResult> {
+        return PayslipImportEngine.recognizePayslipImageUri(
+            context = app,
+            imageUri = uri,
+            defaultSettings = DedicatedFundManager.currentSettings
+        )
+    }
+
+    suspend fun parsePayslipDocumentUri(uri: Uri): Result<PayslipParseResult> = withContext(Dispatchers.IO) {
+        val rawBytes = runCatching {
+            app.contentResolver.openInputStream(uri)?.use { stream ->
+                val out = java.io.ByteArrayOutputStream()
+                val buf = ByteArray(8192)
+                var total = 0
+                while (true) {
+                    val read = stream.read(buf)
+                    if (read < 0) break
+                    total += read
+                    if (total > 12 * 1024 * 1024) {
+                        return@withContext Result.failure(
+                            IllegalArgumentException("薪资表文件超过 12MB 上限，请导出当月 CSV / TSV 后重试")
+                        )
+                    }
+                    out.write(buf, 0, read)
+                }
+                out.toByteArray()
+            }
+        }.getOrNull() ?: return@withContext Result.failure(IllegalArgumentException("无法读取所选薪资表文件"))
+
+        val fileNameHint = uri.lastPathSegment.orEmpty()
+        val decodedText = PayslipImportEngine.decodePayslipBytes(rawBytes, fileNameHint).getOrElse { err ->
+            return@withContext Result.failure(err)
+        }
+        PayslipImportEngine.parsePayslipText(
+            rawText = decodedText,
+            defaultSettings = DedicatedFundManager.currentSettings
+        )
+    }
+
+    suspend fun parsePayslipRawText(rawText: String): Result<PayslipParseResult> = withContext(Dispatchers.Default) {
+        PayslipImportEngine.parsePayslipText(
+            rawText = rawText,
+            defaultSettings = DedicatedFundManager.currentSettings
+        )
+    }
+
+    suspend fun calibratePayslipWithCloudAi(rawText: String): Result<PayslipParseResult> {
+        return PayslipImportEngine.calibrateWithCloudAi(
+            rawText = rawText,
+            config = _aiConfig.value,
+            defaultSettings = DedicatedFundManager.currentSettings
+        )
+    }
+
+    suspend fun commitPayslipImport(request: PayslipCommitRequest): PayslipCommitOutcome {
+        val outcome = withContext(Dispatchers.IO) {
+            repository.recordPayslipTransactions(request)
+        }
+        if (outcome is PayslipCommitOutcome.Success) {
+            MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
+            val createdWalletNames = listOfNotNull(
+                outcome.createdMedicalWallet?.name,
+                outcome.createdProvidentWallet?.name
+            )
+            val walletSuffix = if (createdWalletNames.isNotEmpty()) {
+                "（已自动建档：${createdWalletNames.joinToString("、")}）"
+            } else {
+                ""
+            }
+            val mainTx = outcome.mainTransaction
+            if (mainTx != null) {
+                postMessage(
+                    text = "工资条已三路入账（共 ${outcome.recordedCount} 笔）$walletSuffix",
+                    undoTransactionId = mainTx.id
+                ) {
+                    MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
+                }
+            } else {
+                val childIds = listOfNotNull(
+                    outcome.medicalChildTransaction?.id,
+                    outcome.providentChildTransaction?.id
+                )
+                postMessage(
+                    text = "工资条专项资金已入账（共 ${outcome.recordedCount} 笔）$walletSuffix",
+                    undoTransactionId = childIds.firstOrNull()
+                ) {
+                    for (extraId in childIds.drop(1)) {
+                        repository.undoAndDeleteTransaction(extraId)
+                    }
+                    MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
+                }
+            }
+        }
+        return outcome
     }
 
     fun deleteWallet(wallet: WalletEntity) {

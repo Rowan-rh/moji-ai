@@ -61,9 +61,12 @@
   2. **数字钱包 (`DIGITAL_WALLET`)**：微信零钱、零钱通、支付宝余额、余额宝等。
   3. **信用/透支账户 (`CREDIT`)**：信用卡、蚂蚁花呗、京东白条、美团月付等。支持管理 **授信总额度**、**当前待还欠款（及多还/退款产生的负欠款「溢缴款」）**、**可用额度**、**账单日** 与 **还款日**。
   4. **现金/预付卡/其他 (`CASH_OTHER`)**：现金、饭卡、公交卡、海淘外币卡等。
-- **个人医保与住房公积金专项保障账户及工资条三路入账契约预留 (`DedicatedFundManager` & `AssetsTab`)**：
+- **个人医保与住房公积金专项保障账户及工资条 OCR / 薪资表导入自动三路分账 (`DedicatedFundManager`、`PayslipImportEngine`、`PayslipImportSheet` & `AssetsTab`)**：
   - 资产页独立设立 **「专项保障账户（医保 / 公积金）」** 可折叠卡片并提供未建档一键设置向导；新建 `MEDICAL_CARD` / `PROVIDENT` 预设时默认 `includeInNetWorth = false`（编辑存量账户保留用户原值），避免支取受限资金虚增日常可支配净资产。
-  - 支持配置当前余额、个人+单位月度双边缴存参考、预计入账日（`1..28` 日）、关联代发工资储蓄卡及一键生成月度自动入账周期规则（`MONTHLY INCOME`）；预留 `PayslipRecognitionDraft` 与 `resolvePayslipTargetWallets` 标准三路分账路由契约（实发薪资 → 代发储蓄卡、医保划入 → 个人医保账户、双边公积金 → 住房公积金账户）；`MoJiFullBackupSnapshot` 扩展带空字符串默认值的 `dedicatedFundSettingsJson` 与默记云同步支持。
+  - 支持配置当前余额、个人+单位月度双边缴存参考、预计入账日（`1..28` 日）、关联代发工资储蓄卡及一键生成月度自动入账周期规则（`MONTHLY INCOME`）；`MoJiFullBackupSnapshot` 扩展带空字符串默认值的 `dedicatedFundSettingsJson` 与默记云同步支持。
+  - **多源离线优先工资条导入与单事务三路自动分账 (`PayslipImportEngine` + `PayslipImportSheet` + `LedgerRepository.recordPayslipTransactions`)**：
+    - 在资产页「专项保障账户」卡片与设置页「数据与更新 › 工资条导入 / 数据备份与账单迁移」提供双入口；支持 **CSV / TSV / 轻量 `.xlsx` 薪资表文件导入**（自动探测 UTF-8 BOM / 严格 UTF-8 / GB18030·GBK 编码，兼容横向单/双行表头与纵向键值排版）、**剪贴板粘贴解析** 以及 **相册工资条截图端侧离线 OCR 解析**（零新依赖复用内置 `mlkit-text-recognition-chinese`，大图 `inSampleSize` 安全降采样 + EXIF 旋转校正 + 按 `centerY` 纵向同行聚类重组左右分栏；若已配云端 AI 则可选一键结构化二次校准）；严格区分个人扣缴与单位缴纳（绝不把单位养老/医疗混入个人扣款，缺失单位公积金列时绝不盲目翻倍个人扣缴，拒绝非工资条或全 0 脏草稿）。
+    - 自动调用 `DedicatedFundManager.resolvePayslipTargetWallets` 预填三路分账目标（① 实发工资 → 代发储蓄卡，`category = "工资"`，`#工资`；② `#PAYSLIP_MED` 医保划入 → 个人医保账户，`#医保,工资条`；③ `#PAYSLIP_PROV` 个人+单位双边公积金 → 住房公积金账户，`#公积金,工资条`），支持入账前逐项微调、独立开关各支路以及未建专项账户时在同一事务内自动建档（默认 `includeInNetWorth = false`）；内置 `PAYSLIP:<yyyyMM>:<netCents>:<grossCents>` 同月防重拦截（二次确认才放行），且通过 Snackbar「撤销」或删除主工资单时在同一 Room 事务内联动回滚并删除 `#PAYSLIP_MED` / `#PAYSLIP_PROV` 关联子单（单独删除某条专项子单则仅回退该专项钱包余额，互不误伤）。
 - **医疗与医保费用四维透视卡片 (`MedicalExpenseInsightsCalculator` & `ICostMedicalFourDimCard`)**：
   - 在统计页（当周期内含医疗/医保账单时）及标签管理 `#医保` 下钻明细顶部展示 2×2 Bento 四维透视卡，精确核算 **`医疗总费用` / `医保统筹报销` / `医保个账支出` / `个人现金自付`**（自动融合组合支付父子单防双计，未建医保卡时从结构化备注还原统筹与个账明细）；`TagCatalog` 升级至 `PRESET_TAG_CATALOG_VERSION = 2`，对老用户增量补齐 `#医保` 与 `#公积金` 预设标签并尊重用户手动静音记录。
 - **净资产实时核算与真实余额锚点平账 (`reconcileWalletBalance`)**：

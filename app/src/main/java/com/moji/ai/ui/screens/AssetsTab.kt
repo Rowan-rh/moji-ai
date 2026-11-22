@@ -167,7 +167,8 @@ fun ICostAssetsScreen(
     onAddRecurringRule: (title: String, amountYuan: Double, currency: String, category: String, walletId: Long, frequency: RecurrenceFrequency) -> Unit = { _, _, _, _, _, _ -> },
     customCurrencyRates: Map<String, Double> = emptyMap(),
     dedicatedFundSettings: DedicatedFundSettings = DedicatedFundSettings(),
-    onSaveDedicatedFundSetup: (DedicatedFundKind, WalletEntity, DedicatedFundPlanConfig) -> Unit = { _, w, _ -> onSaveWallet(w) }
+    onSaveDedicatedFundSetup: (DedicatedFundKind, WalletEntity, DedicatedFundPlanConfig) -> Unit = { _, w, _ -> onSaveWallet(w) },
+    onOpenPayslipImport: () -> Unit = {}
 ) {
     val observedDedicatedSettings by DedicatedFundManager.settingsFlow.collectAsState()
     val effectiveDedicatedSettings = if (
@@ -800,12 +801,12 @@ fun ICostAssetsScreen(
                 ) {
                     Column(modifier = Modifier.fillMaxWidth()) {
                         CollapsibleGroupHeaderInsideCard(
-                            title = "专项保障账户（医保/公积金）",
+                            title = "专项保障账户",
                             count = dedicatedFundWallets.size,
                             rightSummary = if (dedicatedFundWallets.isNotEmpty()) {
                                 "专项余额 ${formatMoneyCents(dedicatedGroupBalanceCnyCents, "CNY", hideAmounts)}"
                             } else {
-                                "默认不计净资产"
+                                "医保 / 公积金 · 不计净资产"
                             },
                             expanded = dedicatedExpanded,
                             onToggle = { dedicatedExpanded = !dedicatedExpanded }
@@ -866,16 +867,11 @@ fun ICostAssetsScreen(
                                                 onClick = { inspectingWallet = w }
                                             )
                                         }
-                                        val hasMoreRows = idx < dedicatedFundWallets.lastIndex ||
-                                            personalMedicalWallet == null ||
-                                            housingProvidentWallet == null
-                                        if (hasMoreRows) {
-                                            HorizontalDivider(
-                                                modifier = Modifier.padding(start = 68.dp, end = 16.dp),
-                                                thickness = 0.5.dp,
-                                                color = ICostDivider
-                                            )
-                                        }
+                                        HorizontalDivider(
+                                            modifier = Modifier.padding(start = 68.dp, end = 16.dp),
+                                            thickness = 0.5.dp,
+                                            color = ICostDivider
+                                        )
                                     }
                                 }
 
@@ -889,13 +885,11 @@ fun ICostAssetsScreen(
                                             configuringDedicatedSetup = DedicatedFundKind.MEDICAL_INSURANCE to null
                                         }
                                     )
-                                    if (housingProvidentWallet == null) {
-                                        HorizontalDivider(
-                                            modifier = Modifier.padding(start = 68.dp, end = 16.dp),
-                                            thickness = 0.5.dp,
-                                            color = ICostDivider
-                                        )
-                                    }
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(start = 68.dp, end = 16.dp),
+                                        thickness = 0.5.dp,
+                                        color = ICostDivider
+                                    )
                                 }
 
                                 if (housingProvidentWallet == null) {
@@ -908,7 +902,16 @@ fun ICostAssetsScreen(
                                             configuringDedicatedSetup = DedicatedFundKind.HOUSING_PROVIDENT to null
                                         }
                                     )
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(start = 68.dp, end = 16.dp),
+                                        thickness = 0.5.dp,
+                                        color = ICostDivider
+                                    )
                                 }
+
+                                DedicatedPayslipImportEntryRow(
+                                    onClick = onOpenPayslipImport
+                                )
                             }
                         }
                     }
@@ -3532,6 +3535,66 @@ private fun DedicatedFundQuickSetupRow(
                 fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
                 color = accentColor,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun DedicatedPayslipImportEntryRow(
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(38.dp)
+                .clip(CircleShape)
+                .background(ICostGreenIncome.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center
+        ) {
+            ICostAssetImage(
+                assetFile = "cat_salary.webp",
+                tint = ICostGreenIncome,
+                modifier = Modifier.size(21.dp)
+            )
+        }
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(
+                text = "导入工资条 · 三路分账",
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                color = ICostTextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "OCR 截图 / CSV 薪资表自动入账",
+                fontSize = 11.sp,
+                color = ICostTextSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Surface(
+            shape = RoundedCornerShape(10.dp),
+            color = ICostGreenIncome.copy(alpha = 0.12f)
+        ) {
+            Text(
+                text = "去导入",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = ICostGreenIncome,
+                maxLines = 1,
+                softWrap = false,
                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
             )
         }
