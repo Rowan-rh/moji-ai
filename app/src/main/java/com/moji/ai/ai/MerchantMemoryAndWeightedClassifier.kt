@@ -50,8 +50,10 @@ class MerchantMemoryManager internal constructor(
 
     @Synchronized
     private fun saveEntries(list: List<MerchantMemoryEntry>) {
-        val sorted = list.sortedWith(compareByDescending<MerchantMemoryEntry> { it.hitCount }.thenByDescending { it.updatedAtMillis })
-            .take(300)
+        val sorted = list.sortedWith(
+            compareByDescending<MerchantMemoryEntry> { it.updatedAtMillis }
+                .thenByDescending { it.hitCount }
+        ).take(MAX_MEMORY_ENTRIES)
         _memoriesFlow.value = sorted
         prefs?.edit()?.putString("merchant_memories_json", json.encodeToString(sorted))?.apply()
     }
@@ -218,6 +220,8 @@ class MerchantMemoryManager internal constructor(
     }
 
     companion object {
+        const val MAX_MEMORY_ENTRIES = 2_000
+
         private val GENERIC_MERCHANT_STOPWORDS = setOf(
             "日常商户", "商户退款", "个人账户间流转", "信用账户还款", "收入入账", "收款入账",
             "朋友AA/报销收款", "平账校准", "余额校准", "微信支付", "支付宝", "抖音支付", "多多支付",

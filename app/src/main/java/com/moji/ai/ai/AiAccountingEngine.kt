@@ -1424,8 +1424,18 @@ $recentDesc
                 }
             }
             currency == "USD" -> {
-                wallets.firstOrNull { it.currency == "USD" }
-                    ?: matchWalletForPayment(payMethodVal, strippedText, sourceAppPackage, wallets)
+                val matchedByRule = matchWalletForPayment(payMethodVal, strippedText, sourceAppPackage, wallets)
+                val hasExplicitPayHint = payMethodVal.isNotBlank() || wallets.any { w ->
+                    (!w.cardLast4.isNullOrBlank() && strippedText.contains(w.cardLast4)) ||
+                        strippedText.contains(w.name, ignoreCase = true)
+                }
+                if (hasExplicitPayHint && matchedByRule != null) {
+                    matchedByRule
+                } else {
+                    memoryHit?.preferredWalletId?.let { pid -> wallets.firstOrNull { it.id == pid } }
+                        ?: matchedByRule
+                        ?: wallets.firstOrNull { it.currency.equals("USD", ignoreCase = true) }
+                }
             }
             else -> {
                 val matchedByRule = matchWalletForPayment(payMethodVal, strippedText, sourceAppPackage, wallets)

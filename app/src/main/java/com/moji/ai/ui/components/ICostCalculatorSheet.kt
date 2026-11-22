@@ -622,6 +622,22 @@ fun ICostCalculatorSheet(
             CurrencyRateManager.getEffectiveRateToCny(currency)
         }
         val cnyCents = (cents * rate).roundToLong()
+        if (
+            editingTransaction != null &&
+            editingTransaction.type == TransactionType.EXPENSE &&
+            editingTransaction.refundedAmountCents > 0L
+        ) {
+            if (preservedSpecialType != null || txType != TransactionType.EXPENSE) {
+                flashError("已发生部分退款的账单不可切换收支类型")
+                return
+            }
+            if (cnyCents < editingTransaction.refundedAmountCents) {
+                flashError(
+                    "编辑后折算金额（${formatMoneyCents(cnyCents)}）不能小于已退金额（${formatMoneyCents(editingTransaction.refundedAmountCents)}）"
+                )
+                return
+            }
+        }
         val discountCents = if (txType == TransactionType.EXPENSE) parseYuanToCents(discountYuanStr) ?: 0L else 0L
         // 非转账账单没有手续费输入框：编辑时保留原有手续费（如自动识别出的手续费），避免余额被悄悄改动
         val feeCents = if (txType == TransactionType.TRANSFER) {
@@ -851,6 +867,44 @@ fun ICostCalculatorSheet(
             )
         }
 
+        val modeOrder = listOf(TransactionType.EXPENSE, TransactionType.INCOME, TransactionType.TRANSFER)
+        fun switchCalculatorMode(targetMode: TransactionType) {
+            if (txType == targetMode) return
+            if (editingTransaction?.type == TransactionType.REFUND_OFFSET &&
+                (editingTransaction.relatedTransactionId ?: 0L) > 0L
+            ) {
+                flashError("关联退款单不可切换收支类型")
+                return
+            }
+            if (editingTransaction?.type == TransactionType.EXPENSE &&
+                editingTransaction.refundedAmountCents > 0L &&
+                targetMode != TransactionType.EXPENSE
+            ) {
+                flashError("已发生部分退款的账单不可切换收支类型")
+                return
+            }
+            preservedSpecialType = null
+            txType = targetMode
+            inlineError = null
+            if (targetMode == TransactionType.TRANSFER) {
+                unlinkedWalletSelected = false
+            }
+            if (targetMode == TransactionType.INCOME) {
+                selectedMainCategory = CategoryCatalog.incomeCategories.firstOrNull()?.name ?: "工资"
+                selectedSubCategory = ""
+            } else if (targetMode == TransactionType.EXPENSE) {
+                selectedMainCategory = CategoryCatalog.expenseCategories.firstOrNull()?.name ?: "餐饮"
+                selectedSubCategory = ""
+            }
+        }
+        fun switchCalcModeByDelta(delta: Int) {
+            val curIdx = modeOrder.indexOf(txType).coerceAtLeast(0)
+            val nextIdx = curIdx + delta
+            // 到两端即停，不再从「转账」绕回「支出」
+            if (nextIdx !in modeOrder.indices) return
+            switchCalculatorMode(modeOrder[nextIdx])
+        }
+
         Column(
             modifier = Modifier
                 .fillMaxWidth()
@@ -896,24 +950,7 @@ fun ICostCalculatorSheet(
                                     .clip(RoundedCornerShape(19.dp))
                                     .background(modeBgColor)
                                     .iCostPressScale(pressedScale = 0.92f) {
-                                        if (txType == mode) return@iCostPressScale
-                                        if (editingTransaction?.type == TransactionType.REFUND_OFFSET && (editingTransaction.relatedTransactionId ?: 0L) > 0L) {
-                                            flashError("关联退款单不可切换收支类型")
-                                            return@iCostPressScale
-                                        }
-                                        preservedSpecialType = null
-                                        txType = mode
-                                        inlineError = null
-                                        if (mode == TransactionType.TRANSFER) {
-                                            unlinkedWalletSelected = false
-                                        }
-                                        if (mode == TransactionType.INCOME) {
-                                            selectedMainCategory = CategoryCatalog.incomeCategories.firstOrNull()?.name ?: "工资"
-                                            selectedSubCategory = ""
-                                        } else if (mode == TransactionType.EXPENSE) {
-                                            selectedMainCategory = CategoryCatalog.expenseCategories.firstOrNull()?.name ?: "餐饮"
-                                            selectedSubCategory = ""
-                                        }
+                                        switchCalculatorMode(mode)
                                     }
                                     .padding(horizontal = 18.dp, vertical = 7.dp),
                                 contentAlignment = Alignment.Center
@@ -950,24 +987,6 @@ fun ICostCalculatorSheet(
                 animationSpec = spring(dampingRatio = 0.62f, stiffness = Spring.StiffnessMedium),
                 label = "TransferSwapAngle"
             )
-
-            val modeOrder = listOf(TransactionType.EXPENSE, TransactionType.INCOME, TransactionType.TRANSFER)
-            fun switchCalcModeByDelta(delta: Int) {
-                val curIdx = modeOrder.indexOf(txType).coerceAtLeast(0)
-                val nextIdx = curIdx + delta
-                // 到两端即停，不再从「转账」绕回「支出」
-                if (nextIdx !in modeOrder.indices) return
-                val nextMode = modeOrder[nextIdx]
-                txType = nextMode
-                inlineError = null
-                if (nextMode == TransactionType.INCOME) {
-                    selectedMainCategory = CategoryCatalog.incomeCategories.first().name
-                    selectedSubCategory = ""
-                } else if (nextMode == TransactionType.EXPENSE) {
-                    selectedMainCategory = CategoryCatalog.expenseCategories.first().name
-                    selectedSubCategory = ""
-                }
-            }
 
             AnimatedContent(
                 targetState = txType,

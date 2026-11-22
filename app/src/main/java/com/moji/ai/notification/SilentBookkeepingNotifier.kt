@@ -23,6 +23,7 @@ import com.moji.ai.MoJiApp
 import com.moji.ai.R
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.model.AppLockManager
 import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.TransactionType
 import kotlinx.coroutines.CoroutineScope
@@ -67,6 +68,14 @@ class SilentBookkeepingNotifier(private val context: Context) {
          */
         fun notificationIdForTransaction(txId: Long): Int =
             1000 + ((txId.coerceAtLeast(1L) % 8_999L).toInt())
+
+        fun cancelNotificationForTransaction(context: Context, txId: Long) {
+            if (txId > 0L) {
+                runCatching {
+                    NotificationManagerCompat.from(context).cancel(notificationIdForTransaction(txId))
+                }
+            }
+        }
 
         /**
          * 检测当前设备是否为一加（OnePlus）或搭载 ColorOS / OxygenOS（支持流体云 Fluid Cloud）的机型
@@ -562,6 +571,10 @@ class SilentBookkeepingNotifier(private val context: Context) {
         title: String = "记账提醒",
         message: String = "今天的花销都记下了吗？花 10 秒随手记一笔吧～"
     ): Boolean = sendDailyReminderNotification(title = title, message = message, slotId = "test", isTest = true)
+
+    fun cancelForTransaction(txId: Long) {
+        cancelNotificationForTransaction(context, txId)
+    }
 }
 
 class TransactionActionReceiver : BroadcastReceiver() {
@@ -582,6 +595,17 @@ class TransactionActionReceiver : BroadcastReceiver() {
         if (isDeviceLocked && action in mutatingActions) {
             Handler(Looper.getMainLooper()).post {
                 Toast.makeText(context.applicationContext, "请先解锁手机后再操作账单", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        val appCtx = context.applicationContext
+        if (appCtx !is MoJiApp) {
+            AppLockManager.init(appCtx)
+        }
+        val isAppSessionLocked = AppLockManager.configFlow.value.enabled && AppLockManager.isSessionLockedFlow.value
+        if (isAppSessionLocked && action in mutatingActions) {
+            Handler(Looper.getMainLooper()).post {
+                Toast.makeText(appCtx, "请先解锁默记应用后再操作账单", Toast.LENGTH_SHORT).show()
             }
             return
         }
@@ -609,6 +633,7 @@ class TransactionActionReceiver : BroadcastReceiver() {
                     SilentBookkeepingNotifier.ACTION_UNDO_TRANSACTION -> {
                         if (txId > 0L) {
                             app.repository.undoAndDeleteTransaction(txId)
+                            SilentBookkeepingNotifier.cancelNotificationForTransaction(context, txId)
                         }
                         if (notifId > 0) {
                             NotificationManagerCompat.from(context).cancel(notifId)

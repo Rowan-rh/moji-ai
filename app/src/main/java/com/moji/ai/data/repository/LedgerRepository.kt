@@ -180,7 +180,14 @@ class LedgerRepository(private val db: AppDatabase) {
         if (diff == 0L) return@withTransaction null
 
         if (!recordAdjustmentTx) {
-            walletDao.updateWallet(wallet.copy(balanceCents = sanitizedActual))
+            val now = System.currentTimeMillis()
+            walletDao.updateWallet(
+                wallet.copy(
+                    balanceCents = sanitizedActual,
+                    updatedAtMillis = now,
+                    syncDirty = true
+                )
+            )
             return@withTransaction null
         }
 
@@ -489,46 +496,35 @@ class LedgerRepository(private val db: AppDatabase) {
     }
 
     /**
-     * 编辑已有账单：若仅修改分类/备注/标签等非金额账户元数据则跳过余额回滚重算，避免汇率波动造成余额漂移；
-     * 若金额、币种、账户、退款关联或已报销状态发生变更，则先回滚旧影响再应用新影响。
+     * 原子附加无障碍账单截图（仅在目标流水仍存在且 screenshotPath 为空时单列更新），
+     * 杜绝整行覆写回退期间发生的 30s 多帧详情融合或通知栏改分类/标报销改动。
      */
-    suspend fun updateExistingTransaction(updatedTx: TransactionEntity): Boolean = db.withTransaction {
-        val txDao = db.transactionDao()
-        val oldTx = txDao.getTransactionById(updatedTx.id) ?: return@withTransaction false
-        val normalizedTx = if (!updatedTx.reimbursable && updatedTx.reimbursed) {
-            updatedTx.copy(reimbursed = false)
-        } else {
-            updatedTx
-        }
-        val applied = if (hasSameFinancialImpact(oldTx, normalizedTx)) {
-            normalizedTx
-        } else {
-            revertWalletImpact(oldTx)
-            applyWalletImpact(normalizedTx)
-        }
-        txDao.updateTransaction(applied)
-        if (!applied.isSystemBalanceAnchor() && applied.tags.isNotBlank()) {
-            TagCatalog.syncDiscoveredTagsFromHistory(listOf(applied.tags))
-        }
-        true
-    }
-
-    private fun hasSameFinancialImpact(a: TransactionEntity, b: TransactionEntity): Boolean {
-        return a.type == b.type &&
-            a.amountCents == b.amountCents &&
-            a.amountCnyCents == b.amountCnyCents &&
-            a.feeCents == b.feeCents &&
-            a.currency.equals(b.currency, ignoreCase = true) &&
-            a.exchangeRateToCny == b.exchangeRateToCny &&
-            a.sourceWalletId == b.sourceWalletId &&
-            a.targetWalletId == b.targetWalletId &&
-            a.relatedTransactionId == b.relatedTransactionId &&
-            a.refundedAmountCents == b.refundedAmountCents &&
-            a.reimbursed == b.reimbursed
+    suspend fun attachBillScreenshotIfNeeded(
+        transactionId: Long,
+        screenshotPath: String,
+        screenshotSha256: String,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        if (transactionId <= 0L || screenshotPath.isBlank()) return false
+        return db.transactionDao().attachScreenshotIfBlank(
+            id = transactionId,
+            screenshotPath = screenshotPath,
+            screenshotSha256 = screenshotSha256,
+            nowMillis = nowMillis
+        ) > 0
     }
 
     /**
-     * 对指定消费账单发起全额或部分退款（自动生成“退款入账”流水并扣减原账单净支出，保留原账单币种与历史汇率）
+     * 编辑已有账单：若仅修改分类/备注/标签等非金额账户元数据则跳过余额回滚重算，避免汇率波动造成余额漂移；
+     * 若金额、币种、账户、退款关联或已报销状态发生变更，则先按历史变动快照回滚旧影响再应用新影响；
+     * 同时保护已部分退款支出账单编辑后折算金额不得小于已退金额 refundedAmountCents。
+     */
+    suspend fun updateExistingTransaction(updatedTx: TransactionEntity): Boolean = db.withTransaction {
+        updateExistingTransactionOnStore(roomStore, updatedTx)
+    }
+
+    /**
+     * 对指定消费账单发起全额或部分退款（refundAmountCents 采用原账单币种分值，按原单 exchangeRateToCny 精确折算，全额退完无尾差）
      */
     suspend fun refundExpense(
         expenseId: Long,
@@ -536,105 +532,23 @@ class LedgerRepository(private val db: AppDatabase) {
         receiveWalletId: Long?,
         refundNote: String = ""
     ): Long? = db.withTransaction {
-        val txDao = db.transactionDao()
-        val expense = txDao.getTransactionById(expenseId) ?: return@withTransaction null
-        if (expense.type != TransactionType.EXPENSE) return@withTransaction null
-
-        val maxRefundable = (expense.amountCnyCents - expense.refundedAmountCents).coerceAtLeast(0L)
-        val actualRefundCnyCents = refundAmountCents.coerceAtMost(maxRefundable)
-        if (actualRefundCnyCents <= 0L) return@withTransaction null
-
-        val isForeign = !expense.currency.equals("CNY", ignoreCase = true) && expense.exchangeRateToCny > 0.0
-        val refundCurrency = if (isForeign) expense.currency else "CNY"
-        val refundRate = if (isForeign) expense.exchangeRateToCny else 1.0
-        val refundOrigCents = when {
-            !isForeign -> actualRefundCnyCents
-            actualRefundCnyCents == expense.amountCnyCents && expense.refundedAmountCents == 0L -> expense.amountCents
-            else -> (actualRefundCnyCents / expense.exchangeRateToCny).roundToLong().coerceAtLeast(1L)
-        }
-
-        val targetWalletId = receiveWalletId ?: expense.sourceWalletId
-        val refundTx = TransactionEntity(
-            ledgerName = expense.ledgerName,
-            type = TransactionType.REFUND_OFFSET,
-            amountCents = refundOrigCents,
-            currency = refundCurrency,
-            exchangeRateToCny = refundRate,
-            amountCnyCents = actualRefundCnyCents,
-            category = "退款入账",
-            merchant = if (expense.merchant.isNotBlank()) "${expense.category} · ${expense.merchant}" else expense.category,
-            note = refundNote.ifBlank { "关联原账单退款冲销" },
-            sourceWalletId = null,
-            targetWalletId = targetWalletId,
-            relatedTransactionId = expense.id,
-            captureSource = "MANUAL"
-        )
-        recordTransaction(refundTx)
-    }
-
-    /**
-     * 计算待报销账单在扣除已退款金额（CNY 分）后，入账到目标钱包时的目标币种净额（分）
-     */
-    private fun computeNetReimbursementDeltaForWallet(
-        expense: TransactionEntity,
-        targetWalletCurrency: String
-    ): Long {
-        if (expense.refundedAmountCents <= 0L) {
-            return convertCentsBetweenCurrencies(
-                expense.amountCents,
-                expense.currency,
-                targetWalletCurrency,
-                expense.exchangeRateToCny
-            )
-        }
-        val netCnyCents = (expense.amountCnyCents - expense.refundedAmountCents).coerceAtLeast(0L)
-        if (netCnyCents <= 0L) return 0L
-        if (expense.currency.equals(targetWalletCurrency, ignoreCase = true) && expense.exchangeRateToCny > 0.0) {
-            return (netCnyCents / expense.exchangeRateToCny).roundToLong()
-        }
-        return convertCentsBetweenCurrencies(
-            netCnyCents,
-            "CNY",
-            targetWalletCurrency,
-            1.0
+        refundExpenseOnStore(
+            store = roomStore,
+            expenseId = expenseId,
+            refundAmountCents = refundAmountCents,
+            receiveWalletId = receiveWalletId,
+            refundNote = refundNote
         )
     }
 
     /**
-     * 对待报销账单完成报销入账（持久化实际入账账户至 targetWalletId，确保后续删除或撤销报销可精确回滚）
+     * 对待报销账单完成报销入账（持久化实际入账账户、核销变动快照与核销时间戳，确保后续删除或撤销报销可精确回滚）
      */
     suspend fun settleReimbursement(
         expenseId: Long,
         receiveWalletId: Long?
     ): Boolean = db.withTransaction {
-        val txDao = db.transactionDao()
-        val walletDao = db.walletDao()
-        val expense = txDao.getTransactionById(expenseId) ?: return@withTransaction false
-        if (expense.type != TransactionType.EXPENSE || !expense.reimbursable || expense.reimbursed) {
-            return@withTransaction false
-        }
-
-        val targetId = receiveWalletId ?: expense.targetWalletId ?: expense.sourceWalletId
-            ?: return@withTransaction false
-        val targetWallet = walletDao.getWalletById(targetId) ?: return@withTransaction false
-        val delta = computeNetReimbursementDeltaForWallet(expense, targetWallet.currency)
-        val newBal = if (targetWallet.type.isLiability) {
-            targetWallet.balanceCents - delta
-        } else {
-            targetWallet.balanceCents + delta
-        }
-        val now = System.currentTimeMillis()
-        walletDao.updateWallet(targetWallet.copy(balanceCents = newBal, updatedAtMillis = now, syncDirty = true))
-        txDao.updateTransaction(
-            expense.copy(
-                reimbursed = true,
-                targetWalletId = targetId,
-                updatedAtMillis = now,
-                syncRevision = expense.syncRevision + 1,
-                syncDirty = true
-            )
-        )
-        true
+        settleReimbursementOnStore(roomStore, expenseId, receiveWalletId)
     }
 
     /**
@@ -646,34 +560,13 @@ class LedgerRepository(private val db: AppDatabase) {
         receiveWalletId: Long?
     ): Int = db.withTransaction {
         if (expenseIds.isEmpty()) return@withTransaction 0
-        val txDao = db.transactionDao()
-        val walletDao = db.walletDao()
         val now = System.currentTimeMillis()
         var settledCount = 0
 
         for (id in expenseIds.distinct()) {
-            val expense = txDao.getTransactionById(id) ?: continue
-            if (expense.type != TransactionType.EXPENSE || !expense.reimbursable || expense.reimbursed) continue
-
-            val targetId = receiveWalletId ?: expense.targetWalletId ?: expense.sourceWalletId ?: continue
-            val targetWallet = walletDao.getWalletById(targetId) ?: continue
-            val delta = computeNetReimbursementDeltaForWallet(expense, targetWallet.currency)
-            val newBal = if (targetWallet.type.isLiability) {
-                targetWallet.balanceCents - delta
-            } else {
-                targetWallet.balanceCents + delta
+            if (settleReimbursementOnStore(roomStore, id, receiveWalletId, now)) {
+                settledCount++
             }
-            walletDao.updateWallet(targetWallet.copy(balanceCents = newBal, updatedAtMillis = now, syncDirty = true))
-            txDao.updateTransaction(
-                expense.copy(
-                    reimbursed = true,
-                    targetWalletId = targetId,
-                    updatedAtMillis = now,
-                    syncRevision = expense.syncRevision + 1,
-                    syncDirty = true
-                )
-            )
-            settledCount++
         }
         settledCount
     }
@@ -724,6 +617,17 @@ class LedgerRepository(private val db: AppDatabase) {
             0L
         }
         val discountB = (orig.discountCents - discountA).coerceAtLeast(0L)
+
+        val totalOrigOut = (orig.amountCents + orig.feeCents).coerceAtLeast(1L)
+        val partAOut = partACents + orig.feeCents
+        val splitSourceDeltaA = orig.sourceWalletDeltaCents?.let { totalDelta ->
+            ((totalDelta.toDouble() * partAOut.toDouble()) / totalOrigOut.toDouble())
+                .roundToLong()
+                .coerceIn(0L, totalDelta)
+        }
+        val splitSourceDeltaB = orig.sourceWalletDeltaCents?.let { totalDelta ->
+            (totalDelta - (splitSourceDeltaA ?: 0L)).coerceAtLeast(0L)
+        }
         val now = System.currentTimeMillis()
 
         val updatedOrig = orig.copy(
@@ -732,6 +636,7 @@ class LedgerRepository(private val db: AppDatabase) {
             amountCnyCents = partACnyCents,
             discountCents = discountA,
             refundedAmountCents = refundA,
+            sourceWalletDeltaCents = splitSourceDeltaA,
             note = if (orig.note.contains("[拆分")) orig.note else "${orig.note} [拆分1/2]".trim(),
             updatedAtMillis = now,
             syncRevision = orig.syncRevision + 1,
@@ -748,6 +653,9 @@ class LedgerRepository(private val db: AppDatabase) {
             discountCents = discountB,
             feeCents = 0L,
             refundedAmountCents = refundB,
+            sourceWalletDeltaCents = splitSourceDeltaB,
+            targetWalletDeltaCents = null,
+            reimbursedAtMillis = null,
             relatedTransactionId = orig.id,
             orderKey = "",
             transactionNo = "",
@@ -785,11 +693,13 @@ class LedgerRepository(private val db: AppDatabase) {
         db.captureEvidenceDao().deleteAllEvidences()
         val walletDao = db.walletDao()
         val currentWallets = walletDao.getAllWallets()
+        val now = System.currentTimeMillis()
         for (w in currentWallets) {
             walletDao.updateWallet(
                 w.copy(
                     balanceCents = 0L,
-                    updatedAtMillis = System.currentTimeMillis()
+                    updatedAtMillis = now,
+                    syncDirty = true
                 )
             )
         }
@@ -844,8 +754,7 @@ class LedgerRepository(private val db: AppDatabase) {
     }
 
     /**
-     * 1:1 同步 iCost 全部 11 个资产账户（7 个信用账户 + 4 个资金账户）及余额、总额度、尾号与还款日，
-     * 同时重映射已有流水的关联账户 ID，清理旧版演示用的“招商银行储蓄卡(8848)”及演示周期规则。
+     * 清理早期旧版内置演示卡（id=6 尾号 8848）与演示周期规则，重置为标准通用零余额初始账户
      */
     suspend fun syncICostAllAccounts() = db.withTransaction {
         val walletDao = db.walletDao()
@@ -860,27 +769,25 @@ class LedgerRepository(private val db: AppDatabase) {
         if (oldWallets.isNotEmpty() && !hasLegacyDemoCard) {
             return@withTransaction
         }
-        val oldAlipayId = oldWallets.firstOrNull { it.brandCode == "ALIPAY" || it.name.contains("账户余额") }?.id ?: 4L
+        val oldAlipayId = oldWallets.firstOrNull { it.brandCode == "ALIPAY" || it.name.contains("账户余额") || it.name.contains("支付宝") }?.id ?: 4L
         val oldWechatId = oldWallets.firstOrNull { it.brandCode == "WECHAT" || it.name.contains("微信零钱") }?.id ?: 5L
 
         walletDao.deleteAllWallets()
         walletDao.insertAll(AppDatabase.defaultWallets())
 
+        val now = System.currentTimeMillis()
         val allTxs = txDao.getAllTransactions()
         for (tx in allTxs) {
-            val pm = tx.paymentMethodRaw
-            val newSourceId = when {
-                pm.contains("3625") -> 11L
-                pm.contains("5021") -> 10L
-                pm.contains("3354") -> 1L
-                tx.sourceWalletId == 1L -> 1L
-                tx.sourceWalletId == oldAlipayId -> 8L
-                tx.sourceWalletId == oldWechatId -> 9L
+            val newSourceId = when (tx.sourceWalletId) {
+                oldAlipayId -> 3L
+                oldWechatId -> 2L
+                6L -> 4L
                 else -> tx.sourceWalletId
             }
-            val newTargetId = when {
-                tx.targetWalletId == oldAlipayId -> 8L
-                tx.targetWalletId == oldWechatId -> 9L
+            val newTargetId = when (tx.targetWalletId) {
+                oldAlipayId -> 3L
+                oldWechatId -> 2L
+                6L -> 4L
                 else -> tx.targetWalletId
             }
             if (newSourceId != tx.sourceWalletId || newTargetId != tx.targetWalletId) {
@@ -888,13 +795,14 @@ class LedgerRepository(private val db: AppDatabase) {
                     tx.copy(
                         sourceWalletId = newSourceId,
                         targetWalletId = newTargetId,
-                        updatedAtMillis = System.currentTimeMillis()
+                        updatedAtMillis = now,
+                        syncDirty = true
                     )
                 )
             }
         }
 
-        // 清理旧版绑定在演示卡 8848 上的「每月房租」演示周期规则
+        // 清理旧版绑定在演示卡 6L 上的「每月房租」演示周期规则
         for (rule in ruleDao.getAllRules()) {
             if (rule.title == "每月房租" && rule.walletId == 6L) {
                 ruleDao.deleteRule(rule)
@@ -1208,6 +1116,24 @@ class LedgerRepository(private val db: AppDatabase) {
 
     companion object {
 
+        /**
+         * 计算支出账单当前剩余可退的【原币种】分值上限：
+         * - 未发生退款时直接返回原单 `amountCents`；
+         * - 本位币剩余可退 `<= 0` 时返回 `0L`；
+         * - 外币部分退款后按原单锁定的历史汇率 `exchangeRateToCny` 还原剩余原币种分值。
+         */
+        fun computeRemainingRefundableOrigCents(expense: TransactionEntity): Long {
+            if (expense.type != TransactionType.EXPENSE) return 0L
+            val remainingCnyCents = (expense.amountCnyCents - expense.refundedAmountCents).coerceAtLeast(0L)
+            if (remainingCnyCents <= 0L) return 0L
+            if (expense.refundedAmountCents <= 0L) return expense.amountCents.coerceAtLeast(0L)
+            val isForeign = !expense.currency.equals("CNY", ignoreCase = true) && expense.exchangeRateToCny > 0.0
+            if (!isForeign) return remainingCnyCents
+            return (remainingCnyCents.toDouble() / expense.exchangeRateToCny)
+                .roundToLong()
+                .coerceIn(1L, expense.amountCents)
+        }
+
         internal fun computeNextFutureMonthlyTriggerMillis(
             nowMillis: Long,
             depositDayOfMonth: Int
@@ -1230,15 +1156,162 @@ class LedgerRepository(private val db: AppDatabase) {
 
         internal suspend fun recordSingleTransactionOnStore(
             store: LedgerTransactionStore,
-            tx: TransactionEntity
+            tx: TransactionEntity,
+            nowMillis: Long = System.currentTimeMillis()
         ): Long {
-            val normalized = if (!tx.reimbursable && tx.reimbursed) tx.copy(reimbursed = false) else tx
-            val finalTx = applyWalletImpactOnStore(store, normalized)
+            val normalized = if (!tx.reimbursable && tx.reimbursed) {
+                tx.copy(reimbursed = false, reimbursedAtMillis = null)
+            } else {
+                tx
+            }
+            val finalTx = applyWalletImpactOnStore(store, normalized, nowMillis)
             val id = store.insertTransaction(finalTx)
             if (!finalTx.isSystemBalanceAnchor() && finalTx.tags.isNotBlank()) {
                 TagCatalog.syncDiscoveredTagsFromHistory(listOf(finalTx.tags))
             }
             return id
+        }
+
+        internal suspend fun updateExistingTransactionOnStore(
+            store: LedgerTransactionStore,
+            updatedTx: TransactionEntity,
+            nowMillis: Long = System.currentTimeMillis()
+        ): Boolean {
+            val oldTx = store.getTransactionById(updatedTx.id) ?: return false
+            val normalizedBase = if (!updatedTx.reimbursable && updatedTx.reimbursed) {
+                updatedTx.copy(reimbursed = false, reimbursedAtMillis = null)
+            } else {
+                updatedTx
+            }
+
+            // AC-1 ③：拦截已发生退款的支出账单被改为其他类型，或编辑后折算本位币金额小于累计已退金额 refundedAmountCents
+            val normalizedTx = if (oldTx.type == TransactionType.EXPENSE && oldTx.refundedAmountCents > 0L) {
+                if (normalizedBase.type != TransactionType.EXPENSE) return false
+                val effectiveRefunded = maxOf(oldTx.refundedAmountCents, normalizedBase.refundedAmountCents)
+                if (normalizedBase.amountCnyCents < effectiveRefunded) return false
+                normalizedBase.copy(refundedAmountCents = effectiveRefunded)
+            } else {
+                if (normalizedBase.type == TransactionType.EXPENSE &&
+                    normalizedBase.refundedAmountCents > 0L &&
+                    normalizedBase.amountCnyCents < normalizedBase.refundedAmountCents
+                ) {
+                    return false
+                }
+                normalizedBase
+            }
+
+            val applied = if (hasSameFinancialImpactStatic(oldTx, normalizedTx)) {
+                normalizedTx.copy(
+                    sourceWalletDeltaCents = oldTx.sourceWalletDeltaCents,
+                    targetWalletDeltaCents = oldTx.targetWalletDeltaCents,
+                    reimbursedAtMillis = if (normalizedTx.reimbursed) {
+                        normalizedTx.reimbursedAtMillis ?: oldTx.reimbursedAtMillis ?: nowMillis
+                    } else {
+                        null
+                    }
+                )
+            } else {
+                revertWalletImpactOnStore(store, oldTx, nowMillis)
+                val prepared = normalizedTx.copy(
+                    reimbursedAtMillis = if (normalizedTx.reimbursed) {
+                        if (oldTx.reimbursed) {
+                            oldTx.reimbursedAtMillis ?: normalizedTx.reimbursedAtMillis ?: nowMillis
+                        } else {
+                            normalizedTx.reimbursedAtMillis ?: nowMillis
+                        }
+                    } else {
+                        null
+                    }
+                )
+                applyWalletImpactOnStore(store, prepared, nowMillis)
+            }
+            store.updateTransaction(applied)
+            if (!applied.isSystemBalanceAnchor() && applied.tags.isNotBlank()) {
+                TagCatalog.syncDiscoveredTagsFromHistory(listOf(applied.tags))
+            }
+            return true
+        }
+
+        internal suspend fun refundExpenseOnStore(
+            store: LedgerTransactionStore,
+            expenseId: Long,
+            refundAmountCents: Long,
+            receiveWalletId: Long?,
+            refundNote: String = "",
+            nowMillis: Long = System.currentTimeMillis()
+        ): Long? {
+            val expense = store.getTransactionById(expenseId) ?: return null
+            if (expense.type != TransactionType.EXPENSE) return null
+
+            val maxRefundableCny = (expense.amountCnyCents - expense.refundedAmountCents).coerceAtLeast(0L)
+            val maxRefundableOrig = computeRemainingRefundableOrigCents(expense)
+            if (maxRefundableCny <= 0L || maxRefundableOrig <= 0L) return null
+
+            val actualRefundOrigCents = refundAmountCents.coerceAtMost(maxRefundableOrig)
+            if (actualRefundOrigCents <= 0L) return null
+
+            val isForeign = !expense.currency.equals("CNY", ignoreCase = true) && expense.exchangeRateToCny > 0.0
+            val refundCurrency = if (isForeign) expense.currency else "CNY"
+            val refundRate = if (isForeign) expense.exchangeRateToCny else 1.0
+            val actualRefundCnyCents = when {
+                !isForeign -> actualRefundOrigCents.coerceAtMost(maxRefundableCny)
+                actualRefundOrigCents >= maxRefundableOrig -> maxRefundableCny
+                else -> (actualRefundOrigCents * refundRate).roundToLong().coerceIn(1L, maxRefundableCny)
+            }
+
+            val targetWalletId = receiveWalletId ?: expense.sourceWalletId
+            val refundTx = TransactionEntity(
+                ledgerName = expense.ledgerName,
+                type = TransactionType.REFUND_OFFSET,
+                amountCents = actualRefundOrigCents,
+                currency = refundCurrency,
+                exchangeRateToCny = refundRate,
+                amountCnyCents = actualRefundCnyCents,
+                category = "退款入账",
+                merchant = if (expense.merchant.isNotBlank()) "${expense.category} · ${expense.merchant}" else expense.category,
+                note = refundNote.ifBlank { "关联原账单退款冲销" },
+                sourceWalletId = null,
+                targetWalletId = targetWalletId,
+                relatedTransactionId = expense.id,
+                captureSource = "MANUAL",
+                updatedAtMillis = nowMillis
+            )
+            return recordSingleTransactionOnStore(store, refundTx, nowMillis)
+        }
+
+        internal suspend fun settleReimbursementOnStore(
+            store: LedgerTransactionStore,
+            expenseId: Long,
+            receiveWalletId: Long?,
+            nowMillis: Long = System.currentTimeMillis()
+        ): Boolean {
+            val expense = store.getTransactionById(expenseId) ?: return false
+            if (expense.type != TransactionType.EXPENSE || !expense.reimbursable || expense.reimbursed) {
+                return false
+            }
+
+            val targetId = receiveWalletId ?: expense.targetWalletId ?: expense.sourceWalletId
+                ?: return false
+            val targetWallet = store.getWalletById(targetId) ?: return false
+            val delta = computeNetReimbursementDeltaStatic(expense, targetWallet.currency)
+            val newBal = if (targetWallet.type.isLiability) {
+                targetWallet.balanceCents - delta
+            } else {
+                targetWallet.balanceCents + delta
+            }
+            store.updateWallet(targetWallet.copy(balanceCents = newBal, updatedAtMillis = nowMillis, syncDirty = true))
+            store.updateTransaction(
+                expense.copy(
+                    reimbursed = true,
+                    targetWalletId = targetId,
+                    targetWalletDeltaCents = delta,
+                    reimbursedAtMillis = nowMillis,
+                    updatedAtMillis = nowMillis,
+                    syncRevision = expense.syncRevision + 1,
+                    syncDirty = true
+                )
+            )
+            return true
         }
 
         internal suspend fun recordCompositeMedicalOnStore(
@@ -1487,8 +1560,13 @@ class LedgerRepository(private val db: AppDatabase) {
                 ).take(140)
 
                 val alreadyCompositeMain = DedicatedFundManager.isCompositeMedicalMain(oldMain) &&
-                    oldMain.discountCents == targetMainDiscount
-                if (existingChild != null && alreadyCompositeMain && fields.isEmpty()) {
+                    oldMain.discountCents == targetMainDiscount &&
+                    oldMain.sourceWalletId == safeMainSourceWalletId &&
+                    oldMain.amountCents == enrichedCandidateMain.amountCents
+                val childAlreadyAligned = existingChild != null &&
+                    existingChild.amountCents == effectivePersonal &&
+                    existingChild.sourceWalletId == medWallet.id
+                if (childAlreadyAligned && alreadyCompositeMain && fields.isEmpty()) {
                     return CompositeMedicalFusionResult(
                         updatedMainTransaction = oldMain,
                         createdChildTransaction = null,
@@ -1511,7 +1589,15 @@ class LedgerRepository(private val db: AppDatabase) {
                     captureSource = "AI_FUSED"
                 )
                 val appliedMain = if (hasSameFinancialImpactStatic(oldMain, targetMain)) {
-                    targetMain
+                    targetMain.copy(
+                        sourceWalletDeltaCents = oldMain.sourceWalletDeltaCents,
+                        targetWalletDeltaCents = oldMain.targetWalletDeltaCents,
+                        reimbursedAtMillis = if (targetMain.reimbursed) {
+                            targetMain.reimbursedAtMillis ?: oldMain.reimbursedAtMillis
+                        } else {
+                            null
+                        }
+                    )
                 } else {
                     revertWalletImpactOnStore(store, oldMain)
                     applyWalletImpactOnStore(store, targetMain)
@@ -1519,23 +1605,24 @@ class LedgerRepository(private val db: AppDatabase) {
                 store.updateTransaction(appliedMain)
 
                 var createdChild: TransactionEntity? = null
+                val childOrderKey = if (resolvedOrderKey.isNotBlank()) {
+                    "${resolvedOrderKey}${DedicatedFundManager.COMPOSITE_MEDICAL_PERSONAL_SUFFIX}"
+                } else {
+                    ""
+                }
+                val rate = if (appliedMain.exchangeRateToCny > 0.0) appliedMain.exchangeRateToCny else 1.0
+                val childCnyCents = (effectivePersonal * rate).roundToLong()
+                val personalYuanStr = String.format(Locale.US, "%.2f", effectivePersonal / 100.0)
+                val childTail = listOfNotNull(
+                    goodsPart.ifBlank { appliedMain.merchant }.takeIf { it.isNotBlank() },
+                    medWallet.name
+                ).joinToString(" · ")
+                val childNote = "${DedicatedFundManager.COMPOSITE_CHILD_NOTE_PREFIX}¥$personalYuanStr | $childTail".take(140)
+                val childTags = TagCatalog.joinTags(listOf("医保", "医保个账", "组合支付"))
+
                 if (existingChild == null) {
-                    val childOrderKey = if (resolvedOrderKey.isNotBlank()) {
-                        "${resolvedOrderKey}${DedicatedFundManager.COMPOSITE_MEDICAL_PERSONAL_SUFFIX}"
-                    } else {
-                        ""
-                    }
                     val baseFp = appliedMain.dedupFingerprint.ifBlank { "TX:${appliedMain.id}" }
                     val childFp = "${baseFp}${DedicatedFundManager.COMPOSITE_MEDICAL_PERSONAL_SUFFIX}"
-                    val rate = if (appliedMain.exchangeRateToCny > 0.0) appliedMain.exchangeRateToCny else 1.0
-                    val childCnyCents = (effectivePersonal * rate).roundToLong()
-                    val personalYuanStr = String.format(Locale.US, "%.2f", effectivePersonal / 100.0)
-                    val childTail = listOfNotNull(
-                        goodsPart.ifBlank { appliedMain.merchant }.takeIf { it.isNotBlank() },
-                        medWallet.name
-                    ).joinToString(" · ")
-                    val childNote = "${DedicatedFundManager.COMPOSITE_CHILD_NOTE_PREFIX}¥$personalYuanStr | $childTail".take(140)
-                    val childTags = TagCatalog.joinTags(listOf("医保", "医保个账", "组合支付"))
 
                     val rawChild = TransactionEntity(
                         ledgerName = appliedMain.ledgerName,
@@ -1568,11 +1655,36 @@ class LedgerRepository(private val db: AppDatabase) {
                     val childId = store.insertTransaction(appliedChild)
                     createdChild = appliedChild.copy(id = childId)
                     fields.add("医保个账扣卡(¥$personalYuanStr)")
+                } else if (existingChild.amountCents != effectivePersonal || existingChild.sourceWalletId != medWallet.id) {
+                    revertWalletImpactOnStore(store, existingChild)
+                    val recalibratedChild = existingChild.copy(
+                        amountCents = effectivePersonal,
+                        currency = appliedMain.currency,
+                        exchangeRateToCny = rate,
+                        amountCnyCents = childCnyCents,
+                        category = appliedMain.category.ifBlank { existingChild.category },
+                        merchant = appliedMain.merchant.ifBlank { existingChild.merchant },
+                        note = childNote,
+                        tags = childTags,
+                        sourceWalletId = medWallet.id,
+                        paymentMethodRaw = medWallet.name,
+                        orderKey = childOrderKey.ifBlank { existingChild.orderKey },
+                        captureSource = "AI_FUSED",
+                        updatedAtMillis = appliedMain.updatedAtMillis,
+                        syncRevision = existingChild.syncRevision + 1,
+                        syncDirty = true
+                    )
+                    val appliedChild = applyWalletImpactOnStore(store, recalibratedChild)
+                    store.updateTransaction(appliedChild)
+                    createdChild = appliedChild
+                    fields.add("医保个账校准(¥$personalYuanStr)")
                 } else if (resolvedOrderKey.isNotBlank() && existingChild.orderKey.isBlank()) {
                     store.updateTransaction(
                         existingChild.copy(
-                            orderKey = "${resolvedOrderKey}${DedicatedFundManager.COMPOSITE_MEDICAL_PERSONAL_SUFFIX}",
-                            updatedAtMillis = appliedMain.updatedAtMillis
+                            orderKey = childOrderKey,
+                            updatedAtMillis = appliedMain.updatedAtMillis,
+                            syncRevision = existingChild.syncRevision + 1,
+                            syncDirty = true
                         )
                     )
                 }
@@ -1588,12 +1700,21 @@ class LedgerRepository(private val db: AppDatabase) {
                 )
             }
 
-            // 未配置个人医保卡时的多帧融合：将统筹+个账完整写入主单 discountCents 与结构化备注
+            // 未配置个人医保卡或明细帧确认个账金额为 0 时的多帧融合：若有旧个账子单则原子回滚并删除，将统筹+个账完整写入主单 discountCents 与结构化备注
+            if (existingChild != null) {
+                revertWalletImpactOnStore(store, existingChild)
+                store.deleteTransaction(existingChild)
+                fields.add("冲回医保个账子单")
+            }
+
             val totalOriginalSingle = enrichedCandidateMain.amountCents + cleanPool + effectivePersonal + cleanCommercial
             val targetDiscount = cleanPool + effectivePersonal + cleanCommercial
-            val targetTags = TagCatalog.joinTags(
-                TagCatalog.parseTags(enrichedCandidateMain.tags) + listOf("医保")
-            )
+            val cleanedMainTags = TagCatalog.parseTags(enrichedCandidateMain.tags).filterNot { it == "组合支付" }
+            val targetTags = if (cleanPool + effectivePersonal > 0L) {
+                TagCatalog.joinTags(cleanedMainTags + listOf("医保"))
+            } else {
+                TagCatalog.joinTags(cleanedMainTags)
+            }
             val singlePay = selfPayWalletName.ifBlank { enrichedCandidateMain.paymentMethodRaw }
             val singleTail = listOfNotNull(goodsPart.takeIf { it.isNotBlank() }, singlePay.takeIf { it.isNotBlank() }).joinToString(" · ")
             val targetNote = DedicatedFundManager.formatStructuredMedicalNote(
@@ -1607,7 +1728,7 @@ class LedgerRepository(private val db: AppDatabase) {
             ).take(140)
 
             val oldParsedNote = DedicatedFundManager.parseStructuredMedicalNote(oldMain.note)
-            if (oldParsedNote.hasExplicitBreakdown && oldMain.discountCents == targetDiscount && fields.isEmpty()) {
+            if (existingChild == null && oldParsedNote.hasExplicitBreakdown && oldMain.discountCents == targetDiscount && fields.isEmpty()) {
                 return CompositeMedicalFusionResult(
                     updatedMainTransaction = oldMain,
                     createdChildTransaction = null,
@@ -1615,7 +1736,7 @@ class LedgerRepository(private val db: AppDatabase) {
                     wasModified = false
                 )
             }
-            if (!oldParsedNote.hasExplicitBreakdown) {
+            if (!oldParsedNote.hasExplicitBreakdown && (cleanPool + effectivePersonal) > 0L) {
                 fields.add("医保明细(¥${String.format(Locale.US, "%.2f", (cleanPool + effectivePersonal) / 100.0)})")
             }
 
@@ -1629,7 +1750,15 @@ class LedgerRepository(private val db: AppDatabase) {
                 captureSource = "AI_FUSED"
             )
             val appliedSingle = if (hasSameFinancialImpactStatic(oldMain, updatedSingle)) {
-                updatedSingle
+                updatedSingle.copy(
+                    sourceWalletDeltaCents = oldMain.sourceWalletDeltaCents,
+                    targetWalletDeltaCents = oldMain.targetWalletDeltaCents,
+                    reimbursedAtMillis = if (updatedSingle.reimbursed) {
+                        updatedSingle.reimbursedAtMillis ?: oldMain.reimbursedAtMillis
+                    } else {
+                        null
+                    }
+                )
             } else {
                 revertWalletImpactOnStore(store, oldMain)
                 applyWalletImpactOnStore(store, updatedSingle)
@@ -1688,6 +1817,22 @@ class LedgerRepository(private val db: AppDatabase) {
             store.deleteTransaction(tx)
 
             val remainingTxs = store.getAllTransactions()
+            if (tx.type == TransactionType.EXPENSE) {
+                val now = System.currentTimeMillis()
+                for (other in remainingTxs) {
+                    if (other.type == TransactionType.REFUND_OFFSET && other.relatedTransactionId == tx.id) {
+                        store.updateTransaction(
+                            other.copy(
+                                relatedTransactionId = null,
+                                updatedAtMillis = now,
+                                syncRevision = other.syncRevision + 1,
+                                syncDirty = true
+                            )
+                        )
+                    }
+                }
+            }
+
             val unreferencedScreenshots = candidateScreenshots.filter { path ->
                 remainingTxs.none { it.screenshotPath == path }
             }
@@ -1744,101 +1889,273 @@ class LedgerRepository(private val db: AppDatabase) {
 
         internal suspend fun applyWalletImpactOnStore(
             store: LedgerTransactionStore,
-            tx: TransactionEntity
+            tx: TransactionEntity,
+            nowMillis: Long = System.currentTimeMillis()
         ): TransactionEntity {
             val totalOutCents = tx.amountCents + tx.feeCents
 
             when (tx.type) {
                 TransactionType.EXPENSE, TransactionType.LOAN_OUT -> {
+                    var srcDelta: Long? = null
                     tx.sourceWalletId?.let { walletId ->
                         store.getWalletById(walletId)?.let { wallet ->
                             val delta = convertCentsStatic(totalOutCents, tx.currency, wallet.currency, tx.exchangeRateToCny)
                             val newBalance = if (wallet.type.isLiability) wallet.balanceCents + delta else wallet.balanceCents - delta
-                            store.updateWallet(wallet.copy(balanceCents = newBalance))
+                            store.updateWallet(wallet.copy(balanceCents = newBalance, updatedAtMillis = nowMillis, syncDirty = true))
+                            srcDelta = delta
                         }
                     }
+                    var reimbDelta: Long? = null
+                    var reimbAtMillis: Long? = null
                     if (tx.type == TransactionType.EXPENSE && tx.reimbursed) {
                         val reimburseWalletId = tx.targetWalletId ?: tx.sourceWalletId
                         reimburseWalletId?.let { wid ->
                             store.getWalletById(wid)?.let { rWallet ->
                                 val rDelta = computeNetReimbursementDeltaStatic(tx, rWallet.currency)
                                 val newBal = if (rWallet.type.isLiability) rWallet.balanceCents - rDelta else rWallet.balanceCents + rDelta
-                                store.updateWallet(rWallet.copy(balanceCents = newBal))
+                                store.updateWallet(rWallet.copy(balanceCents = newBal, updatedAtMillis = nowMillis, syncDirty = true))
+                                reimbDelta = rDelta
+                                reimbAtMillis = tx.reimbursedAtMillis ?: nowMillis
                             }
                         }
                     }
+                    return tx.copy(
+                        sourceWalletDeltaCents = srcDelta,
+                        targetWalletDeltaCents = reimbDelta,
+                        reimbursedAtMillis = reimbAtMillis
+                    )
                 }
 
                 TransactionType.INCOME, TransactionType.LOAN_IN -> {
+                    var dstDelta: Long? = null
                     val targetId = tx.targetWalletId ?: tx.sourceWalletId
                     targetId?.let { walletId ->
                         store.getWalletById(walletId)?.let { wallet ->
                             val delta = convertCentsStatic(tx.amountCents - tx.feeCents, tx.currency, wallet.currency, tx.exchangeRateToCny)
                             val newBalance = if (wallet.type.isLiability) wallet.balanceCents - delta else wallet.balanceCents + delta
-                            store.updateWallet(wallet.copy(balanceCents = newBalance))
+                            store.updateWallet(wallet.copy(balanceCents = newBalance, updatedAtMillis = nowMillis, syncDirty = true))
+                            dstDelta = delta
                         }
                     }
+                    return tx.copy(
+                        sourceWalletDeltaCents = null,
+                        targetWalletDeltaCents = dstDelta,
+                        reimbursedAtMillis = null
+                    )
                 }
 
                 TransactionType.TRANSFER -> {
+                    var srcDelta: Long? = null
+                    var dstDelta: Long? = null
                     tx.sourceWalletId?.let { fromId ->
                         store.getWalletById(fromId)?.let { fromWallet ->
                             val delta = convertCentsStatic(totalOutCents, tx.currency, fromWallet.currency, tx.exchangeRateToCny)
                             val newBal = if (fromWallet.type.isLiability) fromWallet.balanceCents + delta else fromWallet.balanceCents - delta
-                            store.updateWallet(fromWallet.copy(balanceCents = newBal))
+                            store.updateWallet(fromWallet.copy(balanceCents = newBal, updatedAtMillis = nowMillis, syncDirty = true))
+                            srcDelta = delta
                         }
                     }
                     tx.targetWalletId?.let { toId ->
                         store.getWalletById(toId)?.let { toWallet ->
                             val delta = convertCentsStatic(tx.amountCents, tx.currency, toWallet.currency, tx.exchangeRateToCny)
                             val newBal = if (toWallet.type.isLiability) toWallet.balanceCents - delta else toWallet.balanceCents + delta
-                            store.updateWallet(toWallet.copy(balanceCents = newBal))
+                            store.updateWallet(toWallet.copy(balanceCents = newBal, updatedAtMillis = nowMillis, syncDirty = true))
+                            dstDelta = delta
                         }
                     }
+                    return tx.copy(
+                        sourceWalletDeltaCents = srcDelta,
+                        targetWalletDeltaCents = dstDelta,
+                        reimbursedAtMillis = null
+                    )
                 }
 
                 TransactionType.REPAYMENT -> {
+                    var srcDelta: Long? = null
+                    var dstDelta: Long? = null
                     tx.sourceWalletId?.let { fromId ->
                         store.getWalletById(fromId)?.let { fromWallet ->
                             val delta = convertCentsStatic(totalOutCents, tx.currency, fromWallet.currency, tx.exchangeRateToCny)
                             val newBal = if (fromWallet.type.isLiability) fromWallet.balanceCents + delta else fromWallet.balanceCents - delta
-                            store.updateWallet(fromWallet.copy(balanceCents = newBal))
+                            store.updateWallet(fromWallet.copy(balanceCents = newBal, updatedAtMillis = nowMillis, syncDirty = true))
+                            srcDelta = delta
                         }
                     }
                     tx.targetWalletId?.let { creditId ->
                         store.getWalletById(creditId)?.let { creditWallet ->
                             val delta = convertCentsStatic(tx.amountCents, tx.currency, creditWallet.currency, tx.exchangeRateToCny)
                             val newBal = if (creditWallet.type.isLiability) creditWallet.balanceCents - delta else creditWallet.balanceCents + delta
-                            store.updateWallet(creditWallet.copy(balanceCents = newBal))
+                            store.updateWallet(creditWallet.copy(balanceCents = newBal, updatedAtMillis = nowMillis, syncDirty = true))
+                            dstDelta = delta
                         }
                     }
+                    return tx.copy(
+                        sourceWalletDeltaCents = srcDelta,
+                        targetWalletDeltaCents = dstDelta,
+                        reimbursedAtMillis = null
+                    )
                 }
 
                 TransactionType.REFUND_OFFSET -> {
+                    var receiveDelta: Long? = null
                     val receiveWalletId = tx.targetWalletId ?: tx.sourceWalletId
                     receiveWalletId?.let { walletId ->
                         store.getWalletById(walletId)?.let { wallet ->
-                            val delta = convertCentsStatic(tx.amountCents, tx.currency, wallet.currency, tx.exchangeRateToCny)
+                            val delta = if (wallet.currency.equals("CNY", ignoreCase = true) && tx.amountCnyCents > 0L) {
+                                tx.amountCnyCents
+                            } else {
+                                convertCentsStatic(tx.amountCents, tx.currency, wallet.currency, tx.exchangeRateToCny)
+                            }
                             val newBal = if (wallet.type.isLiability) wallet.balanceCents - delta else wallet.balanceCents + delta
-                            store.updateWallet(wallet.copy(balanceCents = newBal))
+                            store.updateWallet(wallet.copy(balanceCents = newBal, updatedAtMillis = nowMillis, syncDirty = true))
+                            receiveDelta = delta
                         }
                     }
                     val targetExpense = tx.relatedTransactionId?.let { store.getTransactionById(it) }
                         ?: findBestMatchingExpenseForRefundStatic(store, tx)
                     if (targetExpense != null) {
-                        val updatedRefunded = (targetExpense.refundedAmountCents + tx.amountCnyCents)
+                        val prevRefunded = targetExpense.refundedAmountCents.coerceAtLeast(0L)
+                        val updatedRefunded = (prevRefunded + tx.amountCnyCents.coerceAtLeast(0L))
                             .coerceAtMost(targetExpense.amountCnyCents)
-                        store.updateTransaction(targetExpense.copy(refundedAmountCents = updatedRefunded))
-                        return tx.copy(relatedTransactionId = targetExpense.id)
+                        var updatedExpenseTargetDelta = targetExpense.targetWalletDeltaCents
+
+                        // AC-1 ①：父单已核销报销时，按更新前后净报销差额同步扣减报销入账钱包并更新 targetWalletDeltaCents
+                        if (targetExpense.type == TransactionType.EXPENSE && targetExpense.reimbursed && updatedRefunded > prevRefunded) {
+                            val reimburseWalletId = targetExpense.targetWalletId ?: targetExpense.sourceWalletId
+                            val rWallet = reimburseWalletId?.let { store.getWalletById(it) }
+                            if (rWallet != null) {
+                                val oldRDelta = targetExpense.targetWalletDeltaCents
+                                    ?: computeNetReimbursementDeltaStatic(targetExpense, rWallet.currency)
+                                val prevNetCny = (targetExpense.amountCnyCents - prevRefunded).coerceAtLeast(0L)
+                                val newNetCny = (targetExpense.amountCnyCents - updatedRefunded).coerceAtLeast(0L)
+                                val newRDelta = when {
+                                    newNetCny <= 0L -> 0L
+                                    targetExpense.targetWalletDeltaCents != null && prevNetCny > 0L ->
+                                        ((oldRDelta.toDouble() * newNetCny.toDouble()) / prevNetCny.toDouble())
+                                            .roundToLong()
+                                            .coerceIn(0L, oldRDelta)
+                                    else ->
+                                        computeNetReimbursementDeltaStatic(
+                                            targetExpense.copy(refundedAmountCents = updatedRefunded),
+                                            rWallet.currency
+                                        )
+                                }
+                                val clawbackDelta = (oldRDelta - newRDelta).coerceAtLeast(0L)
+                                if (clawbackDelta > 0L) {
+                                    val newRBal = if (rWallet.type.isLiability) {
+                                        rWallet.balanceCents + clawbackDelta
+                                    } else {
+                                        rWallet.balanceCents - clawbackDelta
+                                    }
+                                    store.updateWallet(
+                                        rWallet.copy(
+                                            balanceCents = newRBal,
+                                            updatedAtMillis = nowMillis,
+                                            syncDirty = true
+                                        )
+                                    )
+                                }
+                                updatedExpenseTargetDelta = newRDelta
+                            }
+                        }
+
+                        store.updateTransaction(
+                            targetExpense.copy(
+                                refundedAmountCents = updatedRefunded,
+                                targetWalletDeltaCents = updatedExpenseTargetDelta,
+                                updatedAtMillis = nowMillis,
+                                syncRevision = targetExpense.syncRevision + 1,
+                                syncDirty = true
+                            )
+                        )
+                        return tx.copy(
+                            relatedTransactionId = targetExpense.id,
+                            sourceWalletDeltaCents = null,
+                            targetWalletDeltaCents = receiveDelta,
+                            reimbursedAtMillis = null
+                        )
                     }
+                    return tx.copy(
+                        sourceWalletDeltaCents = null,
+                        targetWalletDeltaCents = receiveDelta,
+                        reimbursedAtMillis = null
+                    )
                 }
             }
-            return tx
+        }
+
+        private suspend fun restoreRefundOnExpenseStatic(
+            store: LedgerTransactionStore,
+            expense: TransactionEntity,
+            deductCnyCents: Long,
+            nowMillis: Long
+        ) {
+            if (deductCnyCents <= 0L) return
+            val prevRefunded = expense.refundedAmountCents.coerceAtLeast(0L)
+            val restoredRefunded = (prevRefunded - deductCnyCents).coerceAtLeast(0L)
+            var restoredTargetDelta = expense.targetWalletDeltaCents
+
+            // AC-1 ②：删除关联退款恢复父单 refundedAmountCents 时，向已报销入账钱包补回对应净报销差额
+            if (expense.type == TransactionType.EXPENSE && expense.reimbursed && restoredRefunded < prevRefunded) {
+                val reimburseWalletId = expense.targetWalletId ?: expense.sourceWalletId
+                val rWallet = reimburseWalletId?.let { store.getWalletById(it) }
+                if (rWallet != null) {
+                    val oldRDelta = expense.targetWalletDeltaCents
+                        ?: computeNetReimbursementDeltaStatic(expense, rWallet.currency)
+                    val prevNetCny = (expense.amountCnyCents - prevRefunded).coerceAtLeast(0L)
+                    val newNetCny = (expense.amountCnyCents - restoredRefunded).coerceAtLeast(0L)
+                    val newRDelta = when {
+                        expense.targetWalletDeltaCents != null && prevNetCny > 0L ->
+                            ((oldRDelta.toDouble() * newNetCny.toDouble()) / prevNetCny.toDouble())
+                                .roundToLong()
+                                .coerceAtLeast(oldRDelta)
+                        rWallet.id == expense.sourceWalletId &&
+                            expense.sourceWalletDeltaCents != null &&
+                            expense.feeCents == 0L &&
+                            expense.amountCnyCents > 0L ->
+                            ((expense.sourceWalletDeltaCents.toDouble() * newNetCny.toDouble()) / expense.amountCnyCents.toDouble())
+                                .roundToLong()
+                                .coerceAtLeast(oldRDelta)
+                        else ->
+                            computeNetReimbursementDeltaStatic(
+                                expense.copy(refundedAmountCents = restoredRefunded),
+                                rWallet.currency
+                            )
+                    }
+                    val restoreDiff = (newRDelta - oldRDelta).coerceAtLeast(0L)
+                    if (restoreDiff > 0L) {
+                        val newRBal = if (rWallet.type.isLiability) {
+                            rWallet.balanceCents - restoreDiff
+                        } else {
+                            rWallet.balanceCents + restoreDiff
+                        }
+                        store.updateWallet(
+                            rWallet.copy(
+                                balanceCents = newRBal,
+                                updatedAtMillis = nowMillis,
+                                syncDirty = true
+                            )
+                        )
+                    }
+                    restoredTargetDelta = newRDelta
+                }
+            }
+
+            store.updateTransaction(
+                expense.copy(
+                    refundedAmountCents = restoredRefunded,
+                    targetWalletDeltaCents = restoredTargetDelta,
+                    updatedAtMillis = nowMillis,
+                    syncRevision = expense.syncRevision + 1,
+                    syncDirty = true
+                )
+            )
         }
 
         internal suspend fun revertWalletImpactOnStore(
             store: LedgerTransactionStore,
-            tx: TransactionEntity
+            tx: TransactionEntity,
+            nowMillis: Long = System.currentTimeMillis()
         ) {
             val totalOutCents = tx.amountCents + tx.feeCents
 
@@ -1848,17 +2165,19 @@ class LedgerRepository(private val db: AppDatabase) {
                         val reimburseWalletId = tx.targetWalletId ?: tx.sourceWalletId
                         reimburseWalletId?.let { wid ->
                             store.getWalletById(wid)?.let { rWallet ->
-                                val rDelta = computeNetReimbursementDeltaStatic(tx, rWallet.currency)
+                                val rDelta = tx.targetWalletDeltaCents
+                                    ?: computeNetReimbursementDeltaStatic(tx, rWallet.currency)
                                 val restoredBal = if (rWallet.type.isLiability) rWallet.balanceCents + rDelta else rWallet.balanceCents - rDelta
-                                store.updateWallet(rWallet.copy(balanceCents = restoredBal))
+                                store.updateWallet(rWallet.copy(balanceCents = restoredBal, updatedAtMillis = nowMillis, syncDirty = true))
                             }
                         }
                     }
                     tx.sourceWalletId?.let { walletId ->
                         store.getWalletById(walletId)?.let { wallet ->
-                            val delta = convertCentsStatic(totalOutCents, tx.currency, wallet.currency, tx.exchangeRateToCny)
+                            val delta = tx.sourceWalletDeltaCents
+                                ?: convertCentsStatic(totalOutCents, tx.currency, wallet.currency, tx.exchangeRateToCny)
                             val restored = if (wallet.type.isLiability) wallet.balanceCents - delta else wallet.balanceCents + delta
-                            store.updateWallet(wallet.copy(balanceCents = restored))
+                            store.updateWallet(wallet.copy(balanceCents = restored, updatedAtMillis = nowMillis, syncDirty = true))
                         }
                     }
                 }
@@ -1866,41 +2185,46 @@ class LedgerRepository(private val db: AppDatabase) {
                     val targetId = tx.targetWalletId ?: tx.sourceWalletId
                     targetId?.let { walletId ->
                         store.getWalletById(walletId)?.let { wallet ->
-                            val delta = convertCentsStatic(tx.amountCents - tx.feeCents, tx.currency, wallet.currency, tx.exchangeRateToCny)
+                            val delta = tx.targetWalletDeltaCents
+                                ?: convertCentsStatic(tx.amountCents - tx.feeCents, tx.currency, wallet.currency, tx.exchangeRateToCny)
                             val restored = if (wallet.type.isLiability) wallet.balanceCents + delta else wallet.balanceCents - delta
-                            store.updateWallet(wallet.copy(balanceCents = restored))
+                            store.updateWallet(wallet.copy(balanceCents = restored, updatedAtMillis = nowMillis, syncDirty = true))
                         }
                     }
                 }
                 TransactionType.TRANSFER -> {
                     tx.sourceWalletId?.let { fromId ->
                         store.getWalletById(fromId)?.let { w ->
-                            val delta = convertCentsStatic(totalOutCents, tx.currency, w.currency, tx.exchangeRateToCny)
+                            val delta = tx.sourceWalletDeltaCents
+                                ?: convertCentsStatic(totalOutCents, tx.currency, w.currency, tx.exchangeRateToCny)
                             val restored = if (w.type.isLiability) w.balanceCents - delta else w.balanceCents + delta
-                            store.updateWallet(w.copy(balanceCents = restored))
+                            store.updateWallet(w.copy(balanceCents = restored, updatedAtMillis = nowMillis, syncDirty = true))
                         }
                     }
                     tx.targetWalletId?.let { toId ->
                         store.getWalletById(toId)?.let { w ->
-                            val delta = convertCentsStatic(tx.amountCents, tx.currency, w.currency, tx.exchangeRateToCny)
+                            val delta = tx.targetWalletDeltaCents
+                                ?: convertCentsStatic(tx.amountCents, tx.currency, w.currency, tx.exchangeRateToCny)
                             val restored = if (w.type.isLiability) w.balanceCents + delta else w.balanceCents - delta
-                            store.updateWallet(w.copy(balanceCents = restored))
+                            store.updateWallet(w.copy(balanceCents = restored, updatedAtMillis = nowMillis, syncDirty = true))
                         }
                     }
                 }
                 TransactionType.REPAYMENT -> {
                     tx.sourceWalletId?.let { fromId ->
                         store.getWalletById(fromId)?.let { w ->
-                            val delta = convertCentsStatic(totalOutCents, tx.currency, w.currency, tx.exchangeRateToCny)
+                            val delta = tx.sourceWalletDeltaCents
+                                ?: convertCentsStatic(totalOutCents, tx.currency, w.currency, tx.exchangeRateToCny)
                             val restored = if (w.type.isLiability) w.balanceCents - delta else w.balanceCents + delta
-                            store.updateWallet(w.copy(balanceCents = restored))
+                            store.updateWallet(w.copy(balanceCents = restored, updatedAtMillis = nowMillis, syncDirty = true))
                         }
                     }
                     tx.targetWalletId?.let { creditId ->
                         store.getWalletById(creditId)?.let { w ->
-                            val delta = convertCentsStatic(tx.amountCents, tx.currency, w.currency, tx.exchangeRateToCny)
+                            val delta = tx.targetWalletDeltaCents
+                                ?: convertCentsStatic(tx.amountCents, tx.currency, w.currency, tx.exchangeRateToCny)
                             val restored = if (w.type.isLiability) w.balanceCents + delta else w.balanceCents - delta
-                            store.updateWallet(w.copy(balanceCents = restored))
+                            store.updateWallet(w.copy(balanceCents = restored, updatedAtMillis = nowMillis, syncDirty = true))
                         }
                     }
                 }
@@ -1908,9 +2232,14 @@ class LedgerRepository(private val db: AppDatabase) {
                     val receiveWalletId = tx.targetWalletId ?: tx.sourceWalletId
                     receiveWalletId?.let { walletId ->
                         store.getWalletById(walletId)?.let { w ->
-                            val delta = convertCentsStatic(tx.amountCents, tx.currency, w.currency, tx.exchangeRateToCny)
+                            val delta = tx.targetWalletDeltaCents
+                                ?: if (w.currency.equals("CNY", ignoreCase = true) && tx.amountCnyCents > 0L) {
+                                    tx.amountCnyCents
+                                } else {
+                                    convertCentsStatic(tx.amountCents, tx.currency, w.currency, tx.exchangeRateToCny)
+                                }
                             val restored = if (w.type.isLiability) w.balanceCents + delta else w.balanceCents - delta
-                            store.updateWallet(w.copy(balanceCents = restored))
+                            store.updateWallet(w.copy(balanceCents = restored, updatedAtMillis = nowMillis, syncDirty = true))
                         }
                     }
                     tx.relatedTransactionId?.let { parentId ->
@@ -1918,7 +2247,7 @@ class LedgerRepository(private val db: AppDatabase) {
                         store.getTransactionById(parentId)?.let { parent ->
                             val deductParent = minOf(parent.refundedAmountCents.coerceAtLeast(0L), remainingToRevert)
                             if (deductParent > 0L) {
-                                store.updateTransaction(parent.copy(refundedAmountCents = parent.refundedAmountCents - deductParent))
+                                restoreRefundOnExpenseStatic(store, parent, deductParent, nowMillis)
                                 remainingToRevert -= deductParent
                             }
                         }
@@ -1935,9 +2264,7 @@ class LedgerRepository(private val db: AppDatabase) {
                                     if (!visited.add(child.id)) continue
                                     val deductChild = minOf(child.refundedAmountCents.coerceAtLeast(0L), remainingToRevert)
                                     if (deductChild > 0L) {
-                                        store.updateTransaction(
-                                            child.copy(refundedAmountCents = child.refundedAmountCents - deductChild)
-                                        )
+                                        restoreRefundOnExpenseStatic(store, child, deductChild, nowMillis)
                                         remainingToRevert -= deductChild
                                     }
                                     queue.addLast(child.id)

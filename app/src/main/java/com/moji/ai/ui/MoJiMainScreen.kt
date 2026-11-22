@@ -148,6 +148,7 @@ import com.moji.ai.data.backup.WebDavConfig
 import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
+import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.data.model.AppearanceConfigManager
 import com.moji.ai.data.model.AppearanceSettingsConfig
 import com.moji.ai.data.model.CurrencyCode
@@ -510,9 +511,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onDuplicateTransaction = { tx -> viewModel.duplicateTransactionNow(tx) },
                     onToggleReimburse = { tx -> viewModel.toggleOrSettleReimbursement(tx) },
                     onQuickRefund = { tx ->
-                        val remainYuan = ((tx.amountCnyCents - tx.refundedAmountCents).coerceAtLeast(0L)) / 100.0
-                        if (remainYuan > 0.0) {
-                            viewModel.refundExpense(tx.id, remainYuan, tx.sourceWalletId, "侧滑快捷全额退款")
+                        val remainOrigMajor = LedgerRepository.computeRemainingRefundableOrigCents(tx) / 100.0
+                        if (remainOrigMajor > 0.0) {
+                            viewModel.refundExpense(tx.id, remainOrigMajor, tx.sourceWalletId, "侧滑快捷全额退款")
                         }
                     },
                     onDeleteTransaction = { txId -> viewModel.deleteTransaction(txId) },
@@ -3238,6 +3239,91 @@ private fun BackupAndCsvTransferSheet(
         context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
     }
 
+    val maxClipboardUtf8Bytes = 256 * 1024
+    val maxPreviewTextChars = 16_000
+
+    fun copyTextToClipboardSafely(label: String, text: String): Boolean {
+        val utf8ByteLen = text.toByteArray(Charsets.UTF_8).size
+        if (utf8ByteLen > maxClipboardUtf8Bytes) {
+            return false
+        }
+        return runCatching {
+            val cm = clipboard ?: return false
+            cm.setPrimaryClip(ClipData.newPlainText(label, text))
+            true
+        }.getOrDefault(false)
+    }
+
+    val csvSaveLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("text/csv")
+    ) { uri: Uri? ->
+        val contentToWrite = exportedCsvText
+        if (uri != null && contentToWrite.isNotBlank()) {
+            scope.launch {
+                isWorking = true
+                try {
+                    val saved = withContext(Dispatchers.IO) {
+                        runCatching {
+                            context.contentResolver.openOutputStream(uri)?.use { out ->
+                                out.write(contentToWrite.toByteArray(Charsets.UTF_8))
+                                out.flush()
+                            } != null
+                        }.getOrDefault(false)
+                    }
+                    localBanner = if (saved) "CSV 文件已保存" else "保存 CSV 文件失败"
+                } finally {
+                    isWorking = false
+                }
+            }
+        }
+    }
+
+    val backupSaveLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri: Uri? ->
+        val contentToWrite = backupJsonText
+        if (uri != null && contentToWrite.isNotBlank()) {
+            scope.launch {
+                isWorking = true
+                try {
+                    val saved = withContext(Dispatchers.IO) {
+                        runCatching {
+                            context.contentResolver.openOutputStream(uri)?.use { out ->
+                                out.write(contentToWrite.toByteArray(Charsets.UTF_8))
+                                out.flush()
+                            } != null
+                        }.getOrDefault(false)
+                    }
+                    localBanner = if (saved) "备份文件已保存" else "保存备份文件失败"
+                } finally {
+                    isWorking = false
+                }
+            }
+        }
+    }
+
+    val backupFilePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            scope.launch {
+                isWorking = true
+                localBanner = "正在读取备份文件…"
+                try {
+                    val loaded = readUriTextWithAutoCharset(context, uri)
+                    if (!loaded.isNullOrBlank()) {
+                        backupJsonText = loaded
+                        localBanner = "已从文件载入备份（${String.format(Locale.US, "%.1f", loaded.toByteArray(Charsets.UTF_8).size / 1024.0)} KB）"
+                    } else {
+                        localBanner = "备份文件为空或超过 25MB，请选择有效的备份文件"
+                    }
+                } finally {
+                    isWorking = false
+                }
+            }
+        }
+    }
+
     val csvFilePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
@@ -3664,8 +3750,11 @@ private fun BackupAndCsvTransferSheet(
                             OutlinedButton(
                                 onClick = {
                                     if (exportedCsvText.isNotBlank()) {
-                                        clipboard?.setPrimaryClip(ClipData.newPlainText("MoJi_CSV", exportedCsvText))
-                                        localBanner = "已复制到剪贴板"
+                                        if (copyTextToClipboardSafely("MoJi_CSV", exportedCsvText)) {
+                                            localBanner = "已复制到剪贴板"
+                                        } else {
+                                            localBanner = "内容较大，请保存文件"
+                                        }
                                     }
                                 },
                                 enabled = exportedCsvText.isNotBlank(),
@@ -3676,12 +3765,36 @@ private fun BackupAndCsvTransferSheet(
                             ) {
                                 Text("复制", fontWeight = FontWeight.Bold)
                             }
+                            OutlinedButton(
+                                onClick = {
+                                    if (exportedCsvText.isNotBlank()) {
+                                        val datePart = java.text.SimpleDateFormat("yyyyMMdd_HHmm", Locale.CHINA)
+                                            .format(java.util.Date())
+                                        csvSaveLauncher.launch("moji_transactions_$datePart.csv")
+                                    }
+                                },
+                                enabled = exportedCsvText.isNotBlank() && !isWorking,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(46.dp)
+                            ) {
+                                Text("保存文件", fontWeight = FontWeight.Bold)
+                            }
                         }
                         if (exportedCsvText.isNotBlank()) {
+                            val csvPreviewText = remember(exportedCsvText) {
+                                if (exportedCsvText.length > maxPreviewTextChars) {
+                                    exportedCsvText.take(maxPreviewTextChars) +
+                                        "\n…（共 ${exportedCsvText.length} 字符，已截断为只读摘要展示，完整内容请点击「保存文件」）"
+                                } else {
+                                    exportedCsvText
+                                }
+                            }
                             ICostFormField(
-                                value = exportedCsvText,
+                                value = csvPreviewText,
                                 onValueChange = {},
-                                label = "CSV 预览",
+                                label = if (exportedCsvText.length > maxPreviewTextChars) "CSV 预览（截断摘要）" else "CSV 预览",
                                 readOnly = true,
                                 modifier = Modifier.fillMaxWidth(),
                                 singleLine = false,
@@ -3695,7 +3808,7 @@ private fun BackupAndCsvTransferSheet(
                 item {
                     ICostFormCard {
                         Text(
-                            text = "备份包含账户、全部账单、周期账单、商户记忆、账本与预算。生成后会复制到剪贴板，请保存到安全的地方。",
+                            text = "备份包含账户、全部账单、周期账单、商户记忆、账本与预算。小体积备份会自动复制到剪贴板，大账本建议直接保存为文件。",
                             fontSize = 12.sp,
                             color = ICostTextSecondary
                         )
@@ -3710,8 +3823,11 @@ private fun BackupAndCsvTransferSheet(
                                         try {
                                             val json = onExportFullBackup()
                                             backupJsonText = json
-                                            clipboard?.setPrimaryClip(ClipData.newPlainText("MoJi_Backup", json))
-                                            localBanner = "备份已生成并复制到剪贴板"
+                                            if (copyTextToClipboardSafely("MoJi_Backup", json)) {
+                                                localBanner = "备份已生成并复制到剪贴板"
+                                            } else {
+                                                localBanner = "内容较大，请保存文件"
+                                            }
                                         } finally {
                                             isWorking = false
                                         }
@@ -3728,7 +3844,9 @@ private fun BackupAndCsvTransferSheet(
                             }
                             OutlinedButton(
                                 onClick = {
-                                    val clipText = clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
+                                    val clipText = runCatching {
+                                        clipboard?.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
+                                    }.getOrNull()
                                     if (!clipText.isNullOrBlank()) {
                                         backupJsonText = clipText
                                         localBanner = "已从剪贴板载入备份"
@@ -3744,11 +3862,54 @@ private fun BackupAndCsvTransferSheet(
                                 Text("粘贴备份", fontWeight = FontWeight.Bold)
                             }
                         }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    if (backupJsonText.isNotBlank()) {
+                                        val datePart = java.text.SimpleDateFormat("yyyyMMdd_HHmm", Locale.CHINA)
+                                            .format(java.util.Date())
+                                        backupSaveLauncher.launch("moji_backup_$datePart.mojibackup.json")
+                                    }
+                                },
+                                enabled = backupJsonText.isNotBlank() && !isWorking,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
+                            ) {
+                                Text("保存文件", fontWeight = FontWeight.Bold)
+                            }
+                            OutlinedButton(
+                                onClick = {
+                                    backupFilePickerLauncher.launch(arrayOf("application/json", "text/*", "*/*"))
+                                },
+                                enabled = !isWorking,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
+                            ) {
+                                Text("从文件载入", fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        val isBackupOversized = backupJsonText.length > maxPreviewTextChars
+                        val backupPreviewText = remember(backupJsonText) {
+                            if (backupJsonText.length > maxPreviewTextChars) {
+                                backupJsonText.take(maxPreviewTextChars) +
+                                    "\n…（共 ${backupJsonText.length} 字符，已切换为只读截断摘要展示；完整备份已在内存中，可直接恢复或点击「保存文件」）"
+                            } else {
+                                backupJsonText
+                            }
+                        }
                         ICostFormField(
-                            value = backupJsonText,
-                            onValueChange = { backupJsonText = it },
-                            label = "备份内容",
-                            placeholder = "点击上方「生成备份」或「粘贴备份」",
+                            value = backupPreviewText,
+                            onValueChange = { if (!isBackupOversized) backupJsonText = it },
+                            label = if (isBackupOversized) "备份内容（只读截断摘要）" else "备份内容",
+                            placeholder = "点击上方「生成备份」、「粘贴备份」或「从文件载入」",
+                            readOnly = isBackupOversized,
                             modifier = Modifier.fillMaxWidth(),
                             singleLine = false,
                             minLines = 5,
