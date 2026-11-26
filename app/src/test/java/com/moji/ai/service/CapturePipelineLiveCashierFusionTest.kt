@@ -1,7 +1,9 @@
 package com.moji.ai.service
 
 import com.moji.ai.ai.AiAccountingEngine
+import com.moji.ai.ai.CaptureWindowGuard
 import com.moji.ai.ai.WindowContainerRole
+import com.moji.ai.ai.WindowInspectionInput
 import com.moji.ai.ai.WindowRejectReason
 import com.moji.ai.data.local.CaptureEvidenceEntity
 import com.moji.ai.data.local.TransactionEntity
@@ -383,6 +385,590 @@ class CapturePipelineLiveCashierFusionTest {
         assertEquals(199_080L, store.getWalletBalance(3L))
     }
 
+    @Test
+    fun ac1_multitaskReentryToUnclosedWechatAndAlipayCashier_reusesVisitIdWithZeroDuplicatesAndZeroNotifications() = runBlocking {
+        val tracker = CashierVisitSessionTracker()
+        val t0 = buildLocalMillis(2026, Calendar.NOVEMBER, 26, 19, 38, 18, 0)
+        val wechatCashierAct = "com.tencent.mm.plugin.lite.ui.WxaLiteAppTransparentLiteUI"
+        val nayukiCashierText = "支付成功 | 奈雪的茶 | ¥19.80 | 支付方式 | 招商银行信用卡(3354) | 完成"
+
+        // 首次进入微信收银台完成页：正常放行并分配 visitId
+        val initialDecision = tracker.evaluateLiveCashierFrame(
+            packageName = "com.tencent.mm",
+            rawText = nayukiCashierText,
+            hasExplicitOrderNo = false,
+            forceManual = false,
+            verifiedActivity = wechatCashierAct,
+            nowMillis = t0
+        )
+        assertTrue(initialDecision.shouldDispatch)
+        val initialTx = coordinator.processCapturedEventForTest(
+            rawText = nayukiCashierText,
+            packageName = "com.tencent.mm",
+            captureSource = "AI_LIVE_CASHIER",
+            capturedAtMillis = t0,
+            cashierVisitId = initialDecision.visitId,
+            verifiedActivity = wechatCashierAct
+        )
+        assertNotNull(initialTx)
+        assertEquals(1, store.getAllTransactions().size)
+        assertEquals(1, uiRecorder.recordedBanners.size)
+
+        // 10 分钟内未点「完成/关闭」，连续 4 次往返：桌面 -> 微信聊天 LauncherUI -> 打开默记 com.moji.ai 查看账单 -> 9 分钟后再从桌面切回
+        // 第 1 次往返：切桌面 Launcher -> 切回未关闭收银台
+        assertFalse(tracker.onExternalAppFocused("com.android.launcher"))
+        val reentry1 = tracker.evaluateLiveCashierFrame(
+            packageName = "com.tencent.mm",
+            rawText = nayukiCashierText,
+            hasExplicitOrderNo = false,
+            verifiedActivity = wechatCashierAct,
+            nowMillis = t0 + 18_000L
+        )
+        assertFalse("Re-entering unclosed cashier from Launcher must not re-dispatch", reentry1.shouldDispatch)
+        assertEquals(initialDecision.visitId, reentry1.visitId)
+
+        // 第 2 次往返：切微信聊天主界面 LauncherUI -> 切回未关闭收银台
+        assertFalse(
+            tracker.onContainerOrRejectTransition(
+                packageName = "com.tencent.mm",
+                containerRole = WindowContainerRole.NON_TRANSACTION_BLOCKED,
+                rejectReason = WindowRejectReason.NON_TRANSACTION_CONTAINER,
+                verifiedActivity = "com.tencent.mm.ui.LauncherUI"
+            )
+        )
+        val reentry2 = tracker.evaluateLiveCashierFrame(
+            packageName = "com.tencent.mm",
+            rawText = nayukiCashierText,
+            hasExplicitOrderNo = false,
+            verifiedActivity = wechatCashierAct,
+            nowMillis = t0 + 55_000L
+        )
+        assertFalse("Re-entering unclosed cashier from WeChat chat must not re-dispatch", reentry2.shouldDispatch)
+        assertEquals(initialDecision.visitId, reentry2.visitId)
+
+        // 第 3 次往返：打开 com.moji.ai 查看账单 -> 切回未关闭收银台
+        assertFalse(tracker.onExternalAppFocused("com.moji.ai"))
+        val reentry3 = tracker.evaluateLiveCashierFrame(
+            packageName = "com.tencent.mm",
+            rawText = nayukiCashierText,
+            hasExplicitOrderNo = false,
+            verifiedActivity = wechatCashierAct,
+            nowMillis = t0 + 140_000L
+        )
+        assertFalse("Re-entering unclosed cashier from com.moji.ai must not re-dispatch", reentry3.shouldDispatch)
+        assertEquals(initialDecision.visitId, reentry3.visitId)
+
+        // 第 4 次往返（9 分钟后，跨过协调器 65 秒短时窗）：即使恢复探测或 OCR 兜底再次将同 visitId 送入协调器，也必须静默拦截！
+        assertFalse(tracker.onExternalAppFocused("com.moji.ai.qa"))
+        val reentry4 = tracker.evaluateLiveCashierFrame(
+            packageName = "com.tencent.mm",
+            rawText = nayukiCashierText,
+            hasExplicitOrderNo = false,
+            verifiedActivity = wechatCashierAct,
+            nowMillis = t0 + 9 * 60_000L
+        )
+        assertFalse(reentry4.shouldDispatch)
+        assertEquals(initialDecision.visitId, reentry4.visitId)
+        val blockedRescan = coordinator.processCapturedEventForTest(
+            rawText = nayukiCashierText,
+            packageName = "com.tencent.mm",
+            captureSource = "AI_LIVE_CASHIER",
+            capturedAtMillis = t0 + 9 * 60_000L,
+            cashierVisitId = reentry4.visitId,
+            verifiedActivity = wechatCashierAct
+        )
+        assertNull(blockedRescan)
+        assertEquals("Bill count must stay 1 after >=3 multitask round-trips", 1, store.getAllTransactions().size)
+        assertEquals("Recorded banner count must stay 1 (0 new recorded prompts)", 1, uiRecorder.recordedBanners.size)
+        assertEquals("Suspected duplicate notifications must be 0", 0, uiRecorder.suspectedDuplicateNotifications.size)
+        assertEquals("Suspected duplicate banners must be 0", 0, uiRecorder.duplicateBanners.size)
+
+        // 同步验证支付宝 MspUniRenderActivity 未关闭完成页切桌面与默记 3 次往返同样 0 新增
+        val alipayTracker = CashierVisitSessionTracker()
+        val alipayAct = "com.alipay.android.msp.ui.views.MspUniRenderActivity"
+        val alipayText = "支付成功 | 瑞幸咖啡 | ¥9.90 | 付款方式 | 余额宝 | 完成"
+        val alipayInit = alipayTracker.evaluateLiveCashierFrame(
+            packageName = "com.eg.android.AlipayGphone",
+            rawText = alipayText,
+            hasExplicitOrderNo = false,
+            verifiedActivity = alipayAct,
+            nowMillis = t0
+        )
+        assertTrue(alipayInit.shouldDispatch)
+        for (targetPkg in listOf("com.android.launcher", "com.moji.ai", "com.tencent.mm")) {
+            alipayTracker.onExternalAppFocused(targetPkg)
+            val re = alipayTracker.evaluateLiveCashierFrame(
+                packageName = "com.eg.android.AlipayGphone",
+                rawText = alipayText,
+                hasExplicitOrderNo = false,
+                verifiedActivity = alipayAct,
+                nowMillis = t0 + 45_000L
+            )
+            assertFalse(re.shouldDispatch)
+            assertEquals(alipayInit.visitId, re.visitId)
+        }
+    }
+
+    @Test
+    fun ac2_genuineConsecutiveSameAmountPayments_resetVisitOnEveryPreconditionSignal() = runBlocking {
+        val tracker = CashierVisitSessionTracker()
+        val wechatCashierAct = "com.tencent.mm.plugin.lite.ui.WxaLiteAppTransparentLiteUI"
+        val cashierText = "支付成功 | 奈雪的茶 | ¥19.80 | 支付方式 | 招商银行信用卡(3354) | 完成"
+        var now = buildLocalMillis(2026, Calendar.NOVEMBER, 26, 20, 0, 0, 0)
+
+        fun assertNewVisitAfterSignal(triggerDescription: String, triggerSignal: () -> Unit) {
+            val prevVisitId = tracker.activeVisitId
+            triggerSignal()
+            now += 15_000L
+            val next = tracker.evaluateLiveCashierFrame(
+                packageName = "com.tencent.mm",
+                rawText = cashierText,
+                hasExplicitOrderNo = false,
+                verifiedActivity = wechatCashierAct,
+                nowMillis = now
+            )
+            assertTrue("Must dispatch new payment after $triggerDescription", next.shouldDispatch)
+            assertTrue("Must allocate strictly greater visitId after $triggerDescription", next.visitId > prevVisitId)
+        }
+
+        // 第 1 笔基准入账
+        val first = tracker.evaluateLiveCashierFrame(
+            packageName = "com.tencent.mm",
+            rawText = cashierText,
+            hasExplicitOrderNo = false,
+            verifiedActivity = wechatCashierAct,
+            nowMillis = now
+        )
+        assertTrue(first.shouldDispatch)
+
+        // 信号 1：待付款收银台词（确认付款/立即支付）
+        assertNewVisitAfterSignal("unpaid cashier state") {
+            tracker.onContainerOrRejectTransition(
+                packageName = "com.tencent.mm",
+                containerRole = WindowContainerRole.DEDICATED_PAYMENT_OR_BILL,
+                rejectReason = WindowRejectReason.CASHIER_OR_UNPAID_STATE,
+                verifiedActivity = wechatCashierAct
+            )
+        }
+        // 信号 2：密码/生物核身敏感窗口
+        assertNewVisitAfterSignal("password/biometric verification") {
+            tracker.onContainerOrRejectTransition(
+                packageName = "com.tencent.mm",
+                containerRole = WindowContainerRole.SENSITIVE_AUTH_BLOCKED,
+                verifiedActivity = "com.tencent.mm.plugin.wallet_core.ui.WalletPwdConfirmUI"
+            )
+        }
+        // 信号 3：重新拉起 WalletBrandUI 支付桥接页
+        assertNewVisitAfterSignal("re-launching WalletBrandUI") {
+            tracker.onContainerOrRejectTransition(
+                packageName = "com.tencent.mm",
+                containerRole = WindowContainerRole.DEDICATED_PAYMENT_OR_BILL,
+                verifiedActivity = "com.tencent.mm.plugin.wallet_index.ui.WalletBrandUI"
+            )
+        }
+        // 信号 4：原收银台窗口移除关闭回到宿主
+        assertNewVisitAfterSignal("closing cashier window to host") {
+            tracker.onCashierWindowClosedToHost()
+        }
+        // 信号 5：点击完成返回小程序宿主 AppBrandUI00
+        assertNewVisitAfterSignal("returning to AppBrandUI00 host") {
+            tracker.onContainerOrRejectTransition(
+                packageName = "com.tencent.mm",
+                containerRole = WindowContainerRole.SHARED_OR_WEB_STRICT,
+                rejectReason = WindowRejectReason.MISSING_OCCURRED_TIME,
+                verifiedActivity = "com.tencent.mm.plugin.appbrand.ui.AppBrandUI00"
+            )
+        }
+    }
+
+    @Test
+    fun ac3_and_ac4_wechatMiniProgramOrderPage_fusesBidirectionallyWithCashierAndBankAndBlocksLongStayRefresh() = runBlocking {
+        val tOrder = buildLocalMillis(2026, Calendar.NOVEMBER, 26, 19, 38, 18, 0)
+        val appBrandAct = "com.tencent.mm.plugin.appbrand.ui.AppBrandUI00"
+
+        // A. 正向链路：收银台完成页 + cmb.pb 银行通知先到 -> 8 分钟后打开 AppBrandUI00 小程序取餐/订单页 -> 原位融合为唯一 1 笔 AI_FUSED
+        val cashierTx = coordinator.processCapturedEventForTest(
+            rawText = "支付成功 | 奈雪的茶 | ¥19.80 | 支付方式 | 微信支付 | 完成",
+            packageName = "com.tencent.mm",
+            captureSource = "AI_LIVE_CASHIER",
+            capturedAtMillis = tOrder,
+            cashierVisitId = 1L,
+            verifiedActivity = "com.tencent.mm.plugin.lite.ui.WxaLiteAppTransparentLiteUI"
+        )
+        assertNotNull(cashierTx)
+
+        val bankCalibrated = coordinator.processCapturedEventForTest(
+            rawText = "交易提醒 | 您尾号3354的信用卡11月26日19:38在财付通-奈雪的茶消费人民币19.80元",
+            packageName = "cmb.pb",
+            captureSource = "AI_NOTIFICATION",
+            capturedAtMillis = tOrder + 3_000L
+        )
+        assertNotNull(bankCalibrated)
+        assertEquals(cashierTx!!.id, bankCalibrated!!.id)
+        assertEquals(4L, bankCalibrated.sourceWalletId)
+
+        val miniProgramPickupText = "奈雪的茶 | 制作中 | 取餐码 A086 | 前方还有3杯 | 实付 ¥19.80 | 霸气茉莉初雪 ×1 | 合计 ¥26.00 | 订单号 NY20261126193818 | 下单时间 2026-11-26 19:38:18 | 支付方式 微信支付"
+        val fusedFromMiniProgram = coordinator.processCapturedEventForTest(
+            rawText = miniProgramPickupText,
+            packageName = "com.tencent.mm",
+            captureSource = "AI_ACCESSIBILITY",
+            capturedAtMillis = tOrder + 8 * 60_000L, // 8 分钟后（≤15 分钟跨通道窗口）
+            verifiedActivity = appBrandAct
+        )
+        assertNotNull(fusedFromMiniProgram)
+        assertEquals(cashierTx.id, fusedFromMiniProgram!!.id)
+        assertEquals("AI_FUSED", fusedFromMiniProgram.captureSource)
+        assertEquals("NY20261126193818", fusedFromMiniProgram.orderKey)
+        assertEquals(4L, fusedFromMiniProgram.sourceWalletId)
+        assertTrue("Fused note must retain mini-program drink name", fusedFromMiniProgram.note.contains("霸气茉莉初雪"))
+        assertEquals(1, store.getAllTransactions().size)
+        assertEquals(11_980L, store.getWalletBalance(4L))
+
+        // AC-4：在同一小程序订单/取餐页停留 15s~10min，取餐码与排队状态动态刷新时幂等静默拦截（0 重记、0 疑似重复通知）
+        val dedupTracker = StablePageDedupTracker()
+        val idInitial = PaymentAccessibilityService.extractStablePageIdentity("com.tencent.mm", miniProgramPickupText)
+        assertFalse(dedupTracker.shouldSkipDispatch(idInitial, nowMillis = tOrder + 8 * 60_000L))
+
+        for ((offsetSec, dynamicStatus) in listOf(
+            20L to "请取餐 A086 | 饮品已制作完成",
+            150L to "请尽快取餐 A086 | 饮品已放入取餐柜",
+            540L to "已完成 A086 | 感谢光临奈雪"
+        )) {
+            val refreshedText = "奈雪的茶 | $dynamicStatus | 实付 ¥19.80 | 霸气茉莉初雪 ×1 | 合计 ¥26.00 | 订单号 NY20261126193818 | 下单时间 2026-11-26 19:38:18 | 支付方式 微信支付"
+            val refreshedId = PaymentAccessibilityService.extractStablePageIdentity("com.tencent.mm", refreshedText)
+            assertEquals("Dynamic pickup code/status refresh must keep identical stable page identity", idInitial, refreshedId)
+            assertTrue(
+                "StablePageDedupTracker must skip dispatch at +${offsetSec}s",
+                dedupTracker.shouldSkipDispatch(refreshedId, nowMillis = tOrder + 8 * 60_000L + offsetSec * 1_000L)
+            )
+            // 即使绕过无障碍前置缓存进入协调器，10 分钟内同页重扫也必须静默拦截不弹疑似重复通知
+            val coordinatorRepeat = coordinator.processCapturedEventForTest(
+                rawText = refreshedText,
+                packageName = "com.tencent.mm",
+                captureSource = "AI_ACCESSIBILITY",
+                capturedAtMillis = tOrder + 8 * 60_000L + offsetSec * 1_000L,
+                verifiedActivity = appBrandAct
+            )
+            assertNull(coordinatorRepeat)
+        }
+        assertEquals(1, store.getAllTransactions().size)
+        assertEquals(0, uiRecorder.duplicateBanners.size)
+        assertEquals(0, uiRecorder.suspectedDuplicateNotifications.size)
+
+        // B. 反向链路：小程序商家订单页先入账 -> 2 分钟后收到 cmb.pb 银行扣款通知 -> 同样双向原位融合为唯一 1 笔 AI_FUSED！
+        val tHeytea = buildLocalMillis(2026, Calendar.NOVEMBER, 26, 20, 15, 0, 0)
+        val heyteaMiniFirst = coordinator.processCapturedEventForTest(
+            rawText = "喜茶GO | 制作中 | 多肉葡萄 ×1 | 实付 ¥18.50 | 订单编号 HY20261126201500 | 下单时间 2026-11-26 20:15:00 | 支付方式 微信支付",
+            packageName = "com.tencent.mm",
+            captureSource = "AI_ACCESSIBILITY",
+            capturedAtMillis = tHeytea,
+            verifiedActivity = appBrandAct
+        )
+        assertNotNull(heyteaMiniFirst)
+        assertEquals(1L, heyteaMiniFirst!!.sourceWalletId)
+
+        val heyteaBankLater = coordinator.processCapturedEventForTest(
+            rawText = "交易提醒 | 您尾号3354的信用卡11月26日20:15在财付通-喜茶消费人民币18.50元",
+            packageName = "cmb.pb",
+            captureSource = "AI_NOTIFICATION",
+            capturedAtMillis = tHeytea + 120_000L
+        )
+        assertNotNull(heyteaBankLater)
+        assertEquals(heyteaMiniFirst.id, heyteaBankLater!!.id)
+        assertEquals("AI_FUSED", heyteaBankLater.captureSource)
+        assertEquals("HY20261126201500", heyteaBankLater.orderKey)
+        assertEquals(4L, heyteaBankLater.sourceWalletId)
+        assertTrue(heyteaBankLater.note.contains("多肉葡萄"))
+        assertEquals("WeChat wallet balance must be restored after bank calibration", 50_000L, store.getWalletBalance(1L))
+        assertEquals("Total bills must be exactly 2 (1 Nayuki + 1 Heytea)", 2, store.getAllTransactions().size)
+    }
+
+    @Test
+    fun ac5_unnumberedCashierUpgradedToFused_dualChannelOcrAndRescanProduceZeroOrphansAndZeroDoubleNotifications() = runBlocking {
+        val t1 = buildLocalMillis(2026, Calendar.NOVEMBER, 26, 19, 12, 15, 0)
+        val cashierAct = "com.tencent.mm.plugin.lite.ui.WxaLiteAppTransparentLiteUI"
+        val cashierText = "支付成功 | 奈雪的茶 | ¥19.80 | 支付方式 | 微信支付 | 完成"
+
+        // 1. 无单号 AI_LIVE_CASHIER 首次入账（产生唯一 1 条入账胶囊）
+        val liveTx = coordinator.processCapturedEventForTest(
+            rawText = cashierText,
+            packageName = "com.tencent.mm",
+            captureSource = "AI_LIVE_CASHIER",
+            capturedAtMillis = t1,
+            cashierVisitId = 1L,
+            verifiedActivity = cashierAct
+        )
+        assertNotNull(liveTx)
+        assertEquals(1, uiRecorder.recordedBanners.size)
+
+        // 2. 无单号 cmb.pb 通知到达，将记录升级为 AI_FUSED（此时 orderKey 仍为空）
+        val fusedByNotif = coordinator.processCapturedEventForTest(
+            rawText = "交易提醒 | 您尾号3354的信用卡11月26日19:12在财付通-奈雪的茶消费人民币19.80元",
+            packageName = "cmb.pb",
+            captureSource = "AI_NOTIFICATION",
+            capturedAtMillis = t1 + 2_000L
+        )
+        assertNotNull(fusedByNotif)
+        assertEquals(liveTx!!.id, fusedByNotif!!.id)
+        assertEquals("AI_FUSED", fusedByNotif.captureSource)
+        assertEquals("", fusedByNotif.orderKey)
+        assertEquals("已补全账单详情", uiRecorder.recordedBanners.last().statusTitle)
+
+        // 3. 520ms 后同页自动 OCR 双通道帧到达 + 3 分钟后恢复探测重扫同一完成页 -> 均命中同会话原记录静默拦截，绝不产生双通知或孤儿候选
+        val bannerCountBeforeRescan = uiRecorder.recordedBanners.size
+        val ocrFrame = coordinator.processCapturedEventForTest(
+            rawText = cashierText,
+            packageName = "com.tencent.mm",
+            captureSource = "AI_OCR",
+            capturedAtMillis = t1 + 2_520L,
+            cashierVisitId = 1L,
+            verifiedActivity = cashierAct
+        )
+        val recoveryRescan = coordinator.processCapturedEventForTest(
+            rawText = cashierText,
+            packageName = "com.tencent.mm",
+            captureSource = "AI_LIVE_CASHIER",
+            capturedAtMillis = t1 + 180_000L,
+            cashierVisitId = 1L,
+            verifiedActivity = cashierAct
+        )
+        assertNull(ocrFrame)
+        assertNull(recoveryRescan)
+        assertEquals(1, store.getAllTransactions().size)
+        assertEquals("Zero extra banners on dual-channel OCR & recovery rescan", bannerCountBeforeRescan, uiRecorder.recordedBanners.size)
+        assertEquals("Zero rapid double suspected-duplicate notifications", 0, uiRecorder.suspectedDuplicateNotifications.size)
+        assertEquals(0, uiRecorder.duplicateBanners.size)
+
+        // 4. 2 分钟后真实发生第 2 笔同金额消费（visit=2）并收到第 2 条 cmb.pb 通知 -> 优先精准校准未升级的 visit=2，绝不因 visit=1 已是 AI_FUSED 而误报多候选歧义！
+        val t2 = t1 + 120_000L
+        val liveTx2 = coordinator.processCapturedEventForTest(
+            rawText = cashierText,
+            packageName = "com.tencent.mm",
+            captureSource = "AI_LIVE_CASHIER",
+            capturedAtMillis = t2,
+            cashierVisitId = 2L,
+            verifiedActivity = cashierAct
+        )
+        assertNotNull(liveTx2)
+        val fused2 = coordinator.processCapturedEventForTest(
+            rawText = "交易提醒 | 您尾号3354的信用卡11月26日19:14在财付通-奈雪的茶消费人民币19.80元",
+            packageName = "cmb.pb",
+            captureSource = "AI_NOTIFICATION",
+            capturedAtMillis = t2 + 2_000L
+        )
+        assertNotNull("Second bank notification must cleanly calibrate uncalibrated visit=2 instead of triggering ambiguity", fused2)
+        assertEquals(liveTx2!!.id, fused2!!.id)
+        assertEquals(4L, fused2.sourceWalletId)
+        assertEquals(2, store.getAllTransactions().size)
+        assertEquals(0, uiRecorder.duplicateBanners.size)
+    }
+
+    @Test
+    fun ac8_tonightRealDeviceNayukiRefundAndReorderTimelineReplay_plusTwoCupsCounterexample() = runBlocking {
+        val visitTracker = CashierVisitSessionTracker()
+        val pageDedupTracker = StablePageDedupTracker()
+        val cashierAct = "com.tencent.mm.plugin.lite.ui.WxaLiteAppTransparentLiteUI"
+        val appBrandAct = "com.tencent.mm.plugin.appbrand.ui.AppBrandUI00"
+        val initialCmbLiability = store.getWalletBalance(4L) // 10_000L
+
+        // ==================== Step 1: 19:12 下第 1 单（¥19.80） ====================
+        val t1912 = buildLocalMillis(2026, Calendar.NOVEMBER, 26, 19, 12, 15, 0)
+        val cashierText1 = "支付成功 | 奈雪的茶 | ¥19.80 | 支付方式 | 微信支付 | 完成"
+        val v1 = visitTracker.evaluateLiveCashierFrame(
+            packageName = "com.tencent.mm",
+            rawText = cashierText1,
+            hasExplicitOrderNo = false,
+            verifiedActivity = cashierAct,
+            nowMillis = t1912
+        )
+        assertTrue(v1.shouldDispatch)
+        val order1 = coordinator.processCapturedEventForTest(
+            rawText = cashierText1,
+            packageName = "com.tencent.mm",
+            captureSource = "AI_LIVE_CASHIER",
+            capturedAtMillis = t1912,
+            cashierVisitId = v1.visitId,
+            verifiedActivity = cashierAct
+        )
+        assertNotNull(order1)
+        coordinator.processCapturedEventForTest(
+            rawText = "交易提醒 | 您尾号3354的信用卡11月26日19:12在财付通-奈雪的茶消费人民币19.80元",
+            packageName = "cmb.pb",
+            captureSource = "AI_NOTIFICATION",
+            capturedAtMillis = t1912 + 3_000L
+        )
+        assertEquals(initialCmbLiability + 1_980L, store.getWalletBalance(4L))
+
+        // 用户点完成返回小程序
+        visitTracker.onCashierWindowClosedToHost()
+
+        // ==================== Step 2: 19:37:23 小程序退单跳转「已退单 / 已取消」状态页 -> 100% 拦截 ====================
+        val t1937Cancel = buildLocalMillis(2026, Calendar.NOVEMBER, 26, 19, 37, 23, 0)
+        val cancelledPageText = "奈雪的茶 | 已退单 | 霸气茉莉初雪 ×1 | 实付 ¥19.80 | 合计 ¥26.00 | 订单号 NY20261126191215 | 下单时间 2026-11-26 19:12:15"
+        val guardCancelEval = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.tencent.mm",
+                verifiedActivity = appBrandAct,
+                rawPageText = cancelledPageText,
+                nowMillis = t1937Cancel
+            )
+        )
+        assertFalse(guardCancelEval.accepted)
+        assertEquals(WindowRejectReason.CLOSED_FAILED_OR_REFUND_PENDING, guardCancelEval.reason)
+        assertNull(
+            coordinator.processCapturedEventForTest(
+                rawText = cancelledPageText,
+                packageName = "com.tencent.mm",
+                captureSource = "AI_ACCESSIBILITY",
+                capturedAtMillis = t1937Cancel,
+                verifiedActivity = appBrandAct
+            )
+        )
+
+        // ==================== Step 3: 19:37:32 招行掌上生活 cmb.pb 推送「退货」通知 -> REFUND_OFFSET 自动冲抵 19:12 原单 ====================
+        val t1937Refund = buildLocalMillis(2026, Calendar.NOVEMBER, 26, 19, 37, 32, 0)
+        val refundTx = coordinator.processCapturedEventForTest(
+            rawText = "交易提醒 | 您尾号3354的信用卡11月26日19:37在财付通-奈雪的茶退货人民币19.80元",
+            packageName = "cmb.pb",
+            captureSource = "AI_NOTIFICATION",
+            capturedAtMillis = t1937Refund
+        )
+        assertNotNull(refundTx)
+        assertEquals(TransactionType.REFUND_OFFSET, refundTx!!.type)
+        assertEquals(order1!!.id, refundTx.relatedTransactionId)
+        assertEquals("19:12 order #1 must be 100% offset by 19:37 CMB refund", 1_980L, store.getTransactionById(order1.id)!!.refundedAmountCents)
+        assertEquals("Credit card liability must be restored to initial after 1 charge + 1 refund", initialCmbLiability, store.getWalletBalance(4L))
+
+        // ==================== Step 4: 19:38:18 重新拉起 WalletBrandUI 下唯一有效的 ~20 元单 ====================
+        val t1938 = buildLocalMillis(2026, Calendar.NOVEMBER, 26, 19, 38, 18, 0)
+        visitTracker.onContainerOrRejectTransition(
+            packageName = "com.tencent.mm",
+            containerRole = WindowContainerRole.DEDICATED_PAYMENT_OR_BILL,
+            verifiedActivity = "com.tencent.mm.plugin.wallet_index.ui.WalletBrandUI"
+        )
+        val v2 = visitTracker.evaluateLiveCashierFrame(
+            packageName = "com.tencent.mm",
+            rawText = cashierText1,
+            hasExplicitOrderNo = false,
+            verifiedActivity = cashierAct,
+            nowMillis = t1938
+        )
+        assertTrue(v2.shouldDispatch && v2.visitId > v1.visitId)
+        val order2 = coordinator.processCapturedEventForTest(
+            rawText = cashierText1,
+            packageName = "com.tencent.mm",
+            captureSource = "AI_LIVE_CASHIER",
+            capturedAtMillis = t1938,
+            cashierVisitId = v2.visitId,
+            verifiedActivity = cashierAct
+        )
+        assertNotNull(order2)
+        coordinator.processCapturedEventForTest(
+            rawText = "交易提醒 | 您尾号3354的信用卡11月26日19:38在财付通-奈雪的茶消费人民币19.80元",
+            packageName = "cmb.pb",
+            captureSource = "AI_NOTIFICATION",
+            capturedAtMillis = t1938 + 3_000L
+        )
+
+        // ==================== Step 5: 3 次切 MainActivity / 微信聊天 / 桌面往返未关闭 WxaLiteAppTransparentLiteUI ====================
+        for ((idx, target) in listOf("com.moji.ai", "com.tencent.mm.ui.LauncherUI", "com.android.launcher").withIndex()) {
+            if (target == "com.tencent.mm.ui.LauncherUI") {
+                visitTracker.onContainerOrRejectTransition(
+                    packageName = "com.tencent.mm",
+                    containerRole = WindowContainerRole.NON_TRANSACTION_BLOCKED,
+                    rejectReason = WindowRejectReason.NON_TRANSACTION_CONTAINER,
+                    verifiedActivity = target
+                )
+            } else {
+                visitTracker.onExternalAppFocused(target)
+            }
+            val re = visitTracker.evaluateLiveCashierFrame(
+                packageName = "com.tencent.mm",
+                rawText = cashierText1,
+                hasExplicitOrderNo = false,
+                verifiedActivity = cashierAct,
+                nowMillis = t1938 + (idx + 1) * 35_000L
+            )
+            assertFalse(re.shouldDispatch)
+            assertEquals(v2.visitId, re.visitId)
+        }
+
+        // ==================== Step 6: 关闭收银台返回 AppBrandUI00 取餐页（上方实付 ¥19.80 + 下方合计 ¥26.00）并停留刷新 ====================
+        visitTracker.onCashierWindowClosedToHost()
+        val pickupText = "奈雪的茶 | 制作中 | 取餐码 A088 | 实付 ¥19.80 | 霸气茉莉初雪 ×1 | 优惠 -¥6.20 | 合计 ¥26.00 | 订单号 NY20261126193818 | 下单时间 2026-11-26 19:38:18 | 支付方式 微信支付"
+        val pickupPageId = PaymentAccessibilityService.extractStablePageIdentity("com.tencent.mm", pickupText)
+        assertFalse(pageDedupTracker.shouldSkipDispatch(pickupPageId, nowMillis = t1938 + 150_000L))
+        val fusedOrder2 = coordinator.processCapturedEventForTest(
+            rawText = pickupText,
+            packageName = "com.tencent.mm",
+            captureSource = "AI_ACCESSIBILITY",
+            capturedAtMillis = t1938 + 150_000L,
+            verifiedActivity = appBrandAct
+        )
+        assertNotNull(fusedOrder2)
+        assertEquals(order2!!.id, fusedOrder2!!.id)
+        assertEquals("AI_FUSED", fusedOrder2.captureSource)
+        assertEquals(1_980L, fusedOrder2.amountCents)
+        assertEquals("NY20261126193818", fusedOrder2.orderKey)
+        assertEquals(4L, fusedOrder2.sourceWalletId)
+        assertTrue(fusedOrder2.note.contains("霸气茉莉初雪"))
+
+        // 停留 2 分钟后取餐状态刷新 -> 被幂等锁拦截
+        val refreshedPickupText = pickupText.replace("制作中 | 取餐码 A088", "请取餐 | 取餐码 A088")
+        assertTrue(
+            pageDedupTracker.shouldSkipDispatch(
+                PaymentAccessibilityService.extractStablePageIdentity("com.tencent.mm", refreshedPickupText),
+                nowMillis = t1938 + 270_000L
+            )
+        )
+
+        // ==================== AC-8 核心终态断言：全链路净有效支出严格仅 1 笔 ¥19.80！ ====================
+        val allAfterReplay = store.getAllTransactions()
+        val activeUnrefundedExpenses = allAfterReplay.filter {
+            it.type == TransactionType.EXPENSE && (it.amountCents - it.refundedAmountCents) > 0L
+        }
+        assertEquals("Must have ONLY 1 active unrefunded expense (~20 RMB)", 1, activeUnrefundedExpenses.size)
+        assertEquals(order2.id, activeUnrefundedExpenses.single().id)
+        assertEquals(1_980L, activeUnrefundedExpenses.single().amountCents)
+        val totalNetExpenseCents = allAfterReplay
+            .filter { it.type == TransactionType.EXPENSE }
+            .sumOf { (it.amountCents - it.refundedAmountCents).coerceAtLeast(0L) }
+        assertEquals(1_980L, totalNetExpenseCents)
+        assertEquals(initialCmbLiability + 1_980L, store.getWalletBalance(4L))
+        assertEquals(0, uiRecorder.duplicateBanners.size)
+        assertEquals(0, uiRecorder.suspectedDuplicateNotifications.size)
+
+        // ==================== 反例验证：紧接着真实再买第 2 杯同金额 ¥19.80 -> 100% 独立入账 ====================
+        val tSecondCup = buildLocalMillis(2026, Calendar.NOVEMBER, 26, 19, 45, 0, 0)
+        visitTracker.onContainerOrRejectTransition(
+            packageName = "com.tencent.mm",
+            containerRole = WindowContainerRole.DEDICATED_PAYMENT_OR_BILL,
+            verifiedActivity = "com.tencent.mm.plugin.wallet_index.ui.WalletBrandUI"
+        )
+        val v3 = visitTracker.evaluateLiveCashierFrame(
+            packageName = "com.tencent.mm",
+            rawText = cashierText1,
+            hasExplicitOrderNo = false,
+            verifiedActivity = cashierAct,
+            nowMillis = tSecondCup
+        )
+        assertTrue(v3.shouldDispatch && v3.visitId > v2.visitId)
+        val secondCupTx = coordinator.processCapturedEventForTest(
+            rawText = cashierText1,
+            packageName = "com.tencent.mm",
+            captureSource = "AI_LIVE_CASHIER",
+            capturedAtMillis = tSecondCup,
+            cashierVisitId = v3.visitId,
+            verifiedActivity = cashierAct
+        )
+        assertNotNull(secondCupTx)
+        assertFalse(secondCupTx!!.id == order2.id)
+        val finalActiveExpenses = store.getAllTransactions().filter {
+            it.type == TransactionType.EXPENSE && (it.amountCents - it.refundedAmountCents) > 0L
+        }
+        assertEquals("Buying 2nd cup back-to-back must produce 2 independent valid expenses", 2, finalActiveExpenses.size)
+    }
+
     private fun buildLocalMillis(
         year: Int,
         month: Int,
@@ -412,6 +998,8 @@ class CapturePipelineLiveCashierFusionTest {
         )
 
         val cancelledTxIds = mutableListOf<Long>()
+        val silentNotifications = mutableListOf<Long>()
+        val suspectedDuplicateNotifications = mutableListOf<Pair<Long, String>>()
         val recordedBanners = mutableListOf<RecordedBannerCall>()
         val duplicateBanners = mutableListOf<DuplicateBannerCall>()
 
@@ -419,7 +1007,9 @@ class CapturePipelineLiveCashierFusionTest {
             cancelledTxIds.add(txId)
         }
 
-        override fun sendSilentRecordedNotification(tx: TransactionEntity, wallets: List<WalletEntity>) = Unit
+        override fun sendSilentRecordedNotification(tx: TransactionEntity, wallets: List<WalletEntity>) {
+            silentNotifications.add(tx.id)
+        }
 
         override fun sendSuspectedDuplicateNotification(
             candidateId: Long,
@@ -427,7 +1017,9 @@ class CapturePipelineLiveCashierFusionTest {
             wallets: List<WalletEntity>,
             duplicateReason: String,
             matchedTransactionId: Long?
-        ) = Unit
+        ) {
+            suspectedDuplicateNotifications.add(candidateId to duplicateReason)
+        }
 
         override fun showRecordedBanner(
             statusTitle: String,
@@ -563,7 +1155,11 @@ class CapturePipelineLiveCashierFusionTest {
         )
 
         override suspend fun updateExistingTransaction(updatedTx: TransactionEntity): Boolean =
-            LedgerRepository.updateExistingTransactionOnStore(this, updatedTx)
+            LedgerRepository.updateExistingTransactionOnStore(
+                this,
+                updatedTx,
+                nowMillis = updatedTx.updatedAtMillis.takeIf { it > 0L } ?: System.currentTimeMillis()
+            )
 
         override suspend fun undoAndDeleteTransaction(id: Long): Boolean =
             LedgerRepository.undoAndDeleteTransactionOnStore(this, id).first
