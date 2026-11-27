@@ -1282,7 +1282,9 @@ fun CloudAuthAndSyncScreen(
                                             fontWeight = FontWeight.ExtraBold,
                                             color = ICostTextPrimary,
                                             maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
                                         )
                                         if (member.hasAvatar) {
                                             Surface(
@@ -1294,6 +1296,8 @@ fun CloudAuthAndSyncScreen(
                                                     fontSize = 10.sp,
                                                     fontWeight = FontWeight.Bold,
                                                     color = ICostGreenIncome,
+                                                    maxLines = 1,
+                                                    softWrap = false,
                                                     modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                                                 )
                                             }
@@ -1326,6 +1330,8 @@ fun CloudAuthAndSyncScreen(
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = ICostBlueAccent,
+                                        maxLines = 1,
+                                        softWrap = false,
                                         modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp)
                                     )
                                 }

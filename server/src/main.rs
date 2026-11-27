@@ -1243,6 +1243,10 @@ mod tests {
         .await;
         assert_eq!(st_push_a, StatusCode::OK);
         assert_eq!(push_a_res["accepted_count"], 2);
+        assert_eq!(push_a_res["next_since_seq"], 2);
+        assert_eq!(push_a_res["latest_seq"], 2);
+        assert_eq!(push_a_res["has_more"], false);
+        assert!(push_a_res.get("next_cursor").is_none());
         assert_eq!(push_a_res["items"].as_array().unwrap().len(), 2);
         assert_eq!(push_a_res["members"].as_array().unwrap().len(), 2);
 
@@ -1286,8 +1290,23 @@ mod tests {
         assert_eq!(sync_b["items"].as_array().unwrap().len(), 3);
         let cursor_b = sync_b["next_since_seq"].as_i64().unwrap();
         assert!(cursor_b >= 3);
+        assert_eq!(sync_b["latest_seq"].as_i64().unwrap(), cursor_b);
+        assert_eq!(sync_b["has_more"], false);
         assert_eq!(sync_b["items"][0]["owner_user_id"], uid_a);
         assert_eq!(sync_b["items"][2]["owner_user_id"], uid_b);
+        let members_arr = sync_b["members"].as_array().unwrap();
+        let member_a = members_arr
+            .iter()
+            .find(|m| m["user_id"] == uid_a)
+            .expect("uid_a present in family members");
+        assert!(member_a["avatar_sha256"].as_str().unwrap().len() == 64);
+        assert!(member_a["avatar_updated_at_ms"].as_i64().unwrap() > 0);
+        assert!(member_a.get("updated_at_ms").is_none());
+        let member_b = members_arr
+            .iter()
+            .find(|m| m["user_id"] == uid_b)
+            .expect("uid_b present in family members");
+        assert_eq!(member_b["display_name"], "小美");
 
         // AC-F3 越权拦截：成员 B 企图修改或删除成员 A 的 tx-a-dinner-001 必须返回 HTTP 403 forbidden_not_tx_owner
         let (st_forbid_edit, forbid_edit) = send_json(

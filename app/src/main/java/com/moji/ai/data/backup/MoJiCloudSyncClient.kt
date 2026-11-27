@@ -549,7 +549,7 @@ object MoJiCloudSyncClient {
         @SerialName("user_id") val userId: String = "",
         @SerialName("display_name") val displayName: String = "",
         @SerialName("avatar_sha256") val avatarSha256: String = "",
-        @SerialName("updated_at_ms") val updatedAtMs: Long = 0L
+        @SerialName("avatar_updated_at_ms") val updatedAtMs: Long = 0L
     )
 
     @Serializable
@@ -573,6 +573,7 @@ object MoJiCloudSyncClient {
     private data class FamilySyncReqDto(
         @SerialName("since_seq") val sinceSeq: Long = 0L,
         val limit: Int = 500,
+        @SerialName("member_label") val memberLabel: String = "",
         val mutations: List<FamilyTxMutationDto> = emptyList()
     )
 
@@ -598,7 +599,8 @@ object MoJiCloudSyncClient {
     @Serializable
     private data class FamilySyncRespDto(
         @SerialName("accepted_count") val acceptedCount: Int = 0,
-        @SerialName("next_cursor") val nextCursor: Long = 0L,
+        @SerialName("next_since_seq") val nextCursor: Long = 0L,
+        @SerialName("latest_seq") val latestSeq: Long = 0L,
         @SerialName("has_more") val hasMore: Boolean = false,
         val items: List<FamilyTxDeltaDto> = emptyList(),
         val members: List<FamilyCircleMemberDto> = emptyList()
@@ -2359,10 +2361,14 @@ object MoJiCloudSyncClient {
                 val syncUrl = baseUrl.newBuilder()
                     .addPathSegments("api/v1/family/sync")
                     .build()
+                val effectiveMemberLabel = UserProfileManager.configFlow.value.nickname.trim()
+                    .takeIf { it.isNotEmpty() && it != UserProfileManager.DEFAULT_NICKNAME }
+                    ?: authedConfig.memberLabel.trim()
                 val reqPayload = jsonCodec.encodeToString(
                     FamilySyncReqDto(
                         sinceSeq = sinceSeq,
                         limit = 500,
+                        memberLabel = effectiveMemberLabel,
                         mutations = batch
                     )
                 ).toByteArray(Charsets.UTF_8)

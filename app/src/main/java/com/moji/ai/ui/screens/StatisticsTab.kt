@@ -1107,7 +1107,9 @@ fun ICostStatisticsScreen(
                                                 ) {
                                                     Row(
                                                         verticalAlignment = Alignment.CenterVertically,
-                                                        modifier = Modifier.weight(1f, fill = false)
+                                                        modifier = Modifier
+                                                            .weight(1f, fill = false)
+                                                            .padding(end = 8.dp)
                                                     ) {
                                                         Text(
                                                             text = item.badge.displayName,
@@ -1115,7 +1117,9 @@ fun ICostStatisticsScreen(
                                                             fontWeight = FontWeight.SemiBold,
                                                             color = ICostTextPrimary,
                                                             maxLines = 1,
-                                                            overflow = TextOverflow.Ellipsis
+                                                            softWrap = false,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                            modifier = Modifier.weight(1f, fill = false)
                                                         )
                                                         if (item.badge.isSelf) {
                                                             Spacer(modifier = Modifier.width(6.dp))
@@ -1128,6 +1132,8 @@ fun ICostStatisticsScreen(
                                                                     fontSize = 10.sp,
                                                                     fontWeight = FontWeight.Medium,
                                                                     color = ICostBlueAccent,
+                                                                    maxLines = 1,
+                                                                    softWrap = false,
                                                                     modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                                                                 )
                                                             }
@@ -1136,7 +1142,9 @@ fun ICostStatisticsScreen(
                                                         Text(
                                                             text = pctStr,
                                                             fontSize = 12.sp,
-                                                            color = ICostTextSecondary
+                                                            color = ICostTextSecondary,
+                                                            maxLines = 1,
+                                                            softWrap = false
                                                         )
                                                     }
                                                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1145,13 +1153,17 @@ fun ICostStatisticsScreen(
                                                             fontFamily = ICDinFontFamily,
                                                             fontSize = 16.sp,
                                                             fontWeight = FontWeight.Bold,
-                                                            color = ICostTextPrimary
+                                                            color = ICostTextPrimary,
+                                                            maxLines = 1,
+                                                            softWrap = false
                                                         )
                                                         Spacer(modifier = Modifier.width(4.dp))
                                                         Text(
                                                             text = "${item.txCount}笔",
                                                             fontSize = 11.sp,
-                                                            color = ICostTextSecondary
+                                                            color = ICostTextSecondary,
+                                                            maxLines = 1,
+                                                            softWrap = false
                                                         )
                                                     }
                                                 }
