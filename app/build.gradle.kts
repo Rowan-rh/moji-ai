@@ -35,8 +35,8 @@ android {
         applicationId = "com.moji.ai"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.1.7"
+        versionCode = 10
+        versionName = "1.1.8"
 
         buildConfigField("Boolean", "IS_QA_BUILD", "false")
 
