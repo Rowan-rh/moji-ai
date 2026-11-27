@@ -153,4 +153,83 @@ class MoJiCloudSyncClientTest {
         )
         assertEquals(restoredSig, shaBackfilledSig)
     }
+
+    @Test
+    fun `device fingerprint is deterministic for same seed and strictly isolates prod vs qa`() {
+        val androidIdA = "9774d56d682e549c"
+        val androidIdB = "a1b2c3d4e5f60718"
+
+        val fpProd1 = MoJiCloudSyncClient.computeDeviceFingerprintFromSeed(androidIdA, appEnv = "prod")
+        val fpProd2 = MoJiCloudSyncClient.computeDeviceFingerprintFromSeed("  9774D56D682E549C ", appEnv = "prod")
+        val fpQa = MoJiCloudSyncClient.computeDeviceFingerprintFromSeed(androidIdA, appEnv = "qa")
+        val fpFamilyMemberB = MoJiCloudSyncClient.computeDeviceFingerprintFromSeed(androidIdB, appEnv = "prod")
+
+        assertEquals(64, fpProd1.length)
+        assertEquals(fpProd1, fpProd2)
+        assertNotEquals(fpProd1, fpQa)
+        assertNotEquals(fpProd1, fpFamilyMemberB)
+
+        val masked = MoJiCloudSyncClient.maskedDeviceFingerprintHint(fpProd1)
+        assertTrue(masked.startsWith("FP-****-"))
+        assertEquals(12, masked.length)
+        assertFalse(masked.contains(fpProd1.take(12), ignoreCase = true))
+    }
+
+    @Test
+    fun `device sk auth mode enforces anti-overwrite guard before initial pull and stays compatible with legacy sync key`() {
+        val url = "https://sync.family-moji.example.com"
+        val sk = "Family#SK#2026"
+        val dskSig = MoJiCloudSyncClient.computeDeviceSkTargetSignature(url, sk)
+        assertTrue(dskSig.startsWith(MoJiCloudSyncClient.DEVICE_SK_SIG_PREFIX))
+
+        // 换新机认领已有成员或同机重装刚连上（remoteRevision = 8, lastSyncedRevision = 0）：
+        // 必须识别为已绑定，但严禁后台自动推送空库冲掉云端数据
+        val claimedUnpulled = MoJiCloudConfig(
+            authMode = MoJiCloudSyncClient.AUTH_MODE_DEVICE_SK,
+            serverUrl = url,
+            serverAccessCode = sk,
+            autoSyncEnabled = true,
+            userId = "u_claimed_01",
+            accessToken = "tok_demo",
+            boundTargetSignature = dskSig,
+            lastSyncedRevision = 0L,
+            remoteRevision = 8L
+        )
+        assertTrue(claimedUnpulled.isTargetBound)
+        assertFalse(claimedUnpulled.usesLegacySyncKeyAuth)
+        assertFalse(claimedUnpulled.canAutoPushSafely)
+
+        // 拉取恢复对齐版本后，允许 6s 防抖自动同步
+        val pulledAligned = claimedUnpulled.copy(lastSyncedRevision = 8L)
+        assertTrue(pulledAligned.canAutoPushSafely)
+
+        // 修改了 SK 或断开清空会话后，立即阻断自动同步
+        val changedSkDraft = pulledAligned.copy(serverAccessCode = "Wrong#SK")
+        assertFalse(changedSkDraft.isTargetBound)
+        assertFalse(changedSkDraft.canAutoPushSafely)
+
+        val disconnected = pulledAligned.copy(
+            serverAccessCode = "",
+            userId = "",
+            accessToken = "",
+            boundTargetSignature = ""
+        )
+        assertFalse(disconnected.isTargetBound)
+        assertFalse(disconnected.canAutoPushSafely)
+
+        // 历史存量 32 位十六进制签名的旧版 Sync Key 配置无缝识别为兼容模式
+        val legacyKey = MoJiCloudSyncClient.generateSyncKey()
+        val legacySig = MoJiCloudSyncClient.computeTargetSignature(url, legacyKey)
+        val legacyUpgradedCfg = MoJiCloudConfig(
+            serverUrl = url,
+            syncKey = legacyKey,
+            userId = "u_legacy_01",
+            boundTargetSignature = legacySig,
+            lastSyncedRevision = 3L,
+            remoteRevision = 3L
+        )
+        assertTrue(legacyUpgradedCfg.usesLegacySyncKeyAuth)
+        assertTrue(legacyUpgradedCfg.isTargetBound)
+        assertTrue(legacyUpgradedCfg.canAutoPushSafely)
+    }
 }
