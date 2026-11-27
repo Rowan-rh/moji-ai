@@ -1542,6 +1542,20 @@ object MoJiCloudSyncClient {
             }
             val latestCfg = _configFlow.value
             if (!latestCfg.canAutoPushSafely) {
+                val isUnalignedDiverged = latestCfg.remoteRevision > 0L && latestCfg.lastSyncedRevision == 0L
+                if (!isUnalignedDiverged && latestCfg.isTargetBound && latestCfg.userId.isNotBlank()) {
+                    val localTxs = app.repository.getAllTransactions()
+                    if (shouldSyncFamilyPool(app, latestCfg, localTxs)) {
+                        return@withContext syncFamilyLedgerBlockingUnderLock(
+                            context = app,
+                            draftConfig = latestCfg,
+                            preloadedLocalTxs = localTxs
+                        ).map {
+                            clearPendingAutoPush(app)
+                            "family_only_synced"
+                        }
+                    }
+                }
                 return@withContext Result.success("not_eligible")
             }
             val (snapshotJson, enrichedTxs) = buildSnapshotFromApp(app)
@@ -1652,11 +1666,12 @@ object MoJiCloudSyncClient {
             saveConfig(context, updatedCfg)
             clearPendingAutoPush(context)
 
-            val finalCfgAfterFamily = if (_configFlow.value.familySyncEnabled) {
+            val latestBeforeFamily = _configFlow.value
+            val finalCfgAfterFamily = if (shouldSyncFamilyPool(context, latestBeforeFamily, localTransactions)) {
                 runCatching {
                     syncFamilyLedgerBlockingUnderLock(
                         context = context,
-                        draftConfig = _configFlow.value,
+                        draftConfig = latestBeforeFamily,
                         preloadedLocalTxs = localTransactions
                     ).getOrNull()?.updatedConfig
                 }.getOrNull() ?: _configFlow.value
@@ -2239,6 +2254,19 @@ object MoJiCloudSyncClient {
             append(tx.timestamp)
         }
         return sha256Hex(raw.toByteArray(Charsets.UTF_8)).take(20)
+    }
+
+    internal fun shouldSyncFamilyPool(
+        context: Context,
+        cfg: MoJiCloudConfig,
+        localTxs: List<TransactionEntity>
+    ): Boolean {
+        if (!cfg.isTargetBound || cfg.userId.isBlank()) return false
+        if (cfg.familySyncEnabled) return true
+        if (localTxs.any { it.deletedAtMillis == null && it.syncToFamily && it.isEligibleForFamilySync() }) {
+            return true
+        }
+        return loadPushedFamilyDigests(context, cfg.currentTargetSignature, cfg.userId).isNotEmpty()
     }
 
     /**

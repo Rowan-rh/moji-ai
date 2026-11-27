@@ -2151,6 +2151,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (enabled) "已加入家庭账本共享（后台自动同步）"
                     else "已设为仅个人私密（将从家庭账本撤回）"
                 )
+                if (MoJiCloudSyncClient.configFlow.value.isTargetBound) {
+                    MoJiCloudSyncClient.syncFamilyLedgerNow(app)
+                }
             }
         }
     }
