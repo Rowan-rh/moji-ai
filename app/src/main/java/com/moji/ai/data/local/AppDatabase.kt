@@ -226,6 +226,41 @@ interface TransactionDao {
 
     @Query("SELECT tags FROM transactions WHERE deletedAtMillis IS NULL AND tags != ''")
     suspend fun getAllNonEmptyTagStrings(): List<String>
+
+    @Query(
+        """
+        UPDATE transactions
+        SET syncToFamily = :syncToFamily,
+            updatedAtMillis = :nowMillis,
+            syncRevision = syncRevision + 1,
+            syncDirty = 1
+        WHERE id = :id
+          AND deletedAtMillis IS NULL
+        """
+    )
+    suspend fun updateTransactionSyncToFamilyById(
+        id: Long,
+        syncToFamily: Boolean,
+        nowMillis: Long
+    ): Int
+}
+
+@Dao
+interface FamilySharedTransactionDao {
+    @Query("SELECT * FROM family_shared_transactions WHERE deletedAtMillis IS NULL ORDER BY timestamp DESC, seq DESC")
+    fun observeActiveSharedTransactions(): Flow<List<FamilySharedTransactionEntity>>
+
+    @Query("SELECT * FROM family_shared_transactions ORDER BY timestamp DESC, seq DESC")
+    suspend fun getAllSharedTransactions(): List<FamilySharedTransactionEntity>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsertAll(items: List<FamilySharedTransactionEntity>)
+
+    @Query("DELETE FROM family_shared_transactions WHERE ownerUserId = :ownerUserId")
+    suspend fun deleteByOwnerUserId(ownerUserId: String)
+
+    @Query("DELETE FROM family_shared_transactions")
+    suspend fun deleteAll()
 }
 
 @Dao
@@ -290,9 +325,10 @@ interface RecurringRuleDao {
         WalletEntity::class,
         TransactionEntity::class,
         CaptureEvidenceEntity::class,
-        RecurringRuleEntity::class
+        RecurringRuleEntity::class,
+        FamilySharedTransactionEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 @TypeConverters(LedgerTypeConverters::class)
@@ -301,6 +337,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun transactionDao(): TransactionDao
     abstract fun captureEvidenceDao(): CaptureEvidenceDao
     abstract fun recurringRuleDao(): RecurringRuleDao
+    abstract fun familySharedTransactionDao(): FamilySharedTransactionDao
 
     companion object {
         @Volatile
@@ -384,6 +421,36 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_6_7 = object : Migration(6, 7) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE transactions ADD COLUMN syncToFamily INTEGER NOT NULL DEFAULT 0")
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS family_shared_transactions (
+                        txUuid TEXT NOT NULL PRIMARY KEY,
+                        seq INTEGER NOT NULL,
+                        ownerUserId TEXT NOT NULL,
+                        type TEXT NOT NULL,
+                        currency TEXT NOT NULL,
+                        amountCents INTEGER NOT NULL,
+                        amountCnyCents INTEGER NOT NULL,
+                        refundedAmountCents INTEGER NOT NULL,
+                        category TEXT NOT NULL,
+                        merchant TEXT NOT NULL,
+                        note TEXT NOT NULL,
+                        tags TEXT NOT NULL,
+                        timestamp INTEGER NOT NULL,
+                        updatedAtMillis INTEGER NOT NULL,
+                        deletedAtMillis INTEGER
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_family_shared_transactions_timestamp ON family_shared_transactions(timestamp)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_family_shared_transactions_ownerUserId ON family_shared_transactions(ownerUserId)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_family_shared_transactions_seq ON family_shared_transactions(seq)")
+            }
+        }
+
         private const val SEED_PREFS_NAME = "moji_db_seed_prefs"
         private const val KEY_INITIAL_WALLETS_SEEDED = "initial_wallets_seeded_v1"
 
@@ -420,7 +487,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "moji_ai.db"
                 )
-                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
                     .addCallback(object : Callback() {
                         override fun onCreate(db: SupportSQLiteDatabase) {
                             super.onCreate(db)

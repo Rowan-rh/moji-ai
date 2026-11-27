@@ -6,6 +6,8 @@ import android.provider.Settings
 import com.moji.ai.BuildConfig
 import com.moji.ai.MoJiApp
 import com.moji.ai.ai.CaptureAppWhitelistManager
+import com.moji.ai.data.local.AppDatabase
+import com.moji.ai.data.local.FamilySharedTransactionEntity
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
@@ -15,6 +17,7 @@ import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.ReminderConfigManager
 import com.moji.ai.data.model.TagCatalog
+import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.UserProfileManager
 import com.moji.ai.service.BillScreenshotStorage
 import com.moji.ai.ui.InstallmentPlanItem
@@ -70,7 +73,11 @@ data class MoJiCloudConfig(
     val remoteUpdatedBy: String = "",
     val remoteUpdatedAtMillis: Long = 0L,
     val remoteAvatarSha256: String = "",
-    val lastSyncedAvatarSha256: String = ""
+    val lastSyncedAvatarSha256: String = "",
+    val familySyncEnabled: Boolean = false,
+    val familySyncCursor: Long = 0L,
+    val lastFamilySyncAtMillis: Long = 0L,
+    val familyMembers: List<MoJiCloudSyncClient.FamilyCircleMemberDto> = emptyList()
 ) {
     /**
      * 判断当前绑定态是否使用旧版 `Sync Key` 模式：
@@ -113,6 +120,9 @@ data class MoJiCloudConfig(
         get() = autoSyncEnabled &&
             isTargetBound &&
             (remoteRevision == 0L || lastSyncedRevision == remoteRevision)
+
+    val isFamilySyncActive: Boolean
+        get() = familySyncEnabled && isTargetBound && userId.isNotBlank()
 }
 
 class CloudSyncConflictException(
@@ -180,6 +190,15 @@ object MoJiCloudSyncClient {
 
     fun init(context: Context) {
         _configFlow.value = loadConfig(context)
+    }
+
+    fun isFamilyAutoShareActive(): Boolean = _configFlow.value.isFamilySyncActive
+
+    fun setFamilySyncEnabled(context: Context, enabled: Boolean): MoJiCloudConfig {
+        val current = _configFlow.value
+        val updated = current.copy(familySyncEnabled = enabled)
+        saveConfig(context, updated)
+        return updated
     }
 
     fun beginRestoreSuppression() {
@@ -331,7 +350,23 @@ object MoJiCloudSyncClient {
         }
         return pulledConfig.copy(
             autoSyncEnabled = latest.autoSyncEnabled,
-            memberLabel = resolvedMemberLabel
+            memberLabel = resolvedMemberLabel,
+            familySyncEnabled = latest.familySyncEnabled,
+            familySyncCursor = if (latest.userId == pulledConfig.userId) {
+                maxOf(latest.familySyncCursor, pulledConfig.familySyncCursor)
+            } else {
+                0L
+            },
+            lastFamilySyncAtMillis = if (latest.userId == pulledConfig.userId) {
+                maxOf(latest.lastFamilySyncAtMillis, pulledConfig.lastFamilySyncAtMillis)
+            } else {
+                0L
+            },
+            familyMembers = if (latest.userId == pulledConfig.userId && pulledConfig.familyMembers.isEmpty()) {
+                latest.familyMembers
+            } else {
+                pulledConfig.familyMembers
+            }
         )
     }
 
@@ -507,6 +542,74 @@ object MoJiCloudSyncClient {
         val error: String = "",
         val message: String = "",
         @SerialName("account_summary") val accountSummary: AccountSummaryDto? = null
+    )
+
+    @Serializable
+    data class FamilyCircleMemberDto(
+        @SerialName("user_id") val userId: String = "",
+        @SerialName("display_name") val displayName: String = "",
+        @SerialName("avatar_sha256") val avatarSha256: String = "",
+        @SerialName("updated_at_ms") val updatedAtMs: Long = 0L
+    )
+
+    @Serializable
+    private data class FamilyTxMutationDto(
+        @SerialName("tx_uuid") val txUuid: String,
+        @SerialName("tx_type") val txType: String = "EXPENSE",
+        val currency: String = "CNY",
+        @SerialName("amount_cents") val amountCents: Long = 0L,
+        @SerialName("amount_cny_cents") val amountCnyCents: Long = 0L,
+        @SerialName("refunded_amount_cents") val refundedAmountCents: Long = 0L,
+        val category: String = "",
+        val merchant: String = "",
+        val note: String = "",
+        val tags: String = "",
+        @SerialName("occurred_at_ms") val occurredAtMs: Long = 0L,
+        @SerialName("updated_at_ms") val updatedAtMs: Long = 0L,
+        @SerialName("deleted_at_ms") val deletedAtMs: Long? = null
+    )
+
+    @Serializable
+    private data class FamilySyncReqDto(
+        @SerialName("since_seq") val sinceSeq: Long = 0L,
+        val limit: Int = 500,
+        val mutations: List<FamilyTxMutationDto> = emptyList()
+    )
+
+    @Serializable
+    private data class FamilyTxDeltaDto(
+        val seq: Long = 0L,
+        @SerialName("tx_uuid") val txUuid: String = "",
+        @SerialName("owner_user_id") val ownerUserId: String = "",
+        @SerialName("tx_type") val txType: String = "EXPENSE",
+        val currency: String = "CNY",
+        @SerialName("amount_cents") val amountCents: Long = 0L,
+        @SerialName("amount_cny_cents") val amountCnyCents: Long = 0L,
+        @SerialName("refunded_amount_cents") val refundedAmountCents: Long = 0L,
+        val category: String = "",
+        val merchant: String = "",
+        val note: String = "",
+        val tags: String = "",
+        @SerialName("occurred_at_ms") val occurredAtMs: Long = 0L,
+        @SerialName("updated_at_ms") val updatedAtMs: Long = 0L,
+        @SerialName("deleted_at_ms") val deletedAtMs: Long? = null
+    )
+
+    @Serializable
+    private data class FamilySyncRespDto(
+        @SerialName("accepted_count") val acceptedCount: Int = 0,
+        @SerialName("next_cursor") val nextCursor: Long = 0L,
+        @SerialName("has_more") val hasMore: Boolean = false,
+        val items: List<FamilyTxDeltaDto> = emptyList(),
+        val members: List<FamilyCircleMemberDto> = emptyList()
+    )
+
+    data class FamilySyncOutcome(
+        val pushedUpsertCount: Int,
+        val pushedTombstoneCount: Int,
+        val pulledItemCount: Int,
+        val nextCursor: Long,
+        val updatedConfig: MoJiCloudConfig
     )
 
     fun generateSyncKey(): String {
@@ -986,9 +1089,14 @@ object MoJiCloudSyncClient {
                 remoteUpdatedBy = "",
                 remoteUpdatedAtMillis = 0L,
                 remoteAvatarSha256 = "",
-                lastSyncedAvatarSha256 = ""
+                lastSyncedAvatarSha256 = "",
+                familySyncEnabled = false,
+                familySyncCursor = 0L,
+                lastFamilySyncAtMillis = 0L,
+                familyMembers = emptyList()
             )
             saveConfig(context, disconnected)
+            clearFamilyMirrorAndAvatarCache(context)
             disconnected
         }
     }
@@ -1011,7 +1119,11 @@ object MoJiCloudSyncClient {
             lastSyncedRevision = mergedLastRev,
             remoteRevision = maxOf(draft.remoteRevision, latest.remoteRevision),
             remoteAvatarSha256 = latest.remoteAvatarSha256.ifBlank { draft.remoteAvatarSha256 },
-            lastSyncedAvatarSha256 = latest.lastSyncedAvatarSha256.ifBlank { draft.lastSyncedAvatarSha256 }
+            lastSyncedAvatarSha256 = latest.lastSyncedAvatarSha256.ifBlank { draft.lastSyncedAvatarSha256 },
+            familySyncEnabled = latest.familySyncEnabled,
+            familySyncCursor = maxOf(draft.familySyncCursor, latest.familySyncCursor),
+            lastFamilySyncAtMillis = maxOf(draft.lastFamilySyncAtMillis, latest.lastFamilySyncAtMillis),
+            familyMembers = latest.familyMembers.ifEmpty { draft.familyMembers }
         )
     }
 
@@ -1212,6 +1324,8 @@ object MoJiCloudSyncClient {
             clearPendingAutoPush(context)
         }
 
+        val sameBoundScope = latestStored.userId == boundUserId && latestStored.boundTargetSignature == targetSig
+        val switchedBoundScope = latestStored.boundTargetSignature.isNotBlank() && !sameBoundScope
         val updatedCfg = draftConfig.copy(
             serverUrl = cleanUrl,
             serverAccessCode = cleanSk,
@@ -1230,9 +1344,16 @@ object MoJiCloudSyncClient {
             remoteUpdatedBy = updatedByLabel,
             remoteUpdatedAtMillis = summary.updatedAtMs,
             remoteAvatarSha256 = remoteAvatarSha,
-            lastSyncedAvatarSha256 = prevSyncedAvatarSha
+            lastSyncedAvatarSha256 = prevSyncedAvatarSha,
+            familySyncEnabled = if (sameBoundScope) latestStored.familySyncEnabled else draftConfig.familySyncEnabled,
+            familySyncCursor = if (sameBoundScope) latestStored.familySyncCursor else 0L,
+            lastFamilySyncAtMillis = if (sameBoundScope) latestStored.lastFamilySyncAtMillis else 0L,
+            familyMembers = if (sameBoundScope) latestStored.familyMembers else emptyList()
         )
         if (persistImmediately) {
+            if (switchedBoundScope) {
+                clearFamilyMirrorAndAvatarCacheBlocking(context)
+            }
             saveConfig(context, updatedCfg)
             if (serverDisplayName.isNotEmpty() &&
                 UserProfileManager.currentConfig.nickname == UserProfileManager.DEFAULT_NICKNAME
@@ -1343,6 +1464,8 @@ object MoJiCloudSyncClient {
                     else -> 0L
                 }
                 val updatedByLabel = summary.updatedByMember.ifBlank { summary.updatedByDevice }
+                val sameKeyScope = latestStored.userId == loginResp.userId && latestStored.boundTargetSignature == targetSig
+                val switchedKeyScope = latestStored.boundTargetSignature.isNotBlank() && !sameKeyScope
                 val updatedCfg = draftConfig.copy(
                     serverUrl = baseUrl.toString().trimEnd('/'),
                     syncKey = normalizedKey,
@@ -1359,9 +1482,16 @@ object MoJiCloudSyncClient {
                     remoteScreenshotCount = summary.screenshotCount,
                     remoteUpdatedBy = updatedByLabel,
                     remoteUpdatedAtMillis = summary.updatedAtMs,
-                    remoteAvatarSha256 = summary.avatarSha256
+                    remoteAvatarSha256 = summary.avatarSha256,
+                    familySyncEnabled = if (sameKeyScope) latestStored.familySyncEnabled else draftConfig.familySyncEnabled,
+                    familySyncCursor = if (sameKeyScope) latestStored.familySyncCursor else 0L,
+                    lastFamilySyncAtMillis = if (sameKeyScope) latestStored.lastFamilySyncAtMillis else 0L,
+                    familyMembers = if (sameKeyScope) latestStored.familyMembers else emptyList()
                 )
                 if (persistImmediately) {
+                    if (switchedKeyScope) {
+                        clearFamilyMirrorAndAvatarCacheBlocking(context)
+                    }
                     saveConfig(context, updatedCfg)
                 }
 
@@ -1520,10 +1650,22 @@ object MoJiCloudSyncClient {
             saveConfig(context, updatedCfg)
             clearPendingAutoPush(context)
 
+            val finalCfgAfterFamily = if (_configFlow.value.familySyncEnabled) {
+                runCatching {
+                    syncFamilyLedgerBlockingUnderLock(
+                        context = context,
+                        draftConfig = _configFlow.value,
+                        preloadedLocalTxs = localTransactions
+                    ).getOrNull()?.updatedConfig
+                }.getOrNull() ?: _configFlow.value
+            } else {
+                updatedCfg
+            }
+
             val kbStr = String.format(Locale.US, "%.1f", backupJson.toByteArray(Charsets.UTF_8).size / 1024.0)
             val ssNote = if (uploadedScreenshotCount > 0) "，新增上传 $uploadedScreenshotCount 张账单原图" else ""
             Result.success(
-                updatedCfg to "✅ 云端同步成功：v${finalSummary.latestRevision}（${finalSummary.txCount} 笔账单 · $kbStr KB$ssNote）"
+                finalCfgAfterFamily to "✅ 云端同步成功：v${finalSummary.latestRevision}（${finalSummary.txCount} 笔账单 · $kbStr KB$ssNote）"
             )
         } catch (e: CancellationException) {
             throw e
@@ -2002,6 +2144,439 @@ object MoJiCloudSyncClient {
                 }
             }
         }.getOrNull()
+    }
+
+    // =========================================================================
+    // 🏠 家庭共享账本增量同步与成员头像缓存引擎（AC-F1 ~ AC-F4）
+    // =========================================================================
+
+    private const val MAX_FAMILY_MUTATIONS_BATCH = 400
+    private const val MAX_FAMILY_PULL_PAGES = 20
+    private const val FAMILY_AVATAR_DIR_NAME = "family_avatars"
+
+    private fun familyAvatarDir(context: Context): File =
+        File(context.applicationContext.filesDir, FAMILY_AVATAR_DIR_NAME)
+
+    private fun sanitizeFileToken(raw: String): String =
+        raw.trim().replace(Regex("[^A-Za-z0-9_-]"), "_").take(48).ifEmpty { "member" }
+
+    fun resolveCachedFamilyMemberAvatarPath(
+        context: Context,
+        userId: String,
+        avatarSha256: String
+    ): String? {
+        val cleanUid = userId.trim()
+        val cleanSha = avatarSha256.trim().lowercase(Locale.US)
+        if (cleanUid.isEmpty() || cleanSha.length != 64) return null
+        val file = File(familyAvatarDir(context), "${sanitizeFileToken(cleanUid)}_${cleanSha.take(16)}.webp")
+        return if (file.isFile && file.length() > 12L) file.absolutePath else null
+    }
+
+    private suspend fun clearFamilyMirrorAndAvatarCache(context: Context) {
+        runCatching {
+            val app = context.applicationContext as? MoJiApp
+            if (app != null) {
+                app.repository.clearAllFamilySharedTransactions()
+            } else {
+                AppDatabase.getInstance(context).familySharedTransactionDao().deleteAll()
+            }
+        }
+        runCatching {
+            familyAvatarDir(context).deleteRecursively()
+        }
+    }
+
+    private fun clearFamilyMirrorAndAvatarCacheBlocking(context: Context) {
+        kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+            clearFamilyMirrorAndAvatarCache(context)
+        }
+    }
+
+    private fun familyPushedDigestsKey(targetSignature: String, userId: String): String {
+        val hash = sha256Hex("family_digests:$targetSignature:$userId".toByteArray(Charsets.UTF_8)).take(24)
+        return "family_pushed_digests_$hash"
+    }
+
+    private fun loadPushedFamilyDigests(
+        context: Context,
+        targetSignature: String,
+        userId: String
+    ): Map<String, String> {
+        if (targetSignature.isBlank() || userId.isBlank()) return emptyMap()
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val raw = prefs.getString(familyPushedDigestsKey(targetSignature, userId), null) ?: return emptyMap()
+        return runCatching {
+            jsonCodec.decodeFromString<Map<String, String>>(raw)
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun savePushedFamilyDigests(
+        context: Context,
+        targetSignature: String,
+        userId: String,
+        digests: Map<String, String>
+    ) {
+        if (targetSignature.isBlank() || userId.isBlank()) return
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit()
+            .putString(familyPushedDigestsKey(targetSignature, userId), jsonCodec.encodeToString(digests))
+            .apply()
+    }
+
+    private fun computeFamilyRowDigest(tx: TransactionEntity): String {
+        val raw = buildString(128) {
+            append(tx.type.name).append('|')
+            append(tx.currency).append('|')
+            append(tx.amountCents).append('|')
+            append(tx.amountCnyCents).append('|')
+            append(tx.refundedAmountCents).append('|')
+            append(tx.category).append('|')
+            append(tx.merchant).append('|')
+            append(tx.note).append('|')
+            append(tx.tags).append('|')
+            append(tx.timestamp)
+        }
+        return sha256Hex(raw.toByteArray(Charsets.UTF_8)).take(20)
+    }
+
+    /**
+     * 立即执行一次轻量化家庭账本双向增量同步（上推本人已勾选家庭同步的新增/修改/退款/墓碑，下拉其他家庭成员增量与头像）。
+     */
+    suspend fun syncFamilyLedgerNow(
+        context: Context,
+        draftConfig: MoJiCloudConfig = _configFlow.value
+    ): Result<FamilySyncOutcome> = withContext(Dispatchers.IO) {
+        syncMutex.withLock {
+            syncFamilyLedgerBlockingUnderLock(
+                context = context,
+                draftConfig = draftConfig,
+                preloadedLocalTxs = null
+            )
+        }
+    }
+
+    private fun syncFamilyLedgerBlockingUnderLock(
+        context: Context,
+        draftConfig: MoJiCloudConfig,
+        preloadedLocalTxs: List<TransactionEntity>?
+    ): Result<FamilySyncOutcome> {
+        var authedConfig = ensureValidSessionInternal(context, draftConfig, persistImmediately = true)
+            .getOrElse { return Result.failure(it) }
+        val baseUrl = validateBaseUrl(authedConfig.serverUrl)
+            .getOrElse { return Result.failure(it) }
+        if (authedConfig.userId.isBlank()) {
+            return Result.failure(IllegalStateException("尚未绑定云端成员身份"))
+        }
+
+        val app = context.applicationContext as? MoJiApp
+        val localTxs: List<TransactionEntity> = preloadedLocalTxs ?: kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+            if (app != null) {
+                app.repository.getAllTransactions()
+            } else {
+                AppDatabase.getInstance(context).transactionDao().getAllTransactions()
+            }
+        }
+
+        val targetSig = authedConfig.currentTargetSignature
+        val prevPushedDigests = loadPushedFamilyDigests(context, targetSig, authedConfig.userId)
+        val nowMs = System.currentTimeMillis()
+
+        val eligibleActiveMap = LinkedHashMap<String, TransactionEntity>()
+        val currentDigests = LinkedHashMap<String, String>()
+        for (tx in localTxs) {
+            if (tx.deletedAtMillis != null) continue
+            if (!tx.syncToFamily || !tx.isEligibleForFamilySync()) continue
+            val uuid = tx.syncUuid.trim()
+            if (uuid.length < 8) continue
+            eligibleActiveMap[uuid] = tx
+            currentDigests[uuid] = computeFamilyRowDigest(tx)
+        }
+
+        val upsertMutations = ArrayList<FamilyTxMutationDto>()
+        for ((uuid, tx) in eligibleActiveMap) {
+            val newDigest = currentDigests[uuid]
+            if (prevPushedDigests[uuid] != newDigest) {
+                upsertMutations.add(
+                    FamilyTxMutationDto(
+                        txUuid = uuid,
+                        txType = tx.type.name,
+                        currency = tx.currency.ifBlank { "CNY" },
+                        amountCents = tx.amountCents.coerceAtLeast(0L),
+                        amountCnyCents = tx.amountCnyCents.coerceAtLeast(0L),
+                        refundedAmountCents = tx.refundedAmountCents.coerceIn(0L, tx.amountCnyCents.coerceAtLeast(0L)),
+                        category = tx.category.take(64),
+                        merchant = tx.merchant.take(120),
+                        note = tx.note.take(240),
+                        tags = tx.tags.take(160),
+                        occurredAtMs = tx.timestamp,
+                        updatedAtMs = maxOf(tx.updatedAtMillis, nowMs),
+                        deletedAtMs = null
+                    )
+                )
+            }
+        }
+
+        val tombstoneMutations = ArrayList<FamilyTxMutationDto>()
+        for (oldUuid in prevPushedDigests.keys) {
+            if (!eligibleActiveMap.containsKey(oldUuid)) {
+                tombstoneMutations.add(
+                    FamilyTxMutationDto(
+                        txUuid = oldUuid,
+                        txType = "EXPENSE",
+                        currency = "CNY",
+                        amountCents = 0L,
+                        amountCnyCents = 0L,
+                        refundedAmountCents = 0L,
+                        category = "",
+                        merchant = "",
+                        note = "",
+                        tags = "",
+                        occurredAtMs = nowMs,
+                        updatedAtMs = nowMs,
+                        deletedAtMs = nowMs
+                    )
+                )
+            }
+        }
+
+        val allMutations = upsertMutations + tombstoneMutations
+        val mutationBatches: List<List<FamilyTxMutationDto>> = if (allMutations.isEmpty()) {
+            listOf(emptyList())
+        } else {
+            allMutations.chunked(MAX_FAMILY_MUTATIONS_BATCH)
+        }
+
+        return try {
+            var cursor = authedConfig.familySyncCursor.coerceAtLeast(0L)
+            var latestMembers: List<FamilyCircleMemberDto> = authedConfig.familyMembers
+            val pulledEntities = ArrayList<FamilySharedTransactionEntity>()
+            var refreshedOnce = false
+
+            fun postSyncOnce(
+                sinceSeq: Long,
+                batch: List<FamilyTxMutationDto>
+            ): Result<FamilySyncRespDto> {
+                val syncUrl = baseUrl.newBuilder()
+                    .addPathSegments("api/v1/family/sync")
+                    .build()
+                val reqPayload = jsonCodec.encodeToString(
+                    FamilySyncReqDto(
+                        sinceSeq = sinceSeq,
+                        limit = 500,
+                        mutations = batch
+                    )
+                ).toByteArray(Charsets.UTF_8)
+                val req = Request.Builder()
+                    .url(syncUrl)
+                    .header("Authorization", "Bearer ${authedConfig.accessToken}")
+                    .post(reqPayload.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    val txt = readCappedUtf8(resp.body?.byteStream(), 8 * 1024 * 1024)
+                    if (resp.code == 401) {
+                        return Result.failure(CloudUnauthorizedException("同步家庭账本时凭证已过期"))
+                    }
+                    if (!resp.isSuccessful) {
+                        val errDto = runCatching { jsonCodec.decodeFromString<ErrorRespDto>(txt) }.getOrNull()
+                        val msg = errDto?.message?.takeIf { it.isNotBlank() }
+                            ?: "家庭账本同步失败（HTTP ${resp.code}）"
+                        return Result.failure(IllegalStateException(msg))
+                    }
+                    return Result.success(jsonCodec.decodeFromString<FamilySyncRespDto>(txt))
+                }
+            }
+
+            fun executeWithTokenRefresh(
+                sinceSeq: Long,
+                batch: List<FamilyTxMutationDto>
+            ): Result<FamilySyncRespDto> {
+                val first = postSyncOnce(sinceSeq, batch)
+                if (first.isFailure && first.exceptionOrNull() is CloudUnauthorizedException && !refreshedOnce) {
+                    refreshedOnce = true
+                    authedConfig = refreshSessionTokenInternal(context, authedConfig, persistImmediately = true)
+                        .getOrElse { return Result.failure(it) }
+                    return postSyncOnce(sinceSeq, batch)
+                }
+                return first
+            }
+
+            var hasMoreFromServer = false
+            for (batch in mutationBatches) {
+                val resp = executeWithTokenRefresh(cursor, batch)
+                    .getOrElse { return Result.failure(it) }
+                cursor = maxOf(cursor, resp.nextCursor)
+                hasMoreFromServer = resp.hasMore
+                if (resp.members.isNotEmpty()) {
+                    latestMembers = resp.members
+                }
+                collectRemoteSharedDeltaItems(resp.items, authedConfig.userId, pulledEntities)
+            }
+
+            var extraPageCount = 0
+            while (hasMoreFromServer && extraPageCount < MAX_FAMILY_PULL_PAGES) {
+                extraPageCount++
+                val prevCursor = cursor
+                val resp = executeWithTokenRefresh(cursor, emptyList())
+                    .getOrElse { return Result.failure(it) }
+                cursor = maxOf(cursor, resp.nextCursor)
+                hasMoreFromServer = resp.hasMore && cursor > prevCursor
+                if (resp.members.isNotEmpty()) {
+                    latestMembers = resp.members
+                }
+                collectRemoteSharedDeltaItems(resp.items, authedConfig.userId, pulledEntities)
+            }
+
+            // 所有批次成功上云后原子更新本地已推摘要账本
+            savePushedFamilyDigests(context, targetSig, authedConfig.userId, currentDigests)
+
+            // 物理隔离：确保本人账单绝不驻留镜像表，仅写入其他成员记录（含墓碑）
+            kotlinx.coroutines.runBlocking(Dispatchers.IO) {
+                if (app != null) {
+                    app.repository.deleteFamilySharedTransactionsByOwner(authedConfig.userId)
+                    if (pulledEntities.isNotEmpty()) {
+                        app.repository.upsertFamilySharedTransactions(pulledEntities)
+                    }
+                } else {
+                    val dao = AppDatabase.getInstance(context).familySharedTransactionDao()
+                    dao.deleteByOwnerUserId(authedConfig.userId)
+                    if (pulledEntities.isNotEmpty()) {
+                        dao.upsertAll(pulledEntities)
+                    }
+                }
+            }
+
+            // 增量缓存其他家庭成员的自定义 WebP 头像
+            syncFamilyMemberAvatarsInternal(
+                context = context,
+                baseUrl = baseUrl,
+                accessToken = authedConfig.accessToken,
+                selfUserId = authedConfig.userId,
+                members = latestMembers
+            )
+
+            val latestStored = _configFlow.value
+            val preservedEnabled = if (latestStored.currentTargetSignature == authedConfig.currentTargetSignature) {
+                latestStored.familySyncEnabled
+            } else {
+                authedConfig.familySyncEnabled
+            }
+            val updatedCfg = authedConfig.copy(
+                autoSyncEnabled = if (latestStored.currentTargetSignature == authedConfig.currentTargetSignature) {
+                    latestStored.autoSyncEnabled
+                } else {
+                    authedConfig.autoSyncEnabled
+                },
+                familySyncEnabled = preservedEnabled,
+                familySyncCursor = cursor,
+                lastFamilySyncAtMillis = System.currentTimeMillis(),
+                familyMembers = latestMembers
+            )
+            saveConfig(context, updatedCfg)
+
+            Result.success(
+                FamilySyncOutcome(
+                    pushedUpsertCount = upsertMutations.size,
+                    pushedTombstoneCount = tombstoneMutations.size,
+                    pulledItemCount = pulledEntities.size,
+                    nextCursor = cursor,
+                    updatedConfig = updatedCfg
+                )
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(IllegalStateException("家庭账本同步失败：${e.message ?: e.javaClass.simpleName}", e))
+        }
+    }
+
+    private fun collectRemoteSharedDeltaItems(
+        items: List<FamilyTxDeltaDto>,
+        selfUserId: String,
+        out: MutableList<FamilySharedTransactionEntity>
+    ) {
+        for (item in items) {
+            if (item.txUuid.isBlank() || item.ownerUserId.isBlank()) continue
+            if (item.ownerUserId == selfUserId) continue
+            val txType = when (item.txType.trim().uppercase(Locale.US)) {
+                "EXPENSE" -> TransactionType.EXPENSE
+                "INCOME" -> TransactionType.INCOME
+                else -> continue
+            }
+            out.add(
+                FamilySharedTransactionEntity(
+                    txUuid = item.txUuid,
+                    seq = item.seq,
+                    ownerUserId = item.ownerUserId,
+                    type = txType,
+                    currency = item.currency.ifBlank { "CNY" },
+                    amountCents = item.amountCents.coerceAtLeast(0L),
+                    amountCnyCents = item.amountCnyCents.coerceAtLeast(0L),
+                    refundedAmountCents = item.refundedAmountCents.coerceAtLeast(0L),
+                    category = item.category.ifBlank { if (txType == TransactionType.INCOME) "其他收入" else "其他" },
+                    merchant = item.merchant,
+                    note = item.note,
+                    tags = item.tags,
+                    timestamp = item.occurredAtMs,
+                    updatedAtMillis = item.updatedAtMs,
+                    deletedAtMillis = item.deletedAtMs
+                )
+            )
+        }
+    }
+
+    private fun syncFamilyMemberAvatarsInternal(
+        context: Context,
+        baseUrl: HttpUrl,
+        accessToken: String,
+        selfUserId: String,
+        members: List<FamilyCircleMemberDto>
+    ) {
+        val dir = familyAvatarDir(context)
+        for (member in members) {
+            val uid = member.userId.trim()
+            if (uid.isEmpty() || uid == selfUserId) continue
+            val safePrefix = "${sanitizeFileToken(uid)}_"
+            val sha = member.avatarSha256.trim().lowercase(Locale.US)
+            if (sha.length != 64 || !sha.all { it in '0'..'9' || it in 'a'..'f' }) {
+                dir.listFiles()?.filter { it.name.startsWith(safePrefix) }?.forEach {
+                    runCatching { it.delete() }
+                }
+                continue
+            }
+            val expectedName = "${safePrefix}${sha.take(16)}.webp"
+            val targetFile = File(dir, expectedName)
+            if (targetFile.isFile && targetFile.length() > 12L) {
+                continue
+            }
+            runCatching {
+                val url = baseUrl.newBuilder()
+                    .addPathSegments("api/v1/family/avatar")
+                    .addPathSegment(uid)
+                    .build()
+                val req = Request.Builder()
+                    .url(url)
+                    .header("Authorization", "Bearer $accessToken")
+                    .get()
+                    .build()
+                httpClient.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        val bytes = readCappedBytes(resp.body?.byteStream(), MAX_AVATAR_BYTES)
+                        if (UserProfileManager.isValidWebpAvatarBytes(bytes) && sha256Hex(bytes) == sha) {
+                            if (!dir.exists()) dir.mkdirs()
+                            val tmpFile = File(dir, "$expectedName.tmp")
+                            tmpFile.writeBytes(bytes)
+                            if (!tmpFile.renameTo(targetFile)) {
+                                targetFile.writeBytes(bytes)
+                                tmpFile.delete()
+                            }
+                            dir.listFiles()?.filter {
+                                it.name.startsWith(safePrefix) && it.name != expectedName
+                            }?.forEach { old -> runCatching { old.delete() } }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private fun readCappedBytes(stream: java.io.InputStream?, maxBytes: Int): ByteArray {

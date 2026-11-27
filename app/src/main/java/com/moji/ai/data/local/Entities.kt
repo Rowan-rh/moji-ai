@@ -4,6 +4,7 @@ import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.moji.ai.data.model.CategoryCatalog
+import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.RecurrenceFrequency
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.WalletType
@@ -128,10 +129,24 @@ data class TransactionEntity(
     /** 目标/收款/报销入账钱包历史实际变动快照（目标钱包原币种分值，null 表示 v5 及更早旧数据） */
     val targetWalletDeltaCents: Long? = null,
     /** 已报销核销入账时间戳（毫秒，用于净资产趋势将报销回流归入真实核销时间桶） */
-    val reimbursedAtMillis: Long? = null
+    val reimbursedAtMillis: Long? = null,
+    /** 是否同步共享至家庭账本（仅日常 EXPENSE / INCOME 出入账允许共享；默认 false 保守隔离） */
+    val syncToFamily: Boolean = false
 ) {
     fun isSystemBalanceAnchor(): Boolean =
         captureSource == "BALANCE_ANCHOR" || category == CategoryCatalog.SYSTEM_BALANCE_ANCHOR_CATEGORY
+
+    /**
+     * 判断当前账单是否满足进入「家庭账本」的日常出入账条件（AC-F2）：
+     * 仅限日常 `EXPENSE` / `INCOME`，自动排除转账、还款、借入/借出、退款冲抵子单、平账流水、
+     * 医保个账组合拆单子单（`#MED_PERSONAL`）及工资条医保/公积金专款划入子单。
+     */
+    fun isEligibleForFamilySync(): Boolean =
+        (type == TransactionType.EXPENSE || type == TransactionType.INCOME) &&
+            !isSystemBalanceAnchor() &&
+            !DedicatedFundManager.isCompositeMedicalPersonalChild(this) &&
+            !orderKey.endsWith(DedicatedFundManager.PAYSLIP_MEDICAL_CHILD_SUFFIX) &&
+            !orderKey.endsWith(DedicatedFundManager.PAYSLIP_PROVIDENT_CHILD_SUFFIX)
 }
 
 /**
@@ -185,3 +200,71 @@ data class RecurringRuleEntity(
     val updatedAtMillis: Long = System.currentTimeMillis(),
     val syncDirty: Boolean = true
 )
+
+/**
+ * 家庭共享账单只读镜像缓存表（AC-F1）：
+ * - 仅存储云端其他家庭成员（`ownerUserId != currentUserId`）的脱敏出入账（`EXPENSE` / `INCOME`）及墓碑记录；
+ * - 与本地个人 `transactions`、`wallets`、AI 防重、退款冲抵匹配、记账提醒及 `.mojibackup` 100% 物理隔离；
+ * - 展示时映射为负 `id` 的只读视图模型，绝不扣减本机钱包余额、绝不双扣本人账单。
+ */
+@Entity(
+    tableName = "family_shared_transactions",
+    indices = [
+        Index(value = ["timestamp"]),
+        Index(value = ["ownerUserId"]),
+        Index(value = ["seq"])
+    ]
+)
+data class FamilySharedTransactionEntity(
+    @PrimaryKey
+    val txUuid: String,
+    val seq: Long,
+    val ownerUserId: String,
+    val type: TransactionType,
+    val currency: String = "CNY",
+    val amountCents: Long,
+    val amountCnyCents: Long,
+    val refundedAmountCents: Long = 0L,
+    val category: String,
+    val merchant: String = "",
+    val note: String = "",
+    val tags: String = "",
+    val timestamp: Long,
+    val updatedAtMillis: Long,
+    val deletedAtMillis: Long? = null
+) {
+    fun toNegativeDisplayId(): Long {
+        var hash = -3750763034362895579L
+        for (ch in txUuid) {
+            hash = (hash xor ch.code.toLong()) * 1099511628211L
+        }
+        val positiveMagnitude = (hash and 0x3FFF_FFFF_FFFF_FFFFL).coerceAtLeast(1L)
+        return -positiveMagnitude
+    }
+
+    fun toReadOnlyDisplayTransaction(familyLedgerName: String = "家庭账本"): TransactionEntity =
+        TransactionEntity(
+            id = toNegativeDisplayId(),
+            syncUuid = txUuid,
+            ledgerName = familyLedgerName,
+            type = type,
+            amountCents = amountCents,
+            currency = currency,
+            exchangeRateToCny = if (amountCents > 0L) amountCnyCents.toDouble() / amountCents.toDouble() else 1.0,
+            amountCnyCents = amountCnyCents,
+            refundedAmountCents = refundedAmountCents,
+            category = category,
+            merchant = merchant,
+            note = note,
+            sourceWalletId = null,
+            targetWalletId = null,
+            tags = tags,
+            timestamp = timestamp,
+            capturedAtMillis = timestamp,
+            captureSource = "FAMILY_SHARED",
+            updatedAtMillis = updatedAtMillis,
+            deletedAtMillis = deletedAtMillis,
+            syncDirty = false,
+            syncToFamily = true
+        )
+}
