@@ -1,0 +1,141 @@
+name: MoJi Cloud Server CI & Deploy
+
+on:
+  pull_request:
+    paths:
+      - "server/**"
+      - ".github/workflows/deploy-server.yml"
+  push:
+    branches:
+      - develop
+      - main
+    paths:
+      - "server/**"
+      - ".github/workflows/deploy-server.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Verify & Build (x86_64-unknown-linux-musl)
+    runs-on: ubuntu-latest
+    concurrency:
+      group: moji-server-build-${{ github.workflow }}-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "server -> target"
+
+      - name: Run cargo test
+        working-directory: server
+        run: cargo test --locked
+
+      - name: Build static Linux release binary
+        working-directory: server
+        run: |
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+          strip target/x86_64-unknown-linux-musl/release/moji-cloud-server
+          file target/x86_64-unknown-linux-musl/release/moji-cloud-server
+
+      - name: Upload release binary artifact
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: moji-cloud-server-x86_64-linux-musl
+          path: server/target/x86_64-unknown-linux-musl/release/moji-cloud-server
+          if-no-files-found: error
+          retention-days: 3
+
+  deploy:
+    name: Atomic Deploy to Cloud Host
+    needs: build-and-test
+    if: >-
+      (github.event_name == 'push' &&
+       (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main')) ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: moji-server-production-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Download release binary artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: moji-cloud-server-x86_64-linux-musl
+          path: ./artifact
+
+      - name: Upload staged binary and run restricted atomic update
+        env:
+          MOJI_DEPLOY_HOST: ${{ secrets.MOJI_DEPLOY_HOST }}
+          MOJI_DEPLOY_PORT: ${{ secrets.MOJI_DEPLOY_PORT }}
+          MOJI_DEPLOY_USER: ${{ secrets.MOJI_DEPLOY_USER }}
+          MOJI_DEPLOY_SSH_KEY: ${{ secrets.MOJI_DEPLOY_SSH_KEY }}
+          MOJI_HEALTHCHECK_URL: ${{ secrets.MOJI_HEALTHCHECK_URL }}
+        run: |
+          set -euo pipefail
+          for var_name in MOJI_DEPLOY_HOST MOJI_DEPLOY_PORT MOJI_DEPLOY_USER MOJI_DEPLOY_SSH_KEY MOJI_HEALTHCHECK_URL; do
+            if [[ -z "${!var_name:-}" ]]; then
+              echo "error: required secret ${var_name} is not configured" >&2
+              exit 1
+            fi
+          done
+
+          chmod 0755 ./artifact/moji-cloud-server
+          SSH_DIR="$(mktemp -d)"
+          chmod 0700 "${SSH_DIR}"
+          trap 'rm -rf "${SSH_DIR}"' EXIT
+
+          printf '%s\n' "${MOJI_DEPLOY_SSH_KEY}" > "${SSH_DIR}/id_deploy"
+          chmod 0600 "${SSH_DIR}/id_deploy"
+
+          ssh-keyscan -p "${MOJI_DEPLOY_PORT}" -T 10 "${MOJI_DEPLOY_HOST}" > "${SSH_DIR}/known_hosts" 2>/dev/null
+
+          SSH_OPTS=(
+            -i "${SSH_DIR}/id_deploy"
+            -o BatchMode=yes
+            -o IdentitiesOnly=yes
+            -o StrictHostKeyChecking=yes
+            -o UserKnownHostsFile="${SSH_DIR}/known_hosts"
+            -o ConnectTimeout=15
+          )
+
+          scp -P "${MOJI_DEPLOY_PORT}" "${SSH_OPTS[@]}" \
+            ./artifact/moji-cloud-server \
+            "${MOJI_DEPLOY_USER}@${MOJI_DEPLOY_HOST}:/home/${MOJI_DEPLOY_USER}/moji-cloud-server.new"
+
+          ssh -p "${MOJI_DEPLOY_PORT}" "${SSH_OPTS[@]}" \
+            "${MOJI_DEPLOY_USER}@${MOJI_DEPLOY_HOST}" \
+            "sudo -n /usr/local/sbin/moji-atomic-update"
+
+          public_ok=0
+          for _ in $(seq 1 10); do
+            http_code="$(curl -sS --max-time 10 -o "${SSH_DIR}/health.json" -w '%{http_code}' "${MOJI_HEALTHCHECK_URL}" || true)"
+            if [[ "${http_code}" == "200" ]] && jq -e '.status == "ok" and .requires_access_code == true' "${SSH_DIR}/health.json" >/dev/null 2>&1; then
+              public_ok=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [[ "${public_ok}" -ne 1 ]]; then
+            echo "error: public HTTPS healthcheck did not return healthy requires_access_code=true response" >&2
+            exit 1
+          fi
+          echo "ok: public HTTPS healthcheck verified (HTTP 200, requires_access_code=true)"

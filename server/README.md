@@ -38,19 +38,41 @@ curl http://127.0.0.1:8787/api/v1/health
 在开发机（macOS）交叉编译 Linux 静态二进制后直接上传至 ECS，免去低配服务器编译耗时：
 
 ```bash
-# 1. 在本地编译（以 x86_64 Linux 为例，使用 cargo-zigbuild）
+# 1. 在本地编译（以 x86_64 Linux 静态 musl 二进制为例）
 cd server
-cargo zigbuild --release --target x86_64-unknown-linux-musl
+cargo zigbuild --release --locked --target x86_64-unknown-linux-musl
 
-# 2. 上传二进制与配置模板到 ECS
-scp target/x86_64-unknown-linux-musl/release/moji-cloud-server root@<ECS_IP>:/opt/moji-cloud/
-scp .env.example root@<ECS_IP>:/opt/moji-cloud/.env
-scp deploy/moji-cloud.service root@<ECS_IP>:/etc/systemd/system/
+# 2. 在 ECS 初始化目录权限（数据目录 0700 www-data，.env 0640 root:www-data）
+sudo install -d -o root -g root -m 0755 /opt/moji-cloud
+sudo install -d -o www-data -g www-data -m 0700 /opt/moji-cloud/data
+sudo install -o root -g www-data -m 0640 .env.example /opt/moji-cloud/.env
+# 编辑 /opt/moji-cloud/.env，填入高强度 MOJI_SERVER_ACCESS_CODE（服务器 SK）与 MOJI_TRUST_PROXY_HEADERS=true
 
-# 3. 在 ECS 上启动开机自启服务
-systemctl daemon-reload
-systemctl enable --now moji-cloud
+# 3. 上传二进制与 systemd 配置并启动开机自启服务
+scp target/x86_64-unknown-linux-musl/release/moji-cloud-server root@203.0.113.10:/opt/moji-cloud/
+scp deploy/moji-cloud.service root@203.0.113.10:/etc/systemd/system/
+ssh root@203.0.113.10 "chmod 0755 /opt/moji-cloud/moji-cloud-server && systemctl daemon-reload && systemctl enable --now moji-cloud"
 ```
+
+### Caddy 子路径无损挂载示例（如 `https://sync.example.com/moji`）
+
+若服务器已有其他站点运行在根路径，可参考 [`deploy/Caddyfile.subpath.example`](deploy/Caddyfile.subpath.example) 在同一域名下通过 `@moji path /moji /moji/*` + `uri strip_prefix /moji` 无损挂载 `/moji` 子路径（修改前请先备份 `/etc/caddy/Caddyfile`，并先执行 `sudo caddy validate --config /etc/caddy/Caddyfile` 校验通过后再 `sudo systemctl reload caddy`）。手机端「同步地址」直接填写 `https://sync.example.com/moji` 即可。
+
+### GitHub Actions 最小权限自动部署（`.github/workflows/deploy-server.yml`）
+
+仓库内置 `.github/workflows/deploy-server.yml`：
+- **PR 门禁校验**：当 `server/**` 或工作流变更时，自动执行 `cargo test --locked` 与 `x86_64-unknown-linux-musl` 静态 Release 编译校验。
+- **合并自动发布**：推送至 `develop` / `main` 或手动触发 `workflow_dispatch` 时，编译静态二进制并通过专用受限系统账号 `moji-deploy` 上传至 `/home/moji-deploy/moji-cloud-server.new`，调用受限脚本 [`deploy/moji-atomic-update.sh`](deploy/moji-atomic-update.sh)（安装于 `/usr/local/sbin/moji-atomic-update`，配合 [`deploy/moji-deploy.sudoers`](deploy/moji-deploy.sudoers)）完成 ELF 校验、同分区原子替换、`moji-cloud` 重启、本机失败自动回滚与公网 `/api/v1/health` 校验；`moji-deploy` 全程无权读写 `/opt/moji-cloud/data` 与 `/opt/moji-cloud/.env`。
+
+在 GitHub 仓库 `Settings -> Secrets and variables -> Actions` 配置以下 Encrypted Secrets 即可启用自动部署：
+
+| Secret 名称 | 示例值（占位符） | 说明 |
+| --- | --- | --- |
+| `MOJI_DEPLOY_HOST` | `203.0.113.10` | 云服务器公网 IP 或主机名 |
+| `MOJI_DEPLOY_PORT` | `22` | SSH 端口 |
+| `MOJI_DEPLOY_USER` | `moji-deploy` | 仅授予以 `sudo -n /usr/local/sbin/moji-atomic-update` 更新二进制的受限账号 |
+| `MOJI_DEPLOY_SSH_KEY` | `<Ed25519 私钥全文>` | `moji-deploy` 专用部署私钥 |
+| `MOJI_HEALTHCHECK_URL` | `https://sync.example.com/moji/api/v1/health` | 公网健康检查地址（需返回 HTTP 200 且 `requires_access_code: true`） |
 
 ## 接口一览
 

@@ -1,0 +1,21 @@
+# Caddy v2 subpath reverse-proxy example: mount MoJi Cloud under /moji
+# while keeping existing root-path services completely untouched.
+# Always back up /etc/caddy/Caddyfile and run `caddy validate --config /etc/caddy/Caddyfile`
+# before `systemctl reload caddy`.
+
+sync.example.com {
+	@moji path /moji /moji/*
+	handle @moji {
+		uri strip_prefix /moji
+		request_body {
+			max_size 80MB
+		}
+		reverse_proxy 127.0.0.1:8787 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	handle {
+		reverse_proxy localhost:8317
+	}
+}

@@ -10,10 +10,11 @@ Group=www-data
 WorkingDirectory=/opt/moji-cloud
 EnvironmentFile=/opt/moji-cloud/.env
 ExecStart=/opt/moji-cloud/moji-cloud-server
-Restart=on-failure
+Restart=always
 RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectHome=true
 ProtectSystem=strict
 ReadWritePaths=/opt/moji-cloud/data
 
