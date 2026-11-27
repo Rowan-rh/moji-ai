@@ -261,10 +261,47 @@ object CaptureWindowGuard {
     // 终态关闭、取消、失败或退款未完成状态（源自花有谱 TransactionRejection）
     private val CLOSED_FAILED_OR_REFUND_PENDING_BLACKLIST = listOf(
         "交易关闭", "交易已关闭", "订单关闭", "订单已关闭",
-        "订单已取消", "交易已取消", "支付已取消", "付款已取消",
+        "订单已取消", "订单取消", "交易已取消", "支付已取消", "付款已取消", "取消成功",
         "支付失败", "付款失败", "转账失败", "交易失败",
-        "退款处理中", "退款申请中", "退款审核中", "退款受理中", "退款失败",
+        "退款处理中", "退款申请中", "退款审核中", "退款受理中", "退款进行中", "正在退款", "退款失败",
+        "退单处理中", "退单申请中",
         "转账过期退还通知", "已退还"
+    )
+
+    private val STANDALONE_CANCEL_STATUS_TOKENS = setOf(
+        "已取消", "取消成功", "订单已取消", "订单取消", "已取消订单"
+    )
+
+    private val STANDALONE_REFUND_PENDING_OR_RETURNED_TOKENS = setOf(
+        "已退单", "订单已退单", "退单成功", "退款中", "商家退款中", "平台退款中"
+    )
+
+    private val COMPLETED_REFUND_EVIDENCE_MARKERS = listOf(
+        "退款成功", "已全额退款", "退款到账", "退款入账", "已退款"
+    )
+
+    private val LABELED_CANCEL_OR_PENDING_STATE_REGEX = Regex(
+        """(?:当前状态|交易状态|订单状态)\s*(?:\||[:：,，\s])*\s*(?:已取消|取消成功|订单已取消|已退单|订单已退单|退款中)(?=\s|\||[，。！!]|$)"""
+    )
+
+    private val WECHAT_PAYMENT_INITIATION_ACTIVITY_MARKERS = listOf(
+        "walletbrandui",
+        "orderhandlerui",
+        "walletpayui",
+        "walletiapui",
+        "basescanui",
+        ".plugin.scanner.",
+        "remittanceui",
+        "remittanceadapterui",
+        "remittancehkui",
+        "luckymoneyprepareui",
+        "walletofflinecoinpurseui"
+    )
+
+    private val ALIPAY_PAYMENT_INITIATION_ACTIVITY_MARKERS = listOf(
+        "scanactivity",
+        ".scan.",
+        ".h5payactivity"
     )
 
     // 账单列表、首页、会话流特征词（保留支付宝单笔详情右上角“全部账单”不入黑名单）
@@ -297,7 +334,7 @@ object CaptureWindowGuard {
         "支付时间", "创建时间", "付款时间", "转账时间", "收款时间", "下单时间", "拼单时间", "成交时间", "交易时间", "到账时间", "退款时间", "扣款时间", "消费时间", "记账时间", "入账时间",
         "付款方式", "支付方式", "收款方式", "退回方式", "退款方式", "转入账户", "扣款方式",
         "医保支付", "医保统筹", "医保个账", "医保个人账户", "医保基金", "统筹支付", "统筹基金", "基本医疗统筹", "大病统筹", "公务员补助", "医疗救助", "个账支付", "个人账户支付", "历年账户", "当年账户", "家庭共济", "医疗保险支付",
-        "实付款", "实付金额", "合计实付", "实扣", "实际支付",
+        "实付款", "实付金额", "合计实付", "实扣", "实际支付", "实付",
         "商品说明", "转账备注", "转账说明", "对方账户",
         "商户全称", "收款方全称", "收单机构",
         "账单分类", "账单管理", "计入收支", "对此订单有疑问", "对订单有疑惑", "申请电子回单", "申请电子凭证"
@@ -319,7 +356,7 @@ object CaptureWindowGuard {
     private val LIVE_COMPLETION_STATUS_KEYWORDS = listOf(
         "支付成功", "付款成功", "拼单成功", "扣款成功", "转账成功", "收款成功",
         "对方已收钱", "已收钱", "已存入零钱", "还款成功", "提现已发起",
-        "退款成功", "已全额退款", "代付成功"
+        "退款成功", "已全额退款", "已退款", "退款到账", "代付成功"
     )
 
     // 专用收银台无时间戳即时完成页严格状态词（排除纯电商“拼单成功”等非收银台状态）
@@ -623,6 +660,70 @@ object CaptureWindowGuard {
         }
 
     /**
+     * 判断已核实的 Activity 是否属于发起新支付/扫码收银的前置桥接页（如微信 `WalletBrandUI`、`WalletPayUI`、扫一扫等），
+     * 命中时必须立即重置收银台完成页 `visitId` 会话，确保连续两笔同金额消费（含免密支付）100% 分配新 `visitId`（`AC-2`）。
+     */
+    fun isNewPaymentInitiationActivity(packageName: String, verifiedActivity: String): Boolean {
+        val pkg = packageName.trim()
+        val actLower = verifiedActivity.trim().lowercase(Locale.ROOT)
+        if (actLower.isEmpty()) return false
+        if (SENSITIVE_ACTIVITY_MARKERS.any { actLower.contains(it) }) return true
+        if (pkg == "com.tencent.mm") {
+            if (actLower.contains("remittanceresult") ||
+                actLower.contains("remittancedetail") ||
+                actLower.contains("walletorderinfo")
+            ) {
+                return false
+            }
+            return WECHAT_PAYMENT_INITIATION_ACTIVITY_MARKERS.any { actLower.contains(it) }
+        }
+        if (pkg == "com.eg.android.AlipayGphone" || isBuiltinEcommerceHostPackage(pkg)) {
+            if (actLower.endsWith(".h5payresultactivity") || actLower.endsWith(".alipayresultactivity")) {
+                return false
+            }
+            return ALIPAY_PAYMENT_INITIATION_ACTIVITY_MARKERS.any { marker ->
+                if (marker.startsWith(".")) actLower.endsWith(marker) || actLower.contains(marker) else actLower.contains(marker)
+            }
+        }
+        return false
+    }
+
+    /**
+     * 判断窗口文本是否处于「交易关闭 / 已取消 / 取消成功 / 已退单 / 退款中 / 支付失败」等未成立或处理中状态（`AC-7`）：
+     * - 精准拦截餐饮/茶饮小程序独立状态节点为 `已取消 / 取消成功 / 已退单 / 退款中` 的页面；
+     * - 绝不误杀正向消费页中的 `不支持退单 / 随时退 / 7天无理由退货` 等服务说明，也不误拦已到账的 `退款成功 / 已全额退款 / 退款到账` 详情页。
+     */
+    fun hasClosedCancelledOrRefundPendingState(sanitizedText: String): Boolean {
+        if (CLOSED_FAILED_OR_REFUND_PENDING_BLACKLIST.any { sanitizedText.contains(it) }) {
+            return true
+        }
+        val hasCompletedRefundProof = COMPLETED_REFUND_EVIDENCE_MARKERS.any { sanitizedText.contains(it) }
+        if (LABELED_CANCEL_OR_PENDING_STATE_REGEX.containsMatchIn(sanitizedText)) {
+            val matched = LABELED_CANCEL_OR_PENDING_STATE_REGEX.find(sanitizedText)?.value.orEmpty()
+            val isCancel = matched.contains("取消")
+            if (isCancel || !hasCompletedRefundProof) {
+                return true
+            }
+        }
+        val segments = sanitizedText.split('|', '\n')
+        for (rawSeg in segments) {
+            val normalizedSeg = rawSeg.trim()
+                .trim('<', '>', '＞', '〈', '〉', '!', '！', '.', '。', '…', '·', '-', '—', ' ')
+            if (normalizedSeg.isEmpty()) continue
+            if (normalizedSeg in STANDALONE_CANCEL_STATUS_TOKENS) {
+                return true
+            }
+            if (!hasCompletedRefundProof && normalizedSeg in STANDALONE_REFUND_PENDING_OR_RETURNED_TOKENS) {
+                if (normalizedSeg == "退款中" && sanitizedText.contains("已退款")) {
+                    continue
+                }
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
      * 核心窗口多维门禁评估函数（纯函数，无副作用）
      */
     fun evaluateBillWindow(input: WindowInspectionInput): WindowEvaluationResult {
@@ -666,7 +767,7 @@ object CaptureWindowGuard {
             if (CASHIER_OR_UNPAID_BLACKLIST.any { sanitized.contains(it) }) {
                 return WindowEvaluationResult(false, WindowRejectReason.CASHIER_OR_UNPAID_STATE, containerRole, sanitized)
             }
-            if (CLOSED_FAILED_OR_REFUND_PENDING_BLACKLIST.any { sanitized.contains(it) }) {
+            if (hasClosedCancelledOrRefundPendingState(sanitized)) {
                 return WindowEvaluationResult(false, WindowRejectReason.CLOSED_FAILED_OR_REFUND_PENDING, containerRole, sanitized)
             }
             val isManualOrderListTabs = sanitized.contains("待付款") &&
@@ -726,7 +827,7 @@ object CaptureWindowGuard {
         if (CASHIER_OR_UNPAID_BLACKLIST.any { sanitized.contains(it) }) {
             return WindowEvaluationResult(false, WindowRejectReason.CASHIER_OR_UNPAID_STATE, containerRole, sanitized)
         }
-        if (CLOSED_FAILED_OR_REFUND_PENDING_BLACKLIST.any { sanitized.contains(it) }) {
+        if (hasClosedCancelledOrRefundPendingState(sanitized)) {
             return WindowEvaluationResult(false, WindowRejectReason.CLOSED_FAILED_OR_REFUND_PENDING, containerRole, sanitized)
         }
 
@@ -936,7 +1037,7 @@ object CaptureWindowGuard {
         if (SENSITIVE_TEXT_MARKERS.any { cleaned.contains(it) }) return false
         if (IMAGE_VIEWER_TEXT_MARKERS.any { cleaned.contains(it) }) return false
         if (CASHIER_OR_UNPAID_BLACKLIST.any { cleaned.contains(it) }) return false
-        if (CLOSED_FAILED_OR_REFUND_PENDING_BLACKLIST.any { cleaned.contains(it) }) return false
+        if (hasClosedCancelledOrRefundPendingState(cleaned)) return false
         if (MULTI_BILL_OR_FEED_BLACKLIST.any { cleaned.contains(it) }) return false
 
         val actLower = verifiedActivity.lowercase(Locale.ROOT)

@@ -343,7 +343,7 @@ class CapturePipelineCoordinator internal constructor(
     val observabilityLogs: StateFlow<List<CaptureObservabilityLogEntry>> = _observabilityLogs.asStateFlow()
 
     private val financialKeywordRegex = Regex(
-        """(支付成功|付款成功|交易成功|账单详情|交易详情|当前状态|交易状态|交易单号|商户单号|转账单号|订单号|支付方式|付款方式|医保支付|医保统筹|医保个账|统筹支付|统筹基金|个账支付|历年账户|家庭共济|医保|对方已收钱|已存入零钱|已收钱|消费|扣款|支出|转出|转账|收款|到账|还款|退款|退回|零钱|余额宝|花呗|白条|信用卡|储蓄卡|尾号|¥|￥|RMB|USD|HKD|\$)""",
+        """(支付成功|付款成功|交易成功|账单详情|交易详情|当前状态|交易状态|交易单号|商户单号|转账单号|订单号|订单编号|支付方式|付款方式|实付|下单时间|医保支付|医保统筹|医保个账|统筹支付|统筹基金|个账支付|历年账户|家庭共济|医保|对方已收钱|已存入零钱|已收钱|消费撤销|交易冲正|冲正|消费|扣款|支出|转出|转账|收款|到账|还款|退货|已退款|已退单|退款|退回|零钱|余额宝|花呗|白条|信用卡|储蓄卡|个人消费卡|尾号|¥|￥|RMB|USD|HKD|\$)""",
         RegexOption.IGNORE_CASE
     )
     private val numberRegex = Regex("""[0-9]+(\.[0-9]{1,2})?""")
@@ -724,7 +724,8 @@ class CapturePipelineCoordinator internal constructor(
         screenshotPath: String = "",
         screenshotSha256: String = "",
         capturedAtMillis: Long = System.currentTimeMillis(),
-        cashierVisitId: Long = 0L
+        cashierVisitId: Long = 0L,
+        verifiedActivity: String = ""
     ) {
         val cleaned = rawText.trim()
         if (cleaned.length < 4) {
@@ -781,11 +782,13 @@ class CapturePipelineCoordinator internal constructor(
         ) 0L else 220L
 
         synchronized(pendingLock) {
-            val taggedLine = if (cashierVisitId > 0L) {
-                "[$captureSource | $packageName | visit=$cashierVisitId]: $cleaned"
-            } else {
-                "[$captureSource | $packageName]: $cleaned"
-            }
+            val taggedLine = buildTaggedCaptureLine(
+                captureSource = captureSource,
+                packageName = packageName,
+                cashierVisitId = cashierVisitId,
+                verifiedActivity = verifiedActivity,
+                cleanedText = cleaned
+            )
             pendingTexts.add(taggedLine)
             pendingPackages.add(packageName)
             pendingSources.add(captureSource)
@@ -850,15 +853,20 @@ class CapturePipelineCoordinator internal constructor(
         captureSource: String,
         capturedAtMillis: Long,
         cashierVisitId: Long = 0L,
+        verifiedActivity: String = "",
         screenshotPath: String = "",
         screenshotSha256: String = ""
     ): TransactionEntity? = pipelineMutex.withLock {
         val merged = if (rawText.startsWith("[AI_")) {
             rawText
-        } else if (cashierVisitId > 0L) {
-            "[$captureSource | $packageName | visit=$cashierVisitId]: $rawText"
         } else {
-            "[$captureSource | $packageName]: $rawText"
+            buildTaggedCaptureLine(
+                captureSource = captureSource,
+                packageName = packageName,
+                cashierVisitId = cashierVisitId,
+                verifiedActivity = verifiedActivity,
+                cleanedText = rawText
+            )
         }
         executeAiPipeline(
             mergedText = merged,
@@ -1048,6 +1056,35 @@ class CapturePipelineCoordinator internal constructor(
             }
         }
 
+        // 规则 1b（AC-1 / AC-5）：同一收银台访问会话（相同 `visitTag`）无论相隔多久或原记录是否已被通知升级为 `AI_FUSED`，直接幂等命中原记录！
+        if (duplicateMatchedTx == null && incomingIsLiveCashier && incomingVisitTag.isNotBlank()) {
+            val sameVisitCandidates = repository.findTransactionsByAmountAndOccurredWindow(
+                amountCents = parsedTx.amountCents,
+                occurredAtMillis = parsedTx.timestamp,
+                toleranceMillis = 24 * 3600_000L
+            ) + (if (parsedTx.discountCents > 0L) {
+                repository.findTransactionsByAmountAndOccurredWindow(
+                    amountCents = parsedTx.amountCents + parsedTx.discountCents,
+                    occurredAtMillis = parsedTx.timestamp,
+                    toleranceMillis = 24 * 3600_000L
+                )
+            } else {
+                emptyList()
+            })
+            val matchedBySameVisit = sameVisitCandidates
+                .distinctBy { it.id }
+                .filterNot { DedicatedFundManager.isCompositeMedicalPersonalChild(it) }
+                .firstOrNull { existing ->
+                    existing.type == parsedTx.type &&
+                        existing.currency == parsedTx.currency &&
+                        extractCashierVisitTag(existing.rawCapturedText) == incomingVisitTag
+                }
+            if (matchedBySameVisit != null) {
+                duplicateMatchedTx = matchedBySameVisit
+                duplicateReasonLabel = "同一收银台会话复扫($incomingVisitTag)"
+            }
+        }
+
         // 规则 2：若规则 1 未命中，检查：
         // (a) 跨端内嵌订单号匹配；
         // (a2) 二阶段通知/账单详情/电商订单详情 对 无单号 `AI_LIVE_CASHIER` 收银台记录的单向时序窗校准（唯一候选原位升级 AI_FUSED，≥2 候选防误吞走疑似重复确认）；
@@ -1079,13 +1116,20 @@ class CapturePipelineCoordinator internal constructor(
 
             // 2a-live. 二阶段通知/详情页回填无单号 `AI_LIVE_CASHIER` 记录（单向时序窗 -15s..180s 或跨端同单规则）
             if (duplicateMatchedTx == null && !incomingIsLiveCashier) {
-                val liveCashierCandidates = combinedCandidates.filter { existing ->
+                val rawLiveCandidates = combinedCandidates.filter { existing ->
                     isMatchingLiveCashierStage1Candidate(
                         existing = existing,
                         incoming = parsedTx,
                         incomingPackage = packageName,
                         incomingRawText = mergedText
                     )
+                }
+                // 若候选池中既有已被通知校准过的 `AI_FUSED` 旧单，又存在唯一 1 笔全新的待校准 `AI_LIVE_CASHIER` 新单，优先校准该唯一新单
+                val uncalibratedLiveCandidates = rawLiveCandidates.filter { it.captureSource == "AI_LIVE_CASHIER" }
+                val liveCashierCandidates = if (rawLiveCandidates.size >= 2 && uncalibratedLiveCandidates.size == 1) {
+                    uncalibratedLiveCandidates
+                } else {
+                    rawLiveCandidates
                 }
                 if (liveCashierCandidates.size >= 2) {
                     duplicateMatchedTx = liveCashierCandidates.first()
@@ -1352,11 +1396,36 @@ class CapturePipelineCoordinator internal constructor(
                 BillScreenshotStorage.deleteIfExists(screenshotPath)
             }
 
-            // 防止同一次页面停留或上下滚动时在 15 秒内重复弹多次胶囊（若存在多笔同金额 AI_LIVE_CASHIER 归属歧义，必须立即弹出疑似重复供用户裁决）
-            val promptCooldownKey = "DUP_${matched.id}"
+            // 防止同一收银台会话复扫、同笔二阶段重复通知，或小程序/订单页停留 15s~10min 动态刷新时弹出“疑似重复”打扰用户（AC-1 / AC-4 / AC-5）
+            if (!hasAmbiguousLiveCashierCandidates && captureSource != "AI_SANDBOX") {
+                val withinTenMinutesOfCaptureOrTouch =
+                    (capturedAtMillis - matched.capturedAtMillis in 0L..(10 * 60_000L)) ||
+                        (matched.updatedAtMillis > 0L && capturedAtMillis - matched.updatedAtMillis in 0L..(10 * 60_000L))
+                val isSilentIdempotentRescan = incomingIsLiveCashier ||
+                    (captureSource == "AI_NOTIFICATION" && abs(parsedTx.timestamp - matched.timestamp) <= 15 * 60_000L) ||
+                    ((captureSource == "AI_ACCESSIBILITY" || captureSource == "AI_OCR") && withinTenMinutesOfCaptureOrTouch)
+                if (isSilentIdempotentRescan) {
+                    appendLog(
+                        packageName = packageName,
+                        captureSource = captureSource,
+                        rawText = mergedText.take(140),
+                        outcome = CaptureEventOutcome.DEDUP_BLOCKED,
+                        detailSummary = "幂等静默拦截重复事件（$duplicateReasonLabel），匹配账单 #${matched.id}",
+                        transactionId = matched.id
+                    )
+                    return null
+                }
+            }
+
+            val promptCooldownKey = if (hasAmbiguousLiveCashierCandidates) {
+                "DUP_AMBIGUOUS_${matched.id}"
+            } else {
+                "DUP_${matched.id}"
+            }
+            val cooldownWindowMs = if (hasAmbiguousLiveCashierCandidates) 3_000L else 15_000L
             val lastPromptTime = recentDuplicatePromptCooldown[promptCooldownKey] ?: 0L
-            if (!hasAmbiguousLiveCashierCandidates &&
-                capturedAtMillis - lastPromptTime < 15_000L &&
+            if (lastPromptTime > 0L &&
+                capturedAtMillis - lastPromptTime < cooldownWindowMs &&
                 captureSource != "AI_SANDBOX"
             ) {
                 return null
@@ -1624,13 +1693,92 @@ class CapturePipelineCoordinator internal constructor(
             return false
         }
 
+        // 若双方均显式携带 4 位银行卡尾号且不相同，拒绝跨通道误合
+        val tailA = extractExplicitCardTail4(txA.paymentMethodRaw)
+        val tailB = extractExplicitCardTail4(txB.paymentMethodRaw)
+        if (tailA.isNotBlank() && tailB.isNotBlank() && tailA != tailB) {
+            return false
+        }
+
         val familyA = detectPlatformFamily(txA, "", aRaw)
         val familyB = detectPlatformFamily(txB, txBPackage, bRaw)
+        if (familyA.isNotBlank() && familyB.isNotBlank() && familyA != familyB) {
+            return false
+        }
+
+        val aIsMiniProgramOrder = isWechatMiniProgramOrderRecord(txA, "", aRaw)
+        val bIsMiniProgramOrder = isWechatMiniProgramOrderRecord(txB, txBPackage, bRaw)
+        if (aIsMiniProgramOrder || bIsMiniProgramOrder) {
+            return areMerchantsCompatibleForMiniProgramFusion(txA.merchant, txB.merchant)
+        }
+
         // 若双方的平台归属明确一致（如均为 PDD / JD / TAOBAO / DOUYIN / MEITUAN），或下单与扣款时间相差在 90 秒以内，认定为同一笔交易！
         return (familyA.isNotBlank() && familyA == familyB) || timeDiffMs <= 90_000L
     }
 
+    /**
+     * 识别微信小程序商家订单/取餐页（如 `AppBrandUI*` 奈雪/喜茶/瑞幸/麦当劳小程序订单详情与取餐页，`AC-3`）：
+     * - 严格排除收银台实时完成页（`AI_LIVE_CASHIER`）、系统通知栏（`AI_NOTIFICATION`）与微信官方 42000/1000 账单流水详情页。
+     */
+    private fun isWechatMiniProgramOrderRecord(tx: TransactionEntity, pkg: String, rawText: String): Boolean {
+        if (tx.captureSource == "AI_LIVE_CASHIER" ||
+            tx.captureSource == "AI_NOTIFICATION" ||
+            rawText.contains("[AI_LIVE_CASHIER") ||
+            rawText.contains("[AI_NOTIFICATION")
+        ) {
+            return false
+        }
+        if (tx.transactionNo.matches(WECHAT_OFFICIAL_BILL_TX_NO_REGEX) ||
+            tx.orderKey.matches(WECHAT_OFFICIAL_BILL_TX_NO_REGEX) ||
+            rawText.contains("本服务由财付通提供")
+        ) {
+            return false
+        }
+        val isWechatPkg = pkg == "com.tencent.mm" || rawText.contains("com.tencent.mm")
+        if (!isWechatPkg) return false
+
+        val capturedAct = extractCapturedActivity(rawText).lowercase(Locale.ROOT)
+        if (capturedAct.contains(".appbrand.") || capturedAct.contains("appbrandui")) {
+            return true
+        }
+        val hasMiniProgramPickupMarkers = rawText.contains("取餐码") ||
+            rawText.contains("取茶号") ||
+            rawText.contains("取单号") ||
+            rawText.contains("待取餐") ||
+            rawText.contains("请取餐") ||
+            rawText.contains("制作中") ||
+            rawText.contains("门店自取")
+        return hasMiniProgramPickupMarkers && (rawText.contains("下单时间") || rawText.contains("订单编号") || rawText.contains("订单号"))
+    }
+
+    private fun areMerchantsCompatibleForMiniProgramFusion(merchantA: String, merchantB: String): Boolean {
+        val genericOrLegalSuffixCheck: (String) -> Boolean = { m ->
+            val trimmed = m.trim()
+            trimmed.isBlank() ||
+                trimmed in setOf("日常商户", "微信支付", "微信", "支付宝", "财付通", "消费", "支出", "商户退款") ||
+                trimmed.endsWith("平台商户") ||
+                trimmed.endsWith("有限公司") ||
+                trimmed.endsWith("餐饮管理")
+        }
+        val clean: (String) -> String = { raw ->
+            raw.trim()
+                .removePrefix("财付通-")
+                .removePrefix("微信支付-")
+                .removePrefix("支付宝-")
+                .removePrefix("快捷支付-")
+                .replace(Regex("""[(（][^()（）]{1,18}[)）]$"""), "")
+                .trim()
+        }
+        val ca = clean(merchantA)
+        val cb = clean(merchantB)
+        if (genericOrLegalSuffixCheck(ca) || genericOrLegalSuffixCheck(cb)) return true
+        return ca.contains(cb, ignoreCase = true) || cb.contains(ca, ignoreCase = true)
+    }
+
     private fun isEcommerceOrderRecord(tx: TransactionEntity, pkg: String, rawText: String): Boolean {
+        if (isWechatMiniProgramOrderRecord(tx, pkg, rawText)) {
+            return true
+        }
         val combined = "$pkg | $rawText | ${tx.category}"
         if (combined.contains("com.xunmeng.pinduoduo") ||
             combined.contains("com.jingdong.app.mall") ||
@@ -1647,15 +1795,31 @@ class CapturePipelineCoordinator internal constructor(
     }
 
     private fun isPaymentChannelRecord(tx: TransactionEntity, pkg: String, rawText: String): Boolean {
-        val combined = "$pkg | $rawText"
-        if (combined.contains("com.eg.android.AlipayGphone") ||
+        if (isWechatMiniProgramOrderRecord(tx, pkg, rawText)) {
+            return false
+        }
+        val combined = "$pkg | $rawText".lowercase(Locale.ROOT)
+        if (combined.contains("com.eg.android.alipaygphone") ||
             combined.contains("com.tencent.mm") ||
             combined.contains("com.unionpay") ||
+            combined.contains("com.android.mms") ||
+            combined.contains("cmb.pb") ||
+            combined.contains("com.cmblife") ||
             combined.contains("cmbchina") ||
             combined.contains("icbc") ||
+            combined.contains("com.chinamworld") ||
             combined.contains("ccb") ||
             combined.contains("abchina") ||
-            combined.contains("boc")
+            combined.contains("boc") ||
+            combined.contains("bankcomm") ||
+            combined.contains("psbc") ||
+            combined.contains("pingan") ||
+            combined.contains("spdb") ||
+            combined.contains("citic") ||
+            combined.contains("cib") ||
+            combined.contains("cmbc") ||
+            combined.contains("cebbank") ||
+            combined.contains("cgb")
         ) {
             return true
         }
@@ -1735,7 +1899,8 @@ class CapturePipelineCoordinator internal constructor(
         }
 
         val timeDeltaMs = existing.timestamp - incoming.timestamp
-        val inDirectionalWindow = timeDeltaMs in -15_000L..180_000L
+        val negativeToleranceMs = if (existing.timestamp % 60_000L == 0L) -65_000L else -15_000L
+        val inDirectionalWindow = timeDeltaMs in negativeToleranceMs..180_000L
         val isCrossChannelPair = isCrossChannelSameOrderPair(
             txA = existing,
             txB = incoming,
@@ -1861,7 +2026,8 @@ class CapturePipelineCoordinator internal constructor(
             existing.merchant in genericMerchants ||
             existing.merchant.endsWith("平台商户") ||
             existing.merchant.contains("京东信息技术") ||
-            existing.merchant.contains("寻梦信息技术")
+            existing.merchant.contains("寻梦信息技术") ||
+            (incomingIsEcommerce && !existingIsEcommerce && existing.merchant.endsWith("有限公司"))
         val incomingIsSpecific = incoming.merchant.isNotBlank() &&
             incoming.merchant !in genericMerchants &&
             !incoming.merchant.endsWith("平台商户") &&
@@ -1907,6 +2073,18 @@ class CapturePipelineCoordinator internal constructor(
 
         var updatedNote = existing.note
         val cleanIncomingNote = incoming.note.trim()
+        val existingProductDetail = extractProductDetailFromStructuredNote(
+            note = existing.note,
+            merchant = existing.merchant,
+            payMethod = existing.paymentMethodRaw,
+            genericPayMethods = genericChannelPayMethods
+        )
+        val incomingProductDetail = extractProductDetailFromStructuredNote(
+            note = cleanIncomingNote,
+            merchant = incoming.merchant,
+            payMethod = incoming.paymentMethodRaw,
+            genericPayMethods = genericChannelPayMethods
+        )
         val existingNoteIsGenericOrderRef = existing.note.isBlank() ||
             existing.note == existing.merchant ||
             existing.note.contains("商户单号 ") ||
@@ -1918,23 +2096,61 @@ class CapturePipelineCoordinator internal constructor(
             !cleanIncomingNote.contains("订单编号")
 
         if ((isSameAmount || isPostDiscountRevision) && cleanIncomingNote.isNotBlank() && !cleanIncomingNote.contains("[用户手动确认录入]")) {
-            if (isPostDiscountRevision ||
-                (existingNoteIsGenericOrderRef && incomingNoteHasProductTitle) ||
-                (incomingNoteHasProductTitle && !existing.note.contains(cleanIncomingNote.take(10)) && cleanIncomingNote.length > existing.note.length)
+            if (isPostDiscountRevision) {
+                updatedNote = mergeStructuredNoteWithProductAndPayMethod(
+                    preferredHeaderNote = cleanIncomingNote,
+                    productDetail = incomingProductDetail.ifBlank { existingProductDetail },
+                    payMethod = updatedPayMethod
+                )
+            } else if (incomingProductDetail.isNotBlank() &&
+                (existingProductDetail.isBlank() ||
+                    (incomingProductDetail.length > existingProductDetail.length && !existingProductDetail.contains(incomingProductDetail)))
+            ) {
+                val headerSourceNote = if (updatedDiscount > 0L && existing.discountCents <= 0L) {
+                    cleanIncomingNote
+                } else {
+                    existing.note.ifBlank { cleanIncomingNote }
+                }
+                updatedNote = mergeStructuredNoteWithProductAndPayMethod(
+                    preferredHeaderNote = headerSourceNote,
+                    productDetail = incomingProductDetail,
+                    payMethod = updatedPayMethod
+                )
+                enrichedFields.add("商品说明")
+            } else if (existingNoteIsGenericOrderRef && incomingNoteHasProductTitle) {
+                updatedNote = cleanIncomingNote
+                enrichedFields.add("商品说明")
+            } else if (existingProductDetail.isBlank() &&
+                incomingNoteHasProductTitle &&
+                !existing.note.contains(cleanIncomingNote.take(10)) &&
+                cleanIncomingNote.length > existing.note.length
             ) {
                 updatedNote = cleanIncomingNote
-                if (!isPostDiscountRevision) {
-                    enrichedFields.add("商品说明")
-                }
+                enrichedFields.add("商品说明")
             }
         }
 
-        // 若融合后扣款账户已升级为具体银行卡/花呗（如「招商银行信用卡(3354)」），同步把备注末尾的泛渠道名（如「· 支付宝」「· 微信支付」）替换为真实扣款账户
+        // 若融合后扣款账户已升级为具体银行卡/花呗（如「招商银行信用卡(3354)」），同步把备注末尾的泛渠道名替换或追加为真实扣款账户
         if (updatedPayMethod.isNotBlank() && updatedPayMethod !in genericChannelPayMethods && updatedNote.isNotBlank()) {
+            var replacedGeneric = false
             for (genericPm in genericChannelPayMethods) {
                 if (updatedNote.endsWith("· $genericPm")) {
                     updatedNote = updatedNote.removeSuffix("· $genericPm") + "· $updatedPayMethod"
+                    replacedGeneric = true
                     break
+                } else if (updatedNote.endsWith("| $genericPm")) {
+                    updatedNote = updatedNote.removeSuffix("| $genericPm") + "| $updatedPayMethod"
+                    replacedGeneric = true
+                    break
+                }
+            }
+            if (!replacedGeneric && !updatedNote.contains(updatedPayMethod) && updatedPayMethod.length <= 24) {
+                updatedNote = if (updatedNote.contains(" | ")) {
+                    "$updatedNote · $updatedPayMethod".take(96)
+                } else if (updatedNote.startsWith("原价¥")) {
+                    "$updatedNote | $updatedPayMethod".take(96)
+                } else {
+                    updatedNote
                 }
             }
         }
@@ -2176,9 +2392,18 @@ class CapturePipelineCoordinator internal constructor(
         _observabilityLogs.value = (listOf(entry) + _observabilityLogs.value).take(50)
     }
 
+    private fun extractCapturedActivity(rawText: String): String =
+        CAPTURED_ACTIVITY_TAG_REGEX.find(rawText)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+
     companion object {
         private val CASHIER_VISIT_TAG_REGEX = Regex(
-            """\[AI_[A-Z0-9_]+\s*\|\s*([^|\]]+?)\s*\|\s*visit=(\d+)\]:"""
+            """\[AI_[A-Z0-9_]+\s*\|\s*([^|\]]+?)\s*\|\s*visit=(\d+)(?:\s*\|[^\]]*)?\]:"""
+        )
+        private val CAPTURED_ACTIVITY_TAG_REGEX = Regex(
+            """\[AI_[A-Z0-9_]+\s*\|[^\]]*\bact=([^|\]]+?)(?:\s*\|[^\]]*)?\]:"""
+        )
+        private val WECHAT_OFFICIAL_BILL_TX_NO_REGEX = Regex(
+            """^(?:42000\d{18,28}|1000\d{20,32})$"""
         )
         private val EXPLICIT_SECOND_TIME_REGEX = Regex(
             """\b\d{1,2}:\d{2}:\d{2}\b|\d{1,2}时\d{1,2}分\d{1,2}秒"""
@@ -2186,6 +2411,79 @@ class CapturePipelineCoordinator internal constructor(
         private val EXPLICIT_CARD_TAIL4_REGEX = Regex(
             """[(（]\s*(\d{4})\s*[)）]|(?:尾号|储蓄卡|借记卡|信用卡)\s*(\d{4})(?!\d)"""
         )
+
+        private fun buildTaggedCaptureLine(
+            captureSource: String,
+            packageName: String,
+            cashierVisitId: Long,
+            verifiedActivity: String,
+            cleanedText: String
+        ): String {
+            val cleanAct = verifiedActivity.trim()
+            return buildString {
+                append("[$captureSource | $packageName")
+                if (cashierVisitId > 0L) {
+                    append(" | visit=$cashierVisitId")
+                }
+                if (cleanAct.isNotEmpty()) {
+                    append(" | act=$cleanAct")
+                }
+                append("]: ")
+                append(cleanedText)
+            }
+        }
+
+        private fun extractProductDetailFromStructuredNote(
+            note: String,
+            merchant: String,
+            payMethod: String,
+            genericPayMethods: Set<String>
+        ): String {
+            val trimmed = note.trim()
+            if (trimmed.isEmpty() || trimmed.contains("[用户手动确认录入]")) return ""
+            val body = if (trimmed.startsWith("原价¥")) {
+                if (trimmed.contains(" | ")) trimmed.substringAfter(" | ").trim() else return ""
+            } else {
+                trimmed
+            }
+            val payLikeRegex = Regex(""".*(?:银行|信用卡|储蓄卡|借记卡|一卡通|个人消费卡|零钱|余额宝|花呗|白条|月付).*""")
+            val parts = body.split(" · ")
+                .map { it.trim() }
+                .filter { part ->
+                    part.isNotEmpty() &&
+                        !part.equals(payMethod.trim(), ignoreCase = true) &&
+                        part !in genericPayMethods &&
+                        !part.equals(merchant.trim(), ignoreCase = true) &&
+                        !part.startsWith("商户单号") &&
+                        !part.startsWith("订单编号") &&
+                        !payLikeRegex.matches(part)
+                }
+            return parts.joinToString(" · ").trim()
+        }
+
+        private fun mergeStructuredNoteWithProductAndPayMethod(
+            preferredHeaderNote: String,
+            productDetail: String,
+            payMethod: String
+        ): String {
+            val trimmedHeaderSource = preferredHeaderNote.trim()
+            val header = if (trimmedHeaderSource.startsWith("原价¥")) {
+                trimmedHeaderSource.substringBefore(" | ").trim()
+            } else {
+                ""
+            }
+            val tailParts = buildList {
+                if (productDetail.isNotBlank()) add(productDetail.trim())
+                if (payMethod.isNotBlank() && payMethod.length <= 24) add(payMethod.trim())
+            }
+            val tail = tailParts.joinToString(" · ")
+            return when {
+                header.isNotBlank() && tail.isNotBlank() -> "$header | $tail".take(96)
+                header.isNotBlank() -> header
+                tail.isNotBlank() -> tail.take(96)
+                else -> trimmedHeaderSource
+            }
+        }
 
         internal fun mergeEnrichedTags(existingTags: String, incomingTags: String): Pair<String, List<String>> {
             val existingTagList = TagCatalog.parseTags(existingTags)

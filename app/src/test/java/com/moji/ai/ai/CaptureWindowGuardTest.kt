@@ -576,4 +576,113 @@ class CaptureWindowGuardTest {
         assertFalse(unpaidCashier.accepted)
         assertEquals(WindowRejectReason.CASHIER_OR_UNPAID_STATE, unpaidCashier.reason)
     }
+
+    @Test
+    fun newPaymentInitiationActivity_identifiesPayBridgeScanAndAuthPagesOnly() {
+        // 新一轮支付拉起桥接页 / 扫码页 -> 必须触发新支付前置重置信号（AC-2）
+        assertTrue(
+            CaptureWindowGuard.isNewPaymentInitiationActivity(
+                "com.tencent.mm",
+                "com.tencent.mm.plugin.wallet_index.ui.WalletBrandUI"
+            )
+        )
+        assertTrue(
+            CaptureWindowGuard.isNewPaymentInitiationActivity(
+                "com.tencent.mm",
+                "com.tencent.mm.plugin.wallet_index.ui.OrderHandlerUI"
+            )
+        )
+        assertTrue(
+            CaptureWindowGuard.isNewPaymentInitiationActivity(
+                "com.tencent.mm",
+                "com.tencent.mm.plugin.scanner.ui.BaseScanUI"
+            )
+        )
+        assertTrue(
+            CaptureWindowGuard.isNewPaymentInitiationActivity(
+                "com.eg.android.AlipayGphone",
+                "com.alipay.mobile.scan.as.main.MainCaptureActivity"
+            )
+        )
+        assertTrue(
+            CaptureWindowGuard.isNewPaymentInitiationActivity(
+                "com.xunmeng.pinduoduo",
+                "com.alipay.sdk.app.H5PayActivity"
+            )
+        )
+
+        // 支付完成页、小程序宿主、聊天主界面 -> 绝不能被误判为新支付拉起页（AC-1）
+        assertFalse(
+            CaptureWindowGuard.isNewPaymentInitiationActivity(
+                "com.tencent.mm",
+                "com.tencent.mm.plugin.lite.ui.WxaLiteAppTransparentLiteUI"
+            )
+        )
+        assertFalse(
+            CaptureWindowGuard.isNewPaymentInitiationActivity(
+                "com.tencent.mm",
+                "com.tencent.mm.plugin.wallet_core.ui.WalletOrderInfoNewUI"
+            )
+        )
+        assertFalse(
+            CaptureWindowGuard.isNewPaymentInitiationActivity(
+                "com.tencent.mm",
+                "com.tencent.mm.plugin.appbrand.ui.AppBrandUI00"
+            )
+        )
+        assertFalse(
+            CaptureWindowGuard.isNewPaymentInitiationActivity(
+                "com.tencent.mm",
+                "com.tencent.mm.ui.LauncherUI"
+            )
+        )
+        assertFalse(
+            CaptureWindowGuard.isNewPaymentInitiationActivity(
+                "com.xunmeng.pinduoduo",
+                "com.alipay.sdk.app.H5PayResultActivity"
+            )
+        )
+    }
+
+    @Test
+    fun ac7_standaloneCancelledAndRefundPendingMiniProgramPages_areBlockedWhileCompletedRefundAndSafeguardsPass() {
+        // 1. 茶饮/餐饮小程序独立状态「已取消 / 取消成功 / 已退单 / 退款中」100% 拦截（防退单跳转页误记为支出）
+        for (standaloneStatus in listOf("已取消", "取消成功", "已退单", "退款中")) {
+            val nayukiCancelledPage = CaptureWindowGuard.evaluateBillWindow(
+                WindowInspectionInput(
+                    packageName = "com.tencent.mm",
+                    verifiedActivity = "com.tencent.mm.plugin.appbrand.ui.AppBrandUI00",
+                    rawPageText = "奈雪的茶 | $standaloneStatus | 霸气茉莉初雪 1杯 | 实付 ¥19.80 | 订单号 NY20261126191215 | 下单时间 2026-11-18 15:52:15",
+                    nowMillis = nowMillis
+                )
+            )
+            assertFalse("Standalone status '$standaloneStatus' must be rejected", nayukiCancelledPage.accepted)
+            assertEquals(WindowRejectReason.CLOSED_FAILED_OR_REFUND_PENDING, nayukiCancelledPage.reason)
+        }
+
+        // 2. 已完成的真实退款详情页（退款成功 / 已退款 / 退款到账）正常放行供引擎识别为 REFUND_OFFSET
+        for (completedRefundStatus in listOf("退款成功", "已退款", "退款到账")) {
+            val completedRefundPage = CaptureWindowGuard.evaluateBillWindow(
+                WindowInspectionInput(
+                    packageName = "com.tencent.mm",
+                    verifiedActivity = "com.tencent.mm.plugin.appbrand.ui.AppBrandUI00",
+                    rawPageText = "奈雪的茶 | $completedRefundStatus | 霸气茉莉初雪 | 退款金额 ¥19.80 | 订单号 NY20261126191215 | 退款时间 2026-11-18 15:57:30",
+                    nowMillis = nowMillis
+                )
+            )
+            assertTrue("Completed refund status '$completedRefundStatus' must pass guard", completedRefundPage.accepted)
+        }
+
+        // 3. 含「不支持退单 / 7天无理由退货 / 随时退」保障文案的正常已支付订单详情绝不能被误杀
+        val validOrderWithSafeguard = CaptureWindowGuard.evaluateBillWindow(
+            WindowInspectionInput(
+                packageName = "com.tencent.mm",
+                verifiedActivity = "com.tencent.mm.plugin.appbrand.ui.AppBrandUI00",
+                rawPageText = "奈雪的茶 | 制作中 | 霸气茉莉初雪 | 现制饮品制作后不支持退单 | 7天无理由退货 | 实付 ¥19.80 | 合计 ¥26.00 | 订单号 NY20261126193818 | 下单时间 2026-11-18 15:58:18",
+                nowMillis = nowMillis
+            )
+        )
+        assertTrue(validOrderWithSafeguard.accepted)
+        assertTrue(validOrderWithSafeguard.hasExplicitOrderNo)
+    }
 }
