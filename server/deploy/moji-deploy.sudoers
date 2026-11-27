@@ -1,0 +1,6 @@
+# Restricted sudoers policy for MoJi Cloud GitHub Actions auto-deploy user.
+# Install: install -o root -g root -m 0440 moji-deploy.sudoers /etc/sudoers.d/moji-deploy
+# Verify:  visudo -cf /etc/sudoers.d/moji-deploy
+
+Defaults:moji-deploy !authenticate, !requiretty
+moji-deploy ALL=(root) NOPASSWD: /usr/local/sbin/moji-atomic-update "", /usr/bin/systemctl is-active moji-cloud
