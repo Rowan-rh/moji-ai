@@ -1473,7 +1473,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         backupWallets: List<WalletEntity>,
         backupTxs: List<TransactionEntity>,
         backupRules: List<RecurringRuleEntity>,
-        snapshot: MoJiFullBackupSnapshot
+        snapshot: MoJiFullBackupSnapshot,
+        cloudAvatarWebpBytes: ByteArray? = null
     ): Int {
         MoJiCloudSyncClient.beginRestoreSuppression()
         return try {
@@ -1570,13 +1571,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             if (snapshot.userProfileJson.isNotBlank()) {
                 val previousNickname = UserProfileManager.currentConfig.nickname
-                if (UserProfileManager.restoreFromBackupJson(snapshot.userProfileJson, app)) {
+                if (UserProfileManager.restoreFromBackupJson(
+                        rawJson = snapshot.userProfileJson,
+                        context = app,
+                        cloudAvatarWebpBytes = cloudAvatarWebpBytes
+                    )
+                ) {
                     MoJiCloudSyncClient.syncMemberLabelWithNickname(
                         context = app,
                         newNickname = UserProfileManager.currentConfig.nickname,
                         previousNickname = previousNickname,
                         fromSnapshotRestore = true
                     )
+                }
+            } else if (cloudAvatarWebpBytes != null) {
+                withContext(Dispatchers.IO) {
+                    UserProfileManager.applyCloudAvatarBytes(app, cloudAvatarWebpBytes)
                 }
             }
             MoJiCloudSyncClient.recordRestoredState(restoredSig)
@@ -1736,6 +1746,115 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun connectMoJiCloudWithDeviceSk(
+        draftConfig: MoJiCloudConfig,
+        createIfMissing: Boolean = false,
+        onSelectionRequired: (List<MoJiCloudSyncClient.FamilyMemberItemDto>) -> Unit,
+        onBound: (MoJiCloudConfig, Boolean, String) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val cleanLabel = draftConfig.memberLabel.trim()
+            if (cleanLabel.isNotEmpty() && cleanLabel != UserProfileManager.DEFAULT_NICKNAME) {
+                val prevNick = UserProfileManager.currentConfig.nickname
+                if (prevNick == UserProfileManager.DEFAULT_NICKNAME || prevNick != cleanLabel) {
+                    UserProfileManager.updateNickname(cleanLabel)
+                }
+            }
+            val res = MoJiCloudSyncClient.connectWithDeviceSk(
+                context = app,
+                draftConfig = draftConfig,
+                createIfMissing = createIfMissing
+            )
+            res.fold(
+                onSuccess = { outcome ->
+                    when (outcome) {
+                        is MoJiCloudSyncClient.DeviceConnectOutcome.SelectionRequired -> {
+                            onSelectionRequired(outcome.members)
+                        }
+                        is MoJiCloudSyncClient.DeviceConnectOutcome.Bound -> {
+                            onBound(outcome.config, outcome.requiresInitialPull, outcome.message)
+                        }
+                    }
+                },
+                onFailure = { err ->
+                    onError(err.message ?: "连接云端服务器失败")
+                }
+            )
+        }
+    }
+
+    fun claimMoJiCloudMemberAndRestore(
+        draftConfig: MoJiCloudConfig,
+        targetMember: MoJiCloudSyncClient.FamilyMemberItemDto,
+        onResult: (Boolean, String) -> Unit
+    ) {
+        viewModelScope.launch {
+            val claimRes = MoJiCloudSyncClient.claimFamilyMember(
+                context = app,
+                draftConfig = draftConfig,
+                targetUserId = targetMember.userId
+            )
+            val bound = claimRes.getOrElse { err ->
+                onResult(false, "接管失败：${err.message ?: err.javaClass.simpleName}")
+                return@launch
+            }
+
+            if (bound.config.remoteRevision <= 0L) {
+                val who = targetMember.displayName.ifBlank { "家人" }
+                onResult(true, "✅ 已成功绑定「$who」的账号（云端尚无快照），点击「立即同步到云端」即可建立首次备份")
+                return@launch
+            }
+
+            val pullRes = MoJiCloudSyncClient.downloadSnapshotAndScreenshots(app, bound.config)
+            pullRes.fold(
+                onSuccess = { bundle ->
+                    try {
+                        val txCount = withContext(NonCancellable) {
+                            val preRestoreMemberLabel = MoJiCloudSyncClient.configFlow.value.memberLabel
+                            val count = applyRestoredSnapshotInternal(
+                                backupWallets = bundle.wallets,
+                                backupTxs = bundle.transactions,
+                                backupRules = bundle.recurringRules,
+                                snapshot = bundle.snapshot,
+                                cloudAvatarWebpBytes = bundle.avatarWebpBytes
+                            )
+                            MoJiCloudSyncClient.commitPulledConfigAfterRestore(
+                                context = app,
+                                pulledConfig = bundle.updatedConfig,
+                                preRestoreMemberLabel = preRestoreMemberLabel
+                            )
+                            count
+                        }
+                        val ssText = if (bundle.syncedScreenshots > 0) "、${bundle.syncedScreenshots} 张原图" else ""
+                        val avatarText = if (bundle.avatarWebpBytes != null) "及自定义头像" else ""
+                        val failText = if (bundle.failedScreenshots > 0) "（另有 ${bundle.failedScreenshots} 张原图可稍后重试拉取）" else ""
+                        onResult(
+                            true,
+                            "✅ 已接管「${targetMember.displayName.ifBlank { "原成员" }}」并恢复 v${bundle.revision}：${bundle.wallets.size} 个账户、$txCount 笔账单$ssText$avatarText$failText"
+                        )
+                    } catch (ce: CancellationException) {
+                        throw ce
+                    } catch (err: Exception) {
+                        onResult(false, "已绑定成员，但恢复本地账本失败：${err.message ?: err.javaClass.simpleName}（请点击「从云端拉取恢复」重试）")
+                    }
+                },
+                onFailure = { err ->
+                    onResult(false, "已绑定成员，但拉取云端快照失败：${err.message}（请点击「从云端拉取恢复」重试）")
+                }
+            )
+        }
+    }
+
+    fun disconnectMoJiCloudSync(onDone: (String) -> Unit = {}) {
+        viewModelScope.launch {
+            MoJiCloudSyncClient.disconnectCloudSync(app)
+            val msg = "已断开默记云同步连接，本机全部账本、账户与账单均已完整保留"
+            postMessage(msg)
+            onDone(msg)
+        }
+    }
+
     fun uploadBackupToMoJiCloud(
         draftConfig: MoJiCloudConfig,
         forceOverwrite: Boolean = false,
@@ -1786,7 +1905,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 backupWallets = bundle.wallets,
                                 backupTxs = bundle.transactions,
                                 backupRules = bundle.recurringRules,
-                                snapshot = bundle.snapshot
+                                snapshot = bundle.snapshot,
+                                cloudAvatarWebpBytes = bundle.avatarWebpBytes
                             )
                             MoJiCloudSyncClient.commitPulledConfigAfterRestore(
                                 context = app,
@@ -1796,8 +1916,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             count
                         }
                         val ssText = if (bundle.syncedScreenshots > 0) "、拉回 ${bundle.syncedScreenshots} 张账单原图" else ""
+                        val avatarText = if (bundle.avatarWebpBytes != null) "、已同步自定义头像" else ""
                         val failText = if (bundle.failedScreenshots > 0) "（另有 ${bundle.failedScreenshots} 张原图下载失败，可稍后重新拉取补齐）" else ""
-                        onResult("✅ 已从默记云 v${bundle.revision} 恢复：${bundle.wallets.size} 个账户、$txCount 笔账单$ssText$failText")
+                        onResult("✅ 已从默记云 v${bundle.revision} 恢复：${bundle.wallets.size} 个账户、$txCount 笔账单$ssText$avatarText$failText")
                     } catch (ce: CancellationException) {
                         throw ce
                     } catch (err: Exception) {

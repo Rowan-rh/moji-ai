@@ -153,6 +153,7 @@ object UserProfileManager {
     const val PROFILE_DIR_NAME = "profile"
     const val DEFAULT_NICKNAME = "默记用户"
     const val MAX_NICKNAME_LENGTH = 16
+    const val MAX_CLOUD_AVATAR_BYTES = 512 * 1024
 
     private const val MAX_SOURCE_IMAGE_BYTES = 16 * 1024 * 1024
     private const val MAX_AVATAR_FILE_BYTES = 4L * 1024L * 1024L
@@ -379,61 +380,17 @@ object UserProfileManager {
                     oriented.recycle()
                 }
 
-                ByteArrayOutputStream().use { bos ->
-                    val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                        Bitmap.CompressFormat.WEBP_LOSSY
-                    } else {
-                        @Suppress("DEPRECATION")
-                        Bitmap.CompressFormat.WEBP
-                    }
-                    cropped.compress(format, 86, bos)
-                    bos.toByteArray()
-                }
+                encodeSquareBitmapToWebpUnderLimit(cropped)
             } finally {
                 squareBitmap?.takeIf { !it.isRecycled }?.recycle()
                 orientedBitmap?.takeIf { !it.isRecycled }?.recycle()
                 decodedBitmap?.takeIf { !it.isRecycled }?.recycle()
             }
-            if (!isValidAvatarImageBytes(outBytes)) {
+            if (!isValidWebpAvatarBytes(outBytes)) {
                 throw IllegalStateException("头像压缩编码失败")
             }
 
-            val profileDir = File(appContext.filesDir, PROFILE_DIR_NAME).apply {
-                if (!exists()) mkdirs()
-            }
-            profileDirCanonicalPrefix = profileDir.canonicalPath.replace('\\', '/').trimEnd('/') + "/"
-
-            val now = System.currentTimeMillis()
-            val targetFile = File(profileDir, "avatar_$now.webp")
-            val tmpFile = File(profileDir, ".tmp_avatar_${System.nanoTime()}.webp")
-            try {
-                FileOutputStream(tmpFile).use { fos ->
-                    fos.write(outBytes)
-                    fos.fd.sync()
-                }
-                if (!tmpFile.renameTo(targetFile)) {
-                    tmpFile.copyTo(targetFile, overwrite = true)
-                    tmpFile.delete()
-                }
-            } finally {
-                if (tmpFile.exists()) tmpFile.delete()
-            }
-
-            // 清理沙盒目录中旧的头像文件，避免多次更换产生孤儿缓存
-            profileDir.listFiles()?.forEach { f ->
-                if (f.isFile && f.name != targetFile.name && !f.name.startsWith(".tmp_")) {
-                    f.delete()
-                }
-            }
-
-            val updated = synchronized(this) {
-                val next = _configFlow.value.copy(
-                    customAvatarPath = targetFile.absolutePath,
-                    avatarUpdatedAtMillis = now
-                )
-                persist(next)
-                next
-            }
+            val updated = writeValidatedAvatarBytesToSandbox(appContext, outBytes)
             Result.success(updated)
         } catch (oom: OutOfMemoryError) {
             Result.failure(IllegalArgumentException("图片尺寸过大导致内存不足，请选择常规尺寸图片"))
@@ -490,6 +447,125 @@ object UserProfileManager {
     fun isValidAvatarImageBytes(bytes: ByteArray): Boolean {
         if (bytes.size < 12 || bytes.size.toLong() > MAX_AVATAR_FILE_BYTES) return false
         return isSupportedImageHeader(bytes, bytes.size)
+    }
+
+    /**
+     * 严格校验云端同步专用 WebP 头像字节（`RIFF....WEBP` 魔数且体积在 `16B ..= 512KB` 之间）。
+     */
+    fun isValidWebpAvatarBytes(bytes: ByteArray): Boolean {
+        if (bytes.size !in 16..MAX_CLOUD_AVATAR_BYTES) return false
+        return bytes[0] == 'R'.code.toByte() &&
+            bytes[1] == 'I'.code.toByte() &&
+            bytes[2] == 'F'.code.toByte() &&
+            bytes[3] == 'F'.code.toByte() &&
+            bytes[8] == 'W'.code.toByte() &&
+            bytes[9] == 'E'.code.toByte() &&
+            bytes[10] == 'B'.code.toByte() &&
+            bytes[11] == 'P'.code.toByte()
+    }
+
+    /**
+     * 读取本机当前有效的自定义头像 WebP 字节供云同步上传；若当前使用预设头像则返回 `null`。
+     */
+    fun readCustomAvatarWebpBytes(context: Context): ByteArray? {
+        val appContext = context.applicationContext
+        val current = _configFlow.value
+        val file = resolveValidCustomAvatarFile(current, appContext) ?: return null
+        val raw = runCatching { file.readBytes() }.getOrNull() ?: return null
+        if (isValidWebpAvatarBytes(raw)) {
+            return raw
+        }
+        // 兼容极早期非 WebP 或超 512KB 头像文件：在后台自动重编码为合规 WebP
+        return runCatching {
+            val decoded = BitmapFactory.decodeByteArray(raw, 0, raw.size) ?: return null
+            try {
+                val square = centerCropAndScaleSquare(decoded, AVATAR_TARGET_PX)
+                try {
+                    encodeSquareBitmapToWebpUnderLimit(square).takeIf { isValidWebpAvatarBytes(it) }
+                } finally {
+                    if (square !== decoded && !square.isRecycled) square.recycle()
+                }
+            } finally {
+                if (!decoded.isRecycled) decoded.recycle()
+            }
+        }.getOrNull()
+    }
+
+    /**
+     * 将云端下载的合法 WebP 自定义头像原子写入应用沙盒并更新配置。
+     */
+    fun applyCloudAvatarBytes(context: Context, webpBytes: ByteArray): Result<UserProfileConfig> {
+        if (!isValidWebpAvatarBytes(webpBytes)) {
+            return Result.failure(IllegalArgumentException("云端自定义头像非合法 WebP 格式或超出 512KB 上限"))
+        }
+        return runCatching {
+            writeValidatedAvatarBytesToSandbox(context.applicationContext, webpBytes)
+        }
+    }
+
+    private fun encodeSquareBitmapToWebpUnderLimit(cropped: Bitmap): ByteArray {
+        val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Bitmap.CompressFormat.WEBP_LOSSY
+        } else {
+            @Suppress("DEPRECATION")
+            Bitmap.CompressFormat.WEBP
+        }
+        var lastEncoded = ByteArray(0)
+        for (quality in intArrayOf(86, 74, 60, 45)) {
+            val encoded = ByteArrayOutputStream().use { bos ->
+                cropped.compress(format, quality, bos)
+                bos.toByteArray()
+            }
+            lastEncoded = encoded
+            if (encoded.size in 16..MAX_CLOUD_AVATAR_BYTES) {
+                return encoded
+            }
+        }
+        return lastEncoded
+    }
+
+    private fun writeValidatedAvatarBytesToSandbox(
+        appContext: Context,
+        webpBytes: ByteArray
+    ): UserProfileConfig {
+        val targetFile = writeWebpFileToProfileDir(appContext, webpBytes)
+        val now = System.currentTimeMillis()
+        return synchronized(this) {
+            val next = _configFlow.value.copy(
+                customAvatarPath = targetFile.absolutePath,
+                avatarUpdatedAtMillis = now
+            )
+            persist(next)
+            next
+        }
+    }
+
+    private fun writeWebpFileToProfileDir(appContext: Context, webpBytes: ByteArray): File {
+        val profileDir = File(appContext.filesDir, PROFILE_DIR_NAME).apply {
+            if (!exists()) mkdirs()
+        }
+        profileDirCanonicalPrefix = profileDir.canonicalPath.replace('\\', '/').trimEnd('/') + "/"
+        val now = System.currentTimeMillis()
+        val targetFile = File(profileDir, "avatar_${now}_${System.nanoTime() and 0xFFFF}.webp")
+        val tmpFile = File(profileDir, ".tmp_avatar_${System.nanoTime()}.webp")
+        try {
+            FileOutputStream(tmpFile).use { fos ->
+                fos.write(webpBytes)
+                fos.fd.sync()
+            }
+            if (!tmpFile.renameTo(targetFile)) {
+                tmpFile.copyTo(targetFile, overwrite = true)
+                tmpFile.delete()
+            }
+        } finally {
+            if (tmpFile.exists()) tmpFile.delete()
+        }
+        profileDir.listFiles()?.forEach { f ->
+            if (f.isFile && f.name != targetFile.name && !f.name.startsWith(".tmp_")) {
+                f.delete()
+            }
+        }
+        return targetFile
     }
 
     private fun isSupportedImageHeader(bytes: ByteArray, length: Int): Boolean {
@@ -594,21 +670,49 @@ object UserProfileManager {
      * - 当快照携带资料时恢复昵称与预设头像；若快照导出时使用自定义头像且本机当前自定义头像文件有效则保留，否则优雅回退预设头像。
      */
     @Synchronized
-    fun restoreFromBackupJson(rawJson: String?, context: Context? = null): Boolean {
-        if (rawJson.isNullOrBlank()) return false
+    fun restoreFromBackupJson(
+        rawJson: String?,
+        context: Context? = null,
+        cloudAvatarWebpBytes: ByteArray? = null
+    ): Boolean {
+        if (rawJson.isNullOrBlank()) {
+            if (cloudAvatarWebpBytes != null && context != null && isValidWebpAvatarBytes(cloudAvatarWebpBytes)) {
+                val savedFile = runCatching {
+                    writeWebpFileToProfileDir(context.applicationContext, cloudAvatarWebpBytes)
+                }.getOrNull() ?: return false
+                val updated = _configFlow.value.copy(
+                    customAvatarPath = savedFile.absolutePath,
+                    avatarUpdatedAtMillis = System.currentTimeMillis()
+                )
+                persist(updated)
+                return true
+            }
+            return false
+        }
         val dto = runCatching {
             jsonCodec.decodeFromString<UserProfileBackupDto>(rawJson.trim())
         }.getOrNull() ?: return false
         val current = _configFlow.value
-        val preservedCustomPath = if (dto.hadCustomAvatar && current.customAvatarPath.isNotBlank()) {
-            resolveValidCustomAvatarFile(current.customAvatarPath, context)?.absolutePath.orEmpty()
-        } else {
-            ""
+        val resolvedCustomPath = when {
+            cloudAvatarWebpBytes != null && context != null && isValidWebpAvatarBytes(cloudAvatarWebpBytes) -> {
+                runCatching {
+                    writeWebpFileToProfileDir(context.applicationContext, cloudAvatarWebpBytes).absolutePath
+                }.getOrDefault("")
+            }
+            dto.hadCustomAvatar && current.customAvatarPath.isNotBlank() -> {
+                resolveValidCustomAvatarFile(current.customAvatarPath, context)?.absolutePath.orEmpty()
+            }
+            else -> {
+                if (current.customAvatarPath.isNotBlank()) {
+                    deleteCustomAvatarFileIfSafe(current.customAvatarPath, context)
+                }
+                ""
+            }
         }
         val restored = UserProfileConfig(
             nickname = normalizeNickname(dto.nickname),
             presetAvatar = PresetAvatarStyle.fromNameOrDefault(dto.presetAvatarName),
-            customAvatarPath = preservedCustomPath,
+            customAvatarPath = resolvedCustomPath,
             avatarUpdatedAtMillis = System.currentTimeMillis()
         )
         persist(restored)

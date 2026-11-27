@@ -55,10 +55,12 @@ data class MoJiCloudConfig(
     val syncKey: String = "",
     val memberLabel: String = "",
     val autoSyncEnabled: Boolean = true,
+    val authMode: String = MoJiCloudSyncClient.AUTH_MODE_DEVICE_SK,
     val userId: String = "",
     val accessToken: String = "",
     val tokenExpiresAtMillis: Long = 0L,
     val boundTargetSignature: String = "",
+    val deviceFingerprintHint: String = "",
     val lastSyncedRevision: Long = 0L,
     val lastSyncTimeMillis: Long = 0L,
     val remoteRevision: Long = 0L,
@@ -66,24 +68,46 @@ data class MoJiCloudConfig(
     val remoteWalletCount: Int = 0,
     val remoteScreenshotCount: Int = 0,
     val remoteUpdatedBy: String = "",
-    val remoteUpdatedAtMillis: Long = 0L
+    val remoteUpdatedAtMillis: Long = 0L,
+    val remoteAvatarSha256: String = "",
+    val lastSyncedAvatarSha256: String = ""
 ) {
+    /**
+     * 判断当前绑定态是否使用旧版 `Sync Key` 模式：
+     * 存量已绑定用户（`boundTargetSignature` 为旧版 32 位 hex 且不带 `dsk_` 前缀）或显式指定 `sync_key` 时无损兼容。
+     */
+    val usesLegacySyncKeyAuth: Boolean
+        get() = authMode == MoJiCloudSyncClient.AUTH_MODE_SYNC_KEY ||
+            (boundTargetSignature.isNotBlank() && !boundTargetSignature.startsWith(MoJiCloudSyncClient.DEVICE_SK_SIG_PREFIX))
+
     val currentTargetSignature: String
-        get() = MoJiCloudSyncClient.computeTargetSignature(serverUrl, syncKey)
+        get() = if (usesLegacySyncKeyAuth) {
+            MoJiCloudSyncClient.computeTargetSignature(serverUrl, syncKey)
+        } else {
+            MoJiCloudSyncClient.computeDeviceSkTargetSignature(serverUrl, serverAccessCode)
+        }
 
     val isTargetBound: Boolean
-        get() = serverUrl.isNotBlank() &&
-            syncKey.isNotBlank() &&
-            userId.isNotBlank() &&
-            boundTargetSignature.isNotBlank() &&
-            boundTargetSignature == currentTargetSignature
+        get() = if (usesLegacySyncKeyAuth) {
+            serverUrl.isNotBlank() &&
+                syncKey.isNotBlank() &&
+                userId.isNotBlank() &&
+                boundTargetSignature.isNotBlank() &&
+                boundTargetSignature == currentTargetSignature
+        } else {
+            serverUrl.isNotBlank() &&
+                serverAccessCode.isNotBlank() &&
+                userId.isNotBlank() &&
+                boundTargetSignature.startsWith(MoJiCloudSyncClient.DEVICE_SK_SIG_PREFIX) &&
+                boundTargetSignature == currentTargetSignature
+        }
 
     val effectiveLastSyncedRevision: Long
         get() = if (isTargetBound) lastSyncedRevision else 0L
 
     /**
      * 仅当已成功完成首次同步（或已与云端版本对齐）时，才允许后台静默自动推送，
-     * 杜绝新手机刚填入旧密钥、尚未拉取恢复时自动把空账本推上云端。
+     * 杜绝新手机刚认领家庭成员或刚绑定旧密钥、尚未拉取恢复时自动把空账本推上云端。
      */
     val canAutoPushSafely: Boolean
         get() = autoSyncEnabled &&
@@ -106,7 +130,8 @@ data class CloudPulledRestoreBundle(
     val revision: Long,
     val syncedScreenshots: Int,
     val updatedConfig: MoJiCloudConfig,
-    val failedScreenshots: Int = 0
+    val failedScreenshots: Int = 0,
+    val avatarWebpBytes: ByteArray? = null
 )
 
 /**
@@ -117,15 +142,21 @@ data class CloudPulledRestoreBundle(
  */
 object MoJiCloudSyncClient {
 
+    const val AUTH_MODE_DEVICE_SK = "device_sk"
+    const val AUTH_MODE_SYNC_KEY = "sync_key"
+    internal const val DEVICE_SK_SIG_PREFIX = "dsk_"
+
     private const val PREFS_NAME = "moji_cloud_sync_prefs"
     private const val KEY_CONFIG_JSON = "cloud_sync_config_json"
     private const val KEY_FALLBACK_DEVICE_ID = "fallback_device_id"
+    private const val KEY_FALLBACK_FINGERPRINT_SEED = "fallback_device_fp_seed"
     private const val PAIR_SCHEME_PREFIX = "moji-pair://v1"
 
     // 去除易混淆字符 0/O/1/I 后的 32 字符字母表（每字符 5 bit 熵，16 字符共 80 bit 随机熵）
     private const val KEY_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
     private const val MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
     private const val MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024
+    private const val MAX_AVATAR_BYTES = UserProfileManager.MAX_CLOUD_AVATAR_BYTES
 
     private val syncMutex = Mutex()
     private val secureRandom = SecureRandom()
@@ -335,6 +366,82 @@ object MoJiCloudSyncClient {
         @SerialName("snapshot_sha256") val snapshotSha256: String = "",
         @SerialName("updated_by_device") val updatedByDevice: String = "",
         @SerialName("updated_by_member") val updatedByMember: String = "",
+        @SerialName("updated_at_ms") val updatedAtMs: Long = 0L,
+        @SerialName("avatar_sha256") val avatarSha256: String = "",
+        @SerialName("avatar_updated_at_ms") val avatarUpdatedAtMs: Long = 0L
+    )
+
+    @Serializable
+    data class FamilyMemberItemDto(
+        @SerialName("user_id") val userId: String = "",
+        @SerialName("display_name") val displayName: String = "",
+        @SerialName("last_device_name") val lastDeviceName: String = "",
+        @SerialName("tx_count") val txCount: Int = 0,
+        @SerialName("wallet_count") val walletCount: Int = 0,
+        @SerialName("screenshot_count") val screenshotCount: Int = 0,
+        @SerialName("latest_revision") val latestRevision: Long = 0L,
+        @SerialName("updated_at_ms") val updatedAtMs: Long = 0L,
+        @SerialName("has_avatar") val hasAvatar: Boolean = false
+    )
+
+    sealed class DeviceConnectOutcome {
+        data class Bound(
+            val config: MoJiCloudConfig,
+            val isNewAccount: Boolean,
+            val requiresInitialPull: Boolean,
+            val message: String
+        ) : DeviceConnectOutcome()
+
+        data class SelectionRequired(
+            val serverUrl: String,
+            val serverAccessCode: String,
+            val memberLabel: String,
+            val members: List<FamilyMemberItemDto>
+        ) : DeviceConnectOutcome()
+    }
+
+    @Serializable
+    private data class DeviceLoginReqDto(
+        @SerialName("server_access_code") val serverAccessCode: String? = null,
+        @SerialName("device_fingerprint") val deviceFingerprint: String,
+        @SerialName("device_id") val deviceId: String = "",
+        @SerialName("device_name") val deviceName: String = "",
+        @SerialName("member_label") val memberLabel: String = "",
+        @SerialName("app_env") val appEnv: String = "prod",
+        @SerialName("app_version") val appVersion: String = "",
+        @SerialName("create_if_missing") val createIfMissing: Boolean = false
+    )
+
+    @Serializable
+    private data class ClaimMemberReqDto(
+        @SerialName("server_access_code") val serverAccessCode: String? = null,
+        @SerialName("target_user_id") val targetUserId: String,
+        @SerialName("device_fingerprint") val deviceFingerprint: String,
+        @SerialName("device_id") val deviceId: String = "",
+        @SerialName("device_name") val deviceName: String = "",
+        @SerialName("member_label") val memberLabel: String = "",
+        @SerialName("app_env") val appEnv: String = "prod",
+        @SerialName("app_version") val appVersion: String = ""
+    )
+
+    @Serializable
+    private data class DeviceLoginRespDto(
+        val status: String = "",
+        @SerialName("access_token") val accessToken: String? = null,
+        @SerialName("expires_at_ms") val expiresAtMs: Long? = null,
+        @SerialName("user_id") val userId: String? = null,
+        @SerialName("display_name") val displayName: String? = null,
+        @SerialName("key_hint") val keyHint: String? = null,
+        @SerialName("is_new_account") val isNewAccount: Boolean? = null,
+        @SerialName("avatar_sha256") val avatarSha256: String? = null,
+        @SerialName("account_summary") val accountSummary: AccountSummaryDto? = null,
+        @SerialName("existing_members") val existingMembers: List<FamilyMemberItemDto> = emptyList()
+    )
+
+    @Serializable
+    private data class PutAvatarRespDto(
+        @SerialName("avatar_sha256") val avatarSha256: String = "",
+        @SerialName("byte_size") val byteSize: Int = 0,
         @SerialName("updated_at_ms") val updatedAtMs: Long = 0L
     )
 
@@ -442,8 +549,22 @@ object MoJiCloudSyncClient {
             .takeIf { it.isNotEmpty() && it != UserProfileManager.DEFAULT_NICKNAME }
             ?: defaultDeviceName()
         val ensuredLabel = base.memberLabel.trim().ifBlank { preferredDefaultLabel }
-        val normalized = base.copy(syncKey = ensuredKey, memberLabel = ensuredLabel)
-        if (parsed == null || parsed.syncKey != ensuredKey || parsed.memberLabel != ensuredLabel) {
+        val resolvedAuthMode = when {
+            base.boundTargetSignature.isNotBlank() &&
+                !base.boundTargetSignature.startsWith(DEVICE_SK_SIG_PREFIX) -> AUTH_MODE_SYNC_KEY
+            base.authMode == AUTH_MODE_SYNC_KEY -> AUTH_MODE_SYNC_KEY
+            else -> AUTH_MODE_DEVICE_SK
+        }
+        val normalized = base.copy(
+            syncKey = ensuredKey,
+            memberLabel = ensuredLabel,
+            authMode = resolvedAuthMode
+        )
+        if (parsed == null ||
+            parsed.syncKey != ensuredKey ||
+            parsed.memberLabel != ensuredLabel ||
+            parsed.authMode != resolvedAuthMode
+        ) {
             saveConfig(context, normalized)
         }
         return normalized
@@ -622,6 +743,61 @@ object MoJiCloudSyncClient {
         return sha256Hex("$cleanUrl|$cleanKey".toByteArray(Charsets.UTF_8)).take(32)
     }
 
+    fun computeDeviceSkTargetSignature(
+        serverUrl: String,
+        serverAccessCode: String,
+        appEnv: String = currentAppEnv
+    ): String {
+        val cleanUrl = serverUrl.trim().trimEnd('/').lowercase(Locale.US)
+        val cleanSk = serverAccessCode.trim()
+        if (cleanUrl.isEmpty() || cleanSk.isEmpty()) return ""
+        val digest = sha256Hex("moji-dsk-target:$appEnv:$cleanUrl|$cleanSk".toByteArray(Charsets.UTF_8)).take(28)
+        return "$DEVICE_SK_SIG_PREFIX$digest"
+    }
+
+    internal fun computeDeviceFingerprintFromSeed(
+        rawSeed: String,
+        appEnv: String = currentAppEnv
+    ): String {
+        val cleanSeed = rawSeed.trim()
+        require(cleanSeed.isNotEmpty()) { "device fingerprint seed must not be blank" }
+        return sha256Hex("moji-client-device-fp-v1:$appEnv:$cleanSeed".toByteArray(Charsets.UTF_8))
+    }
+
+    /**
+     * 计算当前设备的定长哈希指纹（基于 `Settings.Secure.ANDROID_ID` 与 `currentAppEnv` 域分离）：
+     * - 同机卸载重装 `ANDROID_ID` 不变，可自动识别原账号无感重连；
+     * - 同机 `com.moji.ai` (`prod`) 与 `com.moji.ai.qa` (`qa`) 物理隔离。
+     */
+    fun getDeviceFingerprint(context: Context): String {
+        val appCtx = context.applicationContext
+        val rawAndroidId = runCatching {
+            Settings.Secure.getString(appCtx.contentResolver, Settings.Secure.ANDROID_ID)
+        }.getOrNull().orEmpty().trim().lowercase(Locale.US)
+        val seed = if (rawAndroidId.length >= 8 && rawAndroidId != "9774d56d682e549c") {
+            "aid:$rawAndroidId"
+        } else {
+            val prefs = appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val cached = prefs.getString(KEY_FALLBACK_FINGERPRINT_SEED, null)
+            if (!cached.isNullOrBlank()) {
+                cached
+            } else {
+                val randomBytes = ByteArray(16).also { secureRandom.nextBytes(it) }
+                val generated = "rnd:" + sha256Hex(randomBytes).take(32)
+                prefs.edit().putString(KEY_FALLBACK_FINGERPRINT_SEED, generated).apply()
+                generated
+            }
+        }
+        return computeDeviceFingerprintFromSeed(seed, currentAppEnv)
+    }
+
+    fun maskedDeviceFingerprintHint(context: Context): String {
+        val storedHint = _configFlow.value.deviceFingerprintHint.trim()
+        if (storedHint.isNotEmpty()) return storedHint
+        val fp = getDeviceFingerprint(context)
+        return "FP-****-${fp.takeLast(4).uppercase(Locale.US)}"
+    }
+
     /**
      * 生成分享给家人的服务器配对口令（仅含服务器地址与家庭接入码，不含个人 Sync Key，确保家人生成独立账本）
      */
@@ -744,13 +920,80 @@ object MoJiCloudSyncClient {
         draftConfig: MoJiCloudConfig
     ): Result<Pair<MoJiCloudConfig, String>> = withContext(Dispatchers.IO) {
         syncMutex.withLock {
-            performKeyLoginInternal(context, draftConfig, persistImmediately = true)
+            performKeyLoginInternal(
+                context = context,
+                draftConfig = draftConfig.copy(authMode = AUTH_MODE_SYNC_KEY),
+                persistImmediately = true
+            )
+        }
+    }
+
+    suspend fun connectWithDeviceSk(
+        context: Context,
+        draftConfig: MoJiCloudConfig,
+        createIfMissing: Boolean = false
+    ): Result<DeviceConnectOutcome> = withContext(Dispatchers.IO) {
+        syncMutex.withLock {
+            performDeviceLoginInternal(
+                context = context,
+                draftConfig = draftConfig.copy(authMode = AUTH_MODE_DEVICE_SK),
+                createIfMissing = createIfMissing,
+                persistImmediately = true
+            )
+        }
+    }
+
+    suspend fun claimFamilyMember(
+        context: Context,
+        draftConfig: MoJiCloudConfig,
+        targetUserId: String
+    ): Result<DeviceConnectOutcome.Bound> = withContext(Dispatchers.IO) {
+        syncMutex.withLock {
+            performClaimMemberInternal(
+                context = context,
+                draftConfig = draftConfig.copy(authMode = AUTH_MODE_DEVICE_SK),
+                targetUserId = targetUserId,
+                persistImmediately = true
+            )
+        }
+    }
+
+    /**
+     * 安全断开云同步连接：清除本地云端会话凭证、SK 与待推送标记，100% 保留本地所有账本、资产账户与账单数据。
+     */
+    suspend fun disconnectCloudSync(context: Context): MoJiCloudConfig = withContext(Dispatchers.IO) {
+        syncMutex.withLock {
+            clearPendingAutoPush(context)
+            val current = _configFlow.value
+            val disconnected = current.copy(
+                serverAccessCode = "",
+                authMode = AUTH_MODE_DEVICE_SK,
+                userId = "",
+                accessToken = "",
+                tokenExpiresAtMillis = 0L,
+                boundTargetSignature = "",
+                lastSyncedRevision = 0L,
+                lastSyncTimeMillis = 0L,
+                remoteRevision = 0L,
+                remoteTxCount = 0,
+                remoteWalletCount = 0,
+                remoteScreenshotCount = 0,
+                remoteUpdatedBy = "",
+                remoteUpdatedAtMillis = 0L,
+                remoteAvatarSha256 = "",
+                lastSyncedAvatarSha256 = ""
+            )
+            saveConfig(context, disconnected)
+            disconnected
         }
     }
 
     private fun mergeWithLatestPersistedState(draft: MoJiCloudConfig): MoJiCloudConfig {
         val latest = _configFlow.value
         if (latest.currentTargetSignature != draft.currentTargetSignature) return draft
+        if (latest.userId.isNotBlank() && draft.userId.isNotBlank() && latest.userId != draft.userId) {
+            return draft
+        }
         val mergedLastRev = maxOf(draft.lastSyncedRevision, latest.lastSyncedRevision)
         val useLatestToken = latest.accessToken.isNotBlank() &&
             latest.tokenExpiresAtMillis > draft.tokenExpiresAtMillis
@@ -759,9 +1002,294 @@ object MoJiCloudSyncClient {
             accessToken = if (useLatestToken) latest.accessToken else draft.accessToken,
             tokenExpiresAtMillis = maxOf(draft.tokenExpiresAtMillis, latest.tokenExpiresAtMillis),
             boundTargetSignature = latest.boundTargetSignature.ifBlank { draft.boundTargetSignature },
+            deviceFingerprintHint = latest.deviceFingerprintHint.ifBlank { draft.deviceFingerprintHint },
             lastSyncedRevision = mergedLastRev,
-            remoteRevision = maxOf(draft.remoteRevision, latest.remoteRevision)
+            remoteRevision = maxOf(draft.remoteRevision, latest.remoteRevision),
+            remoteAvatarSha256 = latest.remoteAvatarSha256.ifBlank { draft.remoteAvatarSha256 },
+            lastSyncedAvatarSha256 = latest.lastSyncedAvatarSha256.ifBlank { draft.lastSyncedAvatarSha256 }
         )
+    }
+
+    private fun performDeviceLoginInternal(
+        context: Context,
+        draftConfig: MoJiCloudConfig,
+        createIfMissing: Boolean,
+        persistImmediately: Boolean
+    ): Result<DeviceConnectOutcome> {
+        val baseUrl = validateBaseUrl(draftConfig.serverUrl).getOrElse { return Result.failure(it) }
+        val cleanUrl = baseUrl.toString().trimEnd('/')
+        val cleanSk = draftConfig.serverAccessCode.trim()
+        val cleanMember = draftConfig.memberLabel.trim().ifBlank {
+            UserProfileManager.currentConfig.nickname.trim()
+                .takeIf { it.isNotEmpty() && it != UserProfileManager.DEFAULT_NICKNAME }
+                ?: defaultDeviceName()
+        }
+        val fingerprint = getDeviceFingerprint(context)
+
+        return try {
+            val loginUrl = baseUrl.newBuilder()
+                .addPathSegments("api/v1/auth/device-login")
+                .build()
+            val reqPayload = DeviceLoginReqDto(
+                serverAccessCode = cleanSk.takeIf { it.isNotEmpty() },
+                deviceFingerprint = fingerprint,
+                deviceId = stableDeviceId(context),
+                deviceName = defaultDeviceName(),
+                memberLabel = cleanMember,
+                appEnv = currentAppEnv,
+                appVersion = BuildConfig.VERSION_NAME,
+                createIfMissing = createIfMissing
+            )
+            val bodyBytes = jsonCodec.encodeToString(reqPayload).toByteArray(Charsets.UTF_8)
+            val req = Request.Builder()
+                .url(loginUrl)
+                .post(bodyBytes.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+
+            httpClient.newCall(req).execute().use { resp ->
+                val respText = readCappedUtf8(resp.body?.byteStream(), 2 * 1024 * 1024)
+                if (!resp.isSuccessful) {
+                    val errDto = runCatching { jsonCodec.decodeFromString<ErrorRespDto>(respText) }.getOrNull()
+                    val msg = errDto?.message?.takeIf { it.isNotBlank() }
+                        ?: "云端设备验证失败（HTTP ${resp.code}）"
+                    return Result.failure(IllegalStateException(msg))
+                }
+                val parsed = jsonCodec.decodeFromString<DeviceLoginRespDto>(respText)
+                when (parsed.status) {
+                    "selection_required" -> {
+                        clearPendingAutoPush(context)
+                        Result.success(
+                            DeviceConnectOutcome.SelectionRequired(
+                                serverUrl = cleanUrl,
+                                serverAccessCode = cleanSk,
+                                memberLabel = cleanMember,
+                                members = parsed.existingMembers
+                            )
+                        )
+                    }
+                    "bound" -> {
+                        buildBoundOutcomeFromDeviceResp(
+                            context = context,
+                            draftConfig = draftConfig,
+                            cleanUrl = cleanUrl,
+                            cleanSk = cleanSk,
+                            cleanMember = cleanMember,
+                            parsed = parsed,
+                            forceRequirePullIfRemoteHasData = false,
+                            persistImmediately = persistImmediately
+                        )
+                    }
+                    else -> Result.failure(IllegalStateException("未知的云端登录状态：${parsed.status}"))
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(IllegalStateException("连接云端服务器失败：${e.message ?: e.javaClass.simpleName}", e))
+        }
+    }
+
+    private fun performClaimMemberInternal(
+        context: Context,
+        draftConfig: MoJiCloudConfig,
+        targetUserId: String,
+        persistImmediately: Boolean
+    ): Result<DeviceConnectOutcome.Bound> {
+        val baseUrl = validateBaseUrl(draftConfig.serverUrl).getOrElse { return Result.failure(it) }
+        val cleanUrl = baseUrl.toString().trimEnd('/')
+        val cleanSk = draftConfig.serverAccessCode.trim()
+        val cleanMember = draftConfig.memberLabel.trim().ifBlank { defaultDeviceName() }
+        val cleanTargetUid = targetUserId.trim()
+        if (cleanTargetUid.isEmpty()) {
+            return Result.failure(IllegalArgumentException("请选择要接管的家庭成员账号"))
+        }
+        val fingerprint = getDeviceFingerprint(context)
+
+        return try {
+            val claimUrl = baseUrl.newBuilder()
+                .addPathSegments("api/v1/auth/claim-member")
+                .build()
+            val reqPayload = ClaimMemberReqDto(
+                serverAccessCode = cleanSk.takeIf { it.isNotEmpty() },
+                targetUserId = cleanTargetUid,
+                deviceFingerprint = fingerprint,
+                deviceId = stableDeviceId(context),
+                deviceName = defaultDeviceName(),
+                memberLabel = cleanMember,
+                appEnv = currentAppEnv,
+                appVersion = BuildConfig.VERSION_NAME
+            )
+            val bodyBytes = jsonCodec.encodeToString(reqPayload).toByteArray(Charsets.UTF_8)
+            val req = Request.Builder()
+                .url(claimUrl)
+                .post(bodyBytes.toRequestBody("application/json; charset=utf-8".toMediaType()))
+                .build()
+
+            httpClient.newCall(req).execute().use { resp ->
+                val respText = readCappedUtf8(resp.body?.byteStream(), 2 * 1024 * 1024)
+                if (!resp.isSuccessful) {
+                    val errDto = runCatching { jsonCodec.decodeFromString<ErrorRespDto>(respText) }.getOrNull()
+                    val msg = errDto?.message?.takeIf { it.isNotBlank() }
+                        ?: "接管家庭成员账号失败（HTTP ${resp.code}）"
+                    return Result.failure(IllegalStateException(msg))
+                }
+                val parsed = jsonCodec.decodeFromString<DeviceLoginRespDto>(respText)
+                buildBoundOutcomeFromDeviceResp(
+                    context = context,
+                    draftConfig = draftConfig,
+                    cleanUrl = cleanUrl,
+                    cleanSk = cleanSk,
+                    cleanMember = cleanMember,
+                    parsed = parsed,
+                    forceRequirePullIfRemoteHasData = true,
+                    persistImmediately = persistImmediately
+                )
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(IllegalStateException("接管家庭成员失败：${e.message ?: e.javaClass.simpleName}", e))
+        }
+    }
+
+    private fun buildBoundOutcomeFromDeviceResp(
+        context: Context,
+        draftConfig: MoJiCloudConfig,
+        cleanUrl: String,
+        cleanSk: String,
+        cleanMember: String,
+        parsed: DeviceLoginRespDto,
+        forceRequirePullIfRemoteHasData: Boolean,
+        persistImmediately: Boolean
+    ): Result<DeviceConnectOutcome.Bound> {
+        val boundUserId = parsed.userId.orEmpty().trim()
+        val token = parsed.accessToken.orEmpty().trim()
+        val expiresAt = parsed.expiresAtMs ?: 0L
+        if (boundUserId.isEmpty() || token.isEmpty()) {
+            return Result.failure(IllegalStateException("云端返回的会话凭证不完整"))
+        }
+        val summary = parsed.accountSummary ?: AccountSummaryDto()
+        val targetSig = computeDeviceSkTargetSignature(cleanUrl, cleanSk)
+        val latestStored = _configFlow.value
+        val prevLastRev = if (forceRequirePullIfRemoteHasData) {
+            0L
+        } else {
+            when {
+                latestStored.userId == boundUserId && latestStored.boundTargetSignature == targetSig ->
+                    latestStored.lastSyncedRevision
+                draftConfig.userId == boundUserId && draftConfig.boundTargetSignature == targetSig ->
+                    draftConfig.lastSyncedRevision
+                else -> 0L
+            }
+        }
+        val remoteAvatarSha = parsed.avatarSha256?.takeIf { it.isNotBlank() } ?: summary.avatarSha256
+        val prevSyncedAvatarSha = if (latestStored.userId == boundUserId && latestStored.boundTargetSignature == targetSig) {
+            latestStored.lastSyncedAvatarSha256
+        } else {
+            ""
+        }
+        val serverDisplayName = parsed.displayName.orEmpty().trim()
+        val resolvedMemberLabel = if (serverDisplayName.isNotEmpty() &&
+            (cleanMember.isEmpty() ||
+                cleanMember == UserProfileManager.DEFAULT_NICKNAME ||
+                cleanMember == defaultDeviceName())
+        ) {
+            serverDisplayName
+        } else {
+            cleanMember
+        }
+        val updatedByLabel = summary.updatedByMember.ifBlank {
+            serverDisplayName.ifBlank { summary.updatedByDevice }
+        }
+        val requiresInitialPull = summary.latestRevision > 0L && prevLastRev != summary.latestRevision
+        if (requiresInitialPull) {
+            // 严禁在拉取对齐前触发后台空库自动覆盖云端
+            clearPendingAutoPush(context)
+        }
+
+        val updatedCfg = draftConfig.copy(
+            serverUrl = cleanUrl,
+            serverAccessCode = cleanSk,
+            memberLabel = resolvedMemberLabel,
+            authMode = AUTH_MODE_DEVICE_SK,
+            userId = boundUserId,
+            accessToken = token,
+            tokenExpiresAtMillis = expiresAt,
+            boundTargetSignature = targetSig,
+            deviceFingerprintHint = parsed.keyHint.orEmpty().ifBlank { maskedDeviceFingerprintHint(context) },
+            lastSyncedRevision = prevLastRev,
+            remoteRevision = summary.latestRevision,
+            remoteTxCount = summary.txCount,
+            remoteWalletCount = summary.walletCount,
+            remoteScreenshotCount = summary.screenshotCount,
+            remoteUpdatedBy = updatedByLabel,
+            remoteUpdatedAtMillis = summary.updatedAtMs,
+            remoteAvatarSha256 = remoteAvatarSha,
+            lastSyncedAvatarSha256 = prevSyncedAvatarSha
+        )
+        if (persistImmediately) {
+            saveConfig(context, updatedCfg)
+            if (serverDisplayName.isNotEmpty() &&
+                UserProfileManager.currentConfig.nickname == UserProfileManager.DEFAULT_NICKNAME
+            ) {
+                UserProfileManager.updateNickname(serverDisplayName)
+            }
+        }
+
+        val isNewAccount = parsed.isNewAccount == true
+        val tip = when {
+            isNewAccount || summary.latestRevision == 0L ->
+                "✅ 已连接家庭云并绑定本机指纹（尚无云端快照），点击「立即同步到云端」即可建立首次备份"
+            requiresInitialPull -> {
+                val who = if (updatedByLabel.isNotBlank()) " · 成员「$updatedByLabel」" else ""
+                "✅ 已识别云端账号：当前最新 v${summary.latestRevision}（${summary.txCount} 笔账单$who），请点击「从云端拉取恢复」对齐本机数据"
+            }
+            else ->
+                "✅ 云端连接正常：v${summary.latestRevision}（${summary.txCount} 笔账单 / ${summary.screenshotCount} 张原图）"
+        }
+        return Result.success(
+            DeviceConnectOutcome.Bound(
+                config = updatedCfg,
+                isNewAccount = isNewAccount,
+                requiresInitialPull = requiresInitialPull,
+                message = tip
+            )
+        )
+    }
+
+    private fun refreshSessionTokenInternal(
+        context: Context,
+        config: MoJiCloudConfig,
+        persistImmediately: Boolean
+    ): Result<MoJiCloudConfig> {
+        return if (config.usesLegacySyncKeyAuth) {
+            performKeyLoginInternal(context, config, persistImmediately = persistImmediately).map { it.first }
+        } else {
+            val outcome = performDeviceLoginInternal(
+                context = context,
+                draftConfig = config,
+                createIfMissing = false,
+                persistImmediately = false
+            ).getOrElse { return Result.failure(it) }
+            when (outcome) {
+                is DeviceConnectOutcome.Bound -> {
+                    if (config.userId.isNotBlank() && outcome.config.userId != config.userId) {
+                        return Result.failure(IllegalStateException("云端设备绑定关系已变更，请重新打开云同步确认成员"))
+                    }
+                    val refreshed = outcome.config.copy(
+                        lastSyncedRevision = maxOf(config.lastSyncedRevision, outcome.config.lastSyncedRevision),
+                        lastSyncedAvatarSha256 = config.lastSyncedAvatarSha256.ifBlank { outcome.config.lastSyncedAvatarSha256 }
+                    )
+                    if (persistImmediately) {
+                        saveConfig(context, refreshed)
+                    }
+                    Result.success(refreshed)
+                }
+                is DeviceConnectOutcome.SelectionRequired -> {
+                    Result.failure(IllegalStateException("本机设备尚未绑定云端成员，请打开「默记云同步」选择或创建账本"))
+                }
+            }
+        }
     }
 
     private fun performKeyLoginInternal(
@@ -814,6 +1342,7 @@ object MoJiCloudSyncClient {
                     serverUrl = baseUrl.toString().trimEnd('/'),
                     syncKey = normalizedKey,
                     memberLabel = cleanMember,
+                    authMode = AUTH_MODE_SYNC_KEY,
                     userId = loginResp.userId,
                     accessToken = loginResp.accessToken,
                     tokenExpiresAtMillis = loginResp.expiresAtMs,
@@ -824,7 +1353,8 @@ object MoJiCloudSyncClient {
                     remoteWalletCount = summary.walletCount,
                     remoteScreenshotCount = summary.screenshotCount,
                     remoteUpdatedBy = updatedByLabel,
-                    remoteUpdatedAtMillis = summary.updatedAtMs
+                    remoteUpdatedAtMillis = summary.updatedAtMs,
+                    remoteAvatarSha256 = summary.avatarSha256
                 )
                 if (persistImmediately) {
                     saveConfig(context, updatedCfg)
@@ -858,7 +1388,7 @@ object MoJiCloudSyncClient {
         ) {
             return Result.success(merged)
         }
-        return performKeyLoginInternal(context, merged, persistImmediately = persistImmediately).map { it.first }
+        return refreshSessionTokenInternal(context, merged, persistImmediately = persistImmediately)
     }
 
     /**
@@ -934,9 +1464,9 @@ object MoJiCloudSyncClient {
             val (uploadedScreenshotCount, finalSummary) = if (attemptResult.isFailure &&
                 attemptResult.exceptionOrNull() is CloudUnauthorizedException
             ) {
-                // Token 签名在服务端已轮换失效：刷新会话后完整重跑「缺失原图上传 + 快照上传」
-                authedConfig = performKeyLoginInternal(context, authedConfig, persistImmediately = true)
-                    .getOrElse { return Result.failure(it) }.first
+                // Token 签名在服务端已轮换失效：刷新会话后完整重跑「头像同步 + 缺失原图上传 + 快照上传」
+                authedConfig = refreshSessionTokenInternal(context, authedConfig, persistImmediately = true)
+                    .getOrElse { return Result.failure(it) }
                 runUploadAttemptOnce(
                     context = context,
                     baseUrl = baseUrl,
@@ -978,7 +1508,9 @@ object MoJiCloudSyncClient {
                 remoteWalletCount = finalSummary.walletCount,
                 remoteScreenshotCount = finalSummary.screenshotCount,
                 remoteUpdatedBy = finalSummary.updatedByMember.ifBlank { finalSummary.updatedByDevice },
-                remoteUpdatedAtMillis = finalSummary.updatedAtMs
+                remoteUpdatedAtMillis = finalSummary.updatedAtMs,
+                remoteAvatarSha256 = finalSummary.avatarSha256,
+                lastSyncedAvatarSha256 = finalSummary.avatarSha256
             )
             saveConfig(context, updatedCfg)
             clearPendingAutoPush(context)
@@ -1029,6 +1561,12 @@ object MoJiCloudSyncClient {
         localTransactions: List<TransactionEntity>,
         forceOverwrite: Boolean
     ): Result<Pair<Int, AccountSummaryDto>> {
+        syncUserAvatarOnUploadInternal(
+            context = context,
+            baseUrl = baseUrl,
+            config = config
+        ).getOrElse { return Result.failure(it) }
+
         val uploadedScreenshots = uploadMissingScreenshotsInternal(
             context = context,
             baseUrl = baseUrl,
@@ -1045,6 +1583,63 @@ object MoJiCloudSyncClient {
         ).getOrElse { return Result.failure(it) }
 
         return Result.success(uploadedScreenshots to summary)
+    }
+
+    private fun syncUserAvatarOnUploadInternal(
+        context: Context,
+        baseUrl: HttpUrl,
+        config: MoJiCloudConfig
+    ): Result<Unit> {
+        val localWebp = UserProfileManager.readCustomAvatarWebpBytes(context)
+        val avatarUrl = baseUrl.newBuilder()
+            .addPathSegments("api/v1/profile/avatar")
+            .build()
+
+        if (localWebp != null) {
+            val localSha = sha256Hex(localWebp)
+            if (localSha == config.remoteAvatarSha256 && localSha == config.lastSyncedAvatarSha256) {
+                return Result.success(Unit)
+            }
+            val putReq = Request.Builder()
+                .url(avatarUrl)
+                .header("Authorization", "Bearer ${config.accessToken}")
+                .put(localWebp.toRequestBody("image/webp".toMediaType()))
+                .build()
+            httpClient.newCall(putReq).execute().use { resp ->
+                val txt = readCappedUtf8(resp.body?.byteStream(), 64 * 1024)
+                if (resp.code == 401) {
+                    return Result.failure(CloudUnauthorizedException("上传自定义头像时凭证已过期"))
+                }
+                if (!resp.isSuccessful) {
+                    val errDto = runCatching { jsonCodec.decodeFromString<ErrorRespDto>(txt) }.getOrNull()
+                    val msg = errDto?.message?.takeIf { it.isNotBlank() }
+                        ?: "上传自定义头像失败（HTTP ${resp.code}）"
+                    return Result.failure(IllegalStateException(msg))
+                }
+                val _ = runCatching { jsonCodec.decodeFromString<PutAvatarRespDto>(txt) }.getOrNull()
+            }
+            return Result.success(Unit)
+        } else if (config.remoteAvatarSha256.isNotBlank() || config.lastSyncedAvatarSha256.isNotBlank()) {
+            val delReq = Request.Builder()
+                .url(avatarUrl)
+                .header("Authorization", "Bearer ${config.accessToken}")
+                .delete()
+                .build()
+            httpClient.newCall(delReq).execute().use { resp ->
+                if (resp.code == 401) {
+                    return Result.failure(CloudUnauthorizedException("清理云端头像时凭证已过期"))
+                }
+                // 404 视为已不存在，幂等放行
+                if (!resp.isSuccessful && resp.code != 404) {
+                    val txt = readCappedUtf8(resp.body?.byteStream(), 64 * 1024)
+                    val errDto = runCatching { jsonCodec.decodeFromString<ErrorRespDto>(txt) }.getOrNull()
+                    val msg = errDto?.message?.takeIf { it.isNotBlank() }
+                        ?: "清理云端自定义头像失败（HTTP ${resp.code}）"
+                    return Result.failure(IllegalStateException(msg))
+                }
+            }
+        }
+        return Result.success(Unit)
     }
 
     private fun putSnapshotOnceInternal(
@@ -1194,8 +1789,8 @@ object MoJiCloudSyncClient {
             try {
                 val firstPull = pullSnapshotDtoOnceInternal(baseUrl, authedConfig.accessToken)
                 val pulledDto = if (firstPull.isFailure && firstPull.exceptionOrNull() is CloudUnauthorizedException) {
-                    authedConfig = performKeyLoginInternal(context, authedConfig, persistImmediately = true)
-                        .getOrElse { return@withContext Result.failure(it) }.first
+                    authedConfig = refreshSessionTokenInternal(context, authedConfig, persistImmediately = true)
+                        .getOrElse { return@withContext Result.failure(it) }
                     pullSnapshotDtoOnceInternal(baseUrl, authedConfig.accessToken)
                         .getOrElse { return@withContext Result.failure(it) }
                 } else {
@@ -1239,8 +1834,8 @@ object MoJiCloudSyncClient {
                                 !refreshedDuringScreenshots
                             ) {
                                 refreshedDuringScreenshots = true
-                                performKeyLoginInternal(context, authedConfig, persistImmediately = true)
-                                    .getOrNull()?.let { (newCfg, _) ->
+                                refreshSessionTokenInternal(context, authedConfig, persistImmediately = true)
+                                    .getOrNull()?.let { newCfg ->
                                         authedConfig = newCfg
                                         dlRes = downloadSingleScreenshotBytes(baseUrl, authedConfig.accessToken, sha)
                                     }
@@ -1270,6 +1865,10 @@ object MoJiCloudSyncClient {
                     }
                 }
 
+                // 同步拉取该成员的云端自定义头像（若云端 404 则表示使用预设头像）
+                val avatarBytes = downloadProfileAvatarBytesOptional(baseUrl, authedConfig.accessToken)
+                val pulledAvatarSha = if (avatarBytes != null) sha256Hex(avatarBytes) else ""
+
                 val now = System.currentTimeMillis()
                 // 仅构造待提交的 updatedCfg 返回给调用方，待本地 Room 事务恢复成功后再由 commitPulledConfigAfterRestore 正式写入！
                 val updatedCfg = authedConfig.copy(
@@ -1280,7 +1879,9 @@ object MoJiCloudSyncClient {
                     remoteWalletCount = wallets.size,
                     remoteScreenshotCount = availableRemoteSet.size,
                     remoteUpdatedBy = pulledDto.updatedByMember.ifBlank { pulledDto.updatedByDevice },
-                    remoteUpdatedAtMillis = pulledDto.updatedAtMs
+                    remoteUpdatedAtMillis = pulledDto.updatedAtMs,
+                    remoteAvatarSha256 = pulledAvatarSha,
+                    lastSyncedAvatarSha256 = pulledAvatarSha
                 )
 
                 Result.success(
@@ -1292,7 +1893,8 @@ object MoJiCloudSyncClient {
                         revision = pulledDto.revision,
                         syncedScreenshots = downloadedCount,
                         failedScreenshots = failedShas.size,
-                        updatedConfig = updatedCfg
+                        updatedConfig = updatedCfg,
+                        avatarWebpBytes = avatarBytes
                     )
                 )
             } catch (e: CancellationException) {
@@ -1371,6 +1973,30 @@ object MoJiCloudSyncClient {
             }
         }
         return Result.failure(lastError ?: IllegalStateException("下载原图失败"))
+    }
+
+    private fun downloadProfileAvatarBytesOptional(
+        baseUrl: HttpUrl,
+        accessToken: String
+    ): ByteArray? {
+        val url = baseUrl.newBuilder()
+            .addPathSegments("api/v1/profile/avatar")
+            .build()
+        return runCatching {
+            val req = Request.Builder()
+                .url(url)
+                .header("Authorization", "Bearer $accessToken")
+                .get()
+                .build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (resp.code == 404 || !resp.isSuccessful) {
+                    null
+                } else {
+                    val bytes = readCappedBytes(resp.body?.byteStream(), MAX_AVATAR_BYTES)
+                    bytes.takeIf { UserProfileManager.isValidWebpAvatarBytes(it) }
+                }
+            }
+        }.getOrNull()
     }
 
     private fun readCappedBytes(stream: java.io.InputStream?, maxBytes: Int): ByteArray {
