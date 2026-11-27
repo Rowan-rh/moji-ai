@@ -275,6 +275,10 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val isTriaging by viewModel.isTriaging.collectAsState()
     val showAgentTriageSheet by viewModel.showAgentTriageSheet.collectAsState()
     val debugTraceStats by viewModel.debugTraceStats.collectAsState()
+    val familyLedgerTransactions by viewModel.familyLedgerTransactions.collectAsState()
+    val familyOwnerByTxId by viewModel.familyOwnerByTxId.collectAsState()
+    val familyMemberFilterOptions by viewModel.familyMemberFilterOptions.collectAsState()
+    val currentMonthUnsyncedFamilyCount by viewModel.currentMonthUnsyncedFamilyCount.collectAsState()
     val mainUiScope = rememberCoroutineScope()
     var showDebugTraceViewerSheet by remember { mutableStateOf(false) }
     var showClearDebugTraceConfirm by remember { mutableStateOf(false) }
@@ -387,7 +391,19 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     }
 
     // 缓存最后一次打开的账单详情数据，确保退出动画期间内容不闪空（日历直接读取实时账单列表）
-    val activeTx = inspectingTx?.let { target -> transactions.firstOrNull { it.id == target.id } ?: target }
+    val activeTx = inspectingTx?.let { target ->
+        if (target.id < 0L) {
+            familyLedgerTransactions.firstOrNull { it.id == target.id }
+        } else {
+            transactions.firstOrNull { it.id == target.id } ?: target
+        }
+    }
+    LaunchedEffect(inspectingTx, familyLedgerTransactions) {
+        val cur = inspectingTx
+        if (cur != null && cur.id < 0L && familyLedgerTransactions.none { it.id == cur.id }) {
+            inspectingTx = null
+        }
+    }
     var cachedInspectingTx by remember { mutableStateOf<TransactionEntity?>(null) }
     if (activeTx != null) {
         cachedInspectingTx = activeTx
@@ -547,7 +563,16 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                         }
                     },
                     onDeleteTransaction = { txId -> viewModel.deleteTransaction(txId) },
-                    onOpenAgentTriage = { viewModel.openAgentTriageSheet() }
+                    onOpenAgentTriage = { viewModel.openAgentTriageSheet() },
+                    familyTransactions = familyLedgerTransactions,
+                    familyOwnerByTxId = familyOwnerByTxId,
+                    familyMemberFilters = familyMemberFilterOptions,
+                    isCloudBound = mojiCloudConfig.isTargetBound,
+                    isFamilySyncEnabled = mojiCloudConfig.familySyncEnabled,
+                    onRefreshFamilyLedger = {
+                        viewModel.syncFamilyLedgerManual { msg -> viewModel.showUiMessage(msg) }
+                    },
+                    onOpenCloudSyncPage = { showCloudAuthAndSyncPage = true }
             )
         }
 
@@ -611,7 +636,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     hideAmounts = hideAssetAmounts,
                     onOpenSettingsPage = { showSettingsPage = true },
                     onSelectTransaction = { tx -> inspectingTx = tx },
-                    customCurrencyRates = customCurrencyRates
+                    customCurrencyRates = customCurrencyRates,
+                    familyTransactions = familyLedgerTransactions,
+                    familyOwnerByTxId = familyOwnerByTxId
             )
         }
 
@@ -664,8 +691,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             MonthlyCalendarSheet(
                 year = selectedYear,
                 month = selectedMonth,
-                allTransactions = transactions,
+                allTransactions = if (currentLedger == FAMILY_LEDGER_NAME) familyLedgerTransactions else transactions,
                 currentLedger = currentLedger,
+                familyOwnerByTxId = familyOwnerByTxId,
                 onDismiss = { calendarMonthTxs = null },
                 onSelectTransaction = { tx ->
                     inspectingTx = tx
@@ -1075,6 +1103,16 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 },
                 onVerifyLegacySyncKey = { cfg, onDone ->
                     viewModel.verifyMoJiCloudKey(cfg, onDone)
+                },
+                unsyncedCurrentMonthFamilyCount = currentMonthUnsyncedFamilyCount,
+                onToggleFamilySync = { enabled, onDone ->
+                    viewModel.setFamilySyncEnabled(enabled, onDone)
+                },
+                onSyncFamilyNow = { onDone ->
+                    viewModel.syncFamilyLedgerManual(onDone)
+                },
+                onSyncCurrentMonthToFamily = { onDone ->
+                    viewModel.syncCurrentMonthBillsToFamily(onDone)
                 }
             )
         }
@@ -1210,7 +1248,15 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     allTransactions = transactions,
                     onInspectRelatedTransaction = { relTx -> inspectingTx = relTx },
                     onLoadProvenance = { targetTx -> viewModel.loadTransactionProvenance(targetTx) },
-                    onShowMessage = { msg -> viewModel.showUiMessage(msg) }
+                    onShowMessage = { msg -> viewModel.showUiMessage(msg) },
+                    familyOwnerBadge = if (detailTx.id < 0L || currentLedger == FAMILY_LEDGER_NAME) {
+                        familyOwnerByTxId[detailTx.id]
+                    } else {
+                        null
+                    },
+                    onToggleSyncToFamily = { targetTx, enabled ->
+                        viewModel.toggleTransactionSyncToFamily(targetTx, enabled)
+                    }
                 )
             }
         }
@@ -3011,6 +3057,7 @@ private fun ICostSmartBookkeepingFullScreen(
         var maxYuanStr by remember { mutableStateOf("") }
         var targetCat by remember { mutableStateOf("餐饮-三餐") }
         var markReimburse by remember { mutableStateOf(false) }
+        var excludeFromFamily by remember { mutableStateOf(false) }
         var tagStr by remember { mutableStateOf("") }
 
         val minYuan = minYuanStr.toDoubleOrNull()
@@ -3101,6 +3148,21 @@ private fun ICostSmartBookkeepingFullScreen(
                             colors = iCostSwitchColors()
                         )
                     }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                            Text("不同步至家庭账本", fontSize = 14.sp, color = ICostTextPrimary)
+                            Text("命中后自动设为仅个人私密", fontSize = 11.sp, color = ICostTextSecondary)
+                        }
+                        Switch(
+                            checked = excludeFromFamily,
+                            onCheckedChange = { excludeFromFamily = it },
+                            colors = iCostSwitchColors()
+                        )
+                    }
                 }
             },
             confirmButton = {
@@ -3116,6 +3178,7 @@ private fun ICostSmartBookkeepingFullScreen(
                                 maxAmountYuan = maxYuan,
                                 targetCategory = targetCat.trim(),
                                 markReimbursable = markReimburse,
+                                excludeFromFamily = excludeFromFamily,
                                 appendTag = tagStr.trim()
                             )
                         )

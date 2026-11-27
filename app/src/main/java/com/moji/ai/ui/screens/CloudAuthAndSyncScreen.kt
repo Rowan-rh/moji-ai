@@ -12,6 +12,8 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -25,12 +27,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
@@ -48,6 +52,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -63,6 +68,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -97,6 +103,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun CloudAuthAndSyncScreen(
     mojiCloudConfig: MoJiCloudConfig,
@@ -111,9 +118,14 @@ fun CloudAuthAndSyncScreen(
     onDisconnectCloudSync: ((String) -> Unit) -> Unit,
     onUploadCloud: (MoJiCloudConfig, Boolean, (String) -> Unit) -> Unit,
     onRestoreCloud: (MoJiCloudConfig, (String) -> Unit) -> Unit,
-    onVerifyLegacySyncKey: (MoJiCloudConfig, (String) -> Unit) -> Unit
+    onVerifyLegacySyncKey: (MoJiCloudConfig, (String) -> Unit) -> Unit,
+    unsyncedCurrentMonthFamilyCount: Int = 0,
+    onToggleFamilySync: (Boolean, (String) -> Unit) -> Unit = { _, _ -> },
+    onSyncFamilyNow: ((String) -> Unit) -> Unit = {},
+    onSyncCurrentMonthToFamily: ((String) -> Unit) -> Unit = {}
 ) {
     val context = LocalContext.current
+    val listState = rememberLazyListState()
 
     val deviceFingerprintHint = remember(context) {
         val fp = MoJiCloudSyncClient.getDeviceFingerprint(context)
@@ -152,6 +164,29 @@ fun CloudAuthAndSyncScreen(
     var isWorking by remember { mutableStateOf(false) }
     var feedbackBanner by remember { mutableStateOf<String?>(null) }
     var feedbackIsError by remember { mutableStateOf(false) }
+    var errorScrollTrigger by remember { mutableIntStateOf(0) }
+    var showSyncMonthFamilyConfirmDialog by remember { mutableStateOf(false) }
+
+    fun updateFeedback(msg: String?, isError: Boolean) {
+        feedbackIsError = isError
+        feedbackBanner = msg
+        if (isError && !msg.isNullOrBlank()) {
+            errorScrollTrigger++
+        }
+    }
+
+    LaunchedEffect(statusMessage) {
+        val ext = statusMessage
+        if (!ext.isNullOrBlank() && (ext.contains("失败") || ext.contains("错误") || ext.contains("无效"))) {
+            errorScrollTrigger++
+        }
+    }
+
+    LaunchedEffect(errorScrollTrigger) {
+        if (errorScrollTrigger > 0) {
+            runCatching { listState.animateScrollToItem(0) }
+        }
+    }
 
     var memberSelectionCandidates by remember { mutableStateOf<List<FamilyMemberItemDto>>(emptyList()) }
     var showMemberSelectionSheet by remember { mutableStateOf(false) }
@@ -211,12 +246,14 @@ fun CloudAuthAndSyncScreen(
 
         val draft = buildDeviceSkDraft()
         isWorking = true
-        feedbackIsError = false
-        feedbackBanner = if (createIfMissing) {
-            "正在创建独立家庭成员云账本…"
-        } else {
-            "正在校验服务器 SK 与本机设备指纹…"
-        }
+        updateFeedback(
+            if (createIfMissing) {
+                "正在创建独立家庭成员云账本…"
+            } else {
+                "正在校验服务器 SK 与本机设备指纹…"
+            },
+            isError = false
+        )
         onConnectDeviceSk(draft, createIfMissing) { res ->
             isWorking = false
             res.fold(
@@ -226,27 +263,33 @@ fun CloudAuthAndSyncScreen(
                             showMemberSelectionSheet = false
                             memberSelectionCandidates = emptyList()
                             val cfg = outcome.config
-                            feedbackIsError = false
                             if (cfg.remoteRevision > 0L && cfg.effectiveLastSyncedRevision == 0L) {
-                                feedbackBanner = "已识别原有云账本（云端 v${cfg.remoteRevision}，共 ${cfg.remoteTxCount} 笔账单），请先从云端拉取恢复。"
+                                updateFeedback(
+                                    "已识别原有云账本（云端 v${cfg.remoteRevision}，共 ${cfg.remoteTxCount} 笔账单），请先从云端拉取恢复。",
+                                    isError = false
+                                )
                                 showReconnectPullPromptDialog = true
                             } else if (cfg.remoteRevision > 0L) {
-                                feedbackBanner = "云同步已连接（云端 v${cfg.remoteRevision} · ${cfg.remoteTxCount} 笔账单）"
+                                updateFeedback(
+                                    "云同步已连接（云端 v${cfg.remoteRevision} · ${cfg.remoteTxCount} 笔账单）",
+                                    isError = false
+                                )
                             } else {
-                                feedbackBanner = "云同步连接成功！已就绪，可将本机账本推送上云。"
+                                updateFeedback("云同步连接成功！已就绪，可将本机账本推送上云。", isError = false)
                             }
                         }
                         is DeviceConnectOutcome.SelectionRequired -> {
                             memberSelectionCandidates = outcome.members
                             showMemberSelectionSheet = true
-                            feedbackIsError = false
-                            feedbackBanner = "服务器验证通过：检测到已有 ${outcome.members.size} 位家庭成员账本，请选择认领或新建。"
+                            updateFeedback(
+                                "服务器验证通过：检测到已有 ${outcome.members.size} 位家庭成员账本，请选择认领或新建。",
+                                isError = false
+                            )
                         }
                     }
                 },
                 onFailure = { err ->
-                    feedbackIsError = true
-                    feedbackBanner = err.message ?: "连接失败，请检查服务器地址与 SK"
+                    updateFeedback(err.message ?: "连接失败，请检查服务器地址与 SK", isError = true)
                 }
             )
         }
@@ -346,12 +389,41 @@ fun CloudAuthAndSyncScreen(
             Spacer(modifier = Modifier.height(12.dp))
 
             LazyColumn(
+                state = listState,
                 modifier = Modifier
                     .fillMaxSize()
                     .navigationBarsPadding(),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
                 contentPadding = PaddingValues(bottom = 36.dp)
             ) {
+                // 0. 顶部状态反馈横幅（报错时自动滚动至 item 0，确保大字号或长页面下立即可见）
+                val bannerText = feedbackBanner ?: statusMessage
+                if (!bannerText.isNullOrBlank()) {
+                    item {
+                        val bannerError = feedbackIsError ||
+                            bannerText.contains("失败") ||
+                            bannerText.contains("错误") ||
+                            bannerText.contains("无效")
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = if (bannerError) {
+                                ICostCoralRed.copy(alpha = 0.12f)
+                            } else {
+                                ICostBlueAccent.copy(alpha = 0.10f)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = bannerText,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (bannerError) ICostCoralRed else ICostTextPrimary,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp)
+                            )
+                        }
+                    }
+                }
+
                 // 1. 顶部个人身份、设备指纹与云端摘要卡
                 item {
                     ICostFormCard {
@@ -418,7 +490,7 @@ fun CloudAuthAndSyncScreen(
                                     text = "本机指纹：$deviceFingerprintHint · 支持头像与账本同步",
                                     fontSize = 11.sp,
                                     color = ICostTextSecondary,
-                                    maxLines = 1,
+                                    maxLines = 2,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
@@ -468,30 +540,6 @@ fun CloudAuthAndSyncScreen(
                                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp)
                                 )
                             }
-                        }
-                    }
-                }
-
-                // 状态反馈横幅
-                val bannerText = feedbackBanner ?: statusMessage
-                if (!bannerText.isNullOrBlank()) {
-                    item {
-                        Surface(
-                            shape = RoundedCornerShape(16.dp),
-                            color = if (feedbackIsError) {
-                                ICostCoralRed.copy(alpha = 0.12f)
-                            } else {
-                                ICostBlueAccent.copy(alpha = 0.10f)
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(
-                                text = bannerText,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Medium,
-                                color = if (feedbackIsError) ICostCoralRed else ICostTextPrimary,
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp)
-                            )
                         }
                     }
                 }
@@ -582,6 +630,7 @@ fun CloudAuthAndSyncScreen(
                                 color = ICostCellGray,
                                 modifier = Modifier
                                     .weight(1f)
+                                    .heightIn(min = 40.dp)
                                     .iCostPressScale(pressedScale = 0.95f) {
                                         MoJiCloudSyncClient.encodeFamilyPairingText(
                                             serverUrl = serverUrlInput,
@@ -589,18 +638,15 @@ fun CloudAuthAndSyncScreen(
                                         ).fold(
                                             onSuccess = { token ->
                                                 if (serverSkInput.isBlank()) {
-                                                    feedbackIsError = true
-                                                    feedbackBanner = "请先填写服务器密钥 SK 再复制家人配对口令"
+                                                    updateFeedback("请先填写服务器密钥 SK 再复制家人配对口令", isError = true)
                                                 } else {
                                                     val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                                                     cm.setPrimaryClip(ClipData.newPlainText("moji_family_pair", token))
-                                                    feedbackIsError = false
-                                                    feedbackBanner = "已复制家人配对口令（含服务器地址与 SK），发给家人粘贴即可连接"
+                                                    updateFeedback("已复制家人配对口令（含服务器地址与 SK），发给家人粘贴即可连接", isError = false)
                                                 }
                                             },
                                             onFailure = { e ->
-                                                feedbackIsError = true
-                                                feedbackBanner = e.message ?: "生成配对口令失败"
+                                                updateFeedback(e.message ?: "生成配对口令失败", isError = true)
                                             }
                                         )
                                     }
@@ -614,7 +660,8 @@ fun CloudAuthAndSyncScreen(
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = ICostBlueAccent,
-                                        maxLines = 1
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 2
                                     )
                                 }
                             }
@@ -624,6 +671,7 @@ fun CloudAuthAndSyncScreen(
                                 color = ICostCellGray,
                                 modifier = Modifier
                                     .weight(1f)
+                                    .heightIn(min = 40.dp)
                                     .iCostPressScale(pressedScale = 0.95f) {
                                         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
                                         val rawText = cm.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString().orEmpty()
@@ -633,16 +681,17 @@ fun CloudAuthAndSyncScreen(
                                                 if (parsedCode.isNotBlank()) {
                                                     serverSkInput = parsedCode
                                                 }
-                                                feedbackIsError = false
-                                                feedbackBanner = if (parsedCode.isNotBlank()) {
-                                                    "已填入服务器地址与密钥 SK，请点击下方连接按钮"
-                                                } else {
-                                                    "已填入服务器地址，请补充服务器密钥 SK"
-                                                }
+                                                updateFeedback(
+                                                    if (parsedCode.isNotBlank()) {
+                                                        "已填入服务器地址与密钥 SK，请点击下方连接按钮"
+                                                    } else {
+                                                        "已填入服务器地址，请补充服务器密钥 SK"
+                                                    },
+                                                    isError = false
+                                                )
                                             },
                                             onFailure = { e ->
-                                                feedbackIsError = true
-                                                feedbackBanner = e.message ?: "剪贴板未识别到有效的配对口令"
+                                                updateFeedback(e.message ?: "剪贴板未识别到有效的配对口令", isError = true)
                                             }
                                         )
                                     }
@@ -656,7 +705,8 @@ fun CloudAuthAndSyncScreen(
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.SemiBold,
                                         color = ICostTextPrimary,
-                                        maxLines = 1
+                                        textAlign = TextAlign.Center,
+                                        maxLines = 2
                                     )
                                 }
                             }
@@ -674,16 +724,186 @@ fun CloudAuthAndSyncScreen(
                             onClick = { triggerConnectFlow(createIfMissing = false) },
                             colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
                             shape = RoundedCornerShape(15.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(48.dp)
+                                .heightIn(min = 48.dp)
                                 .semantics { contentDescription = "连接云服务器" }
                         ) {
                             Text(
                                 text = connectBtnLabel,
                                 fontSize = 15.sp,
-                                fontWeight = FontWeight.Bold
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center
                             )
+                        }
+                    }
+                }
+
+                // 2.5 已绑定时的「🏠 家庭共享账本」卡片
+                if (isBound) {
+                    item {
+                        ICostFormCard {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "🏠 家庭共享账本",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostTextPrimary
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (mojiCloudConfig.familySyncEnabled) {
+                                        ICostGreenIncome.copy(alpha = 0.14f)
+                                    } else {
+                                        ICostCellGray
+                                    }
+                                ) {
+                                    Text(
+                                        text = if (mojiCloudConfig.familySyncEnabled) "自动共享已开启" else "仅手动共享",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (mojiCloudConfig.familySyncEnabled) ICostGreenIncome else ICostTextSecondary,
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                    )
+                                }
+                            }
+
+                            Text(
+                                text = "「个人管资产，家庭看收支」：开启后新记的日常支出/收入会自动共享至家庭账本；个人账户余额、转账还款、借贷、工资条医保/公积金及识屏原图 100% 留在本机，绝不混用。",
+                                fontSize = 11.sp,
+                                color = ICostTextSecondary
+                            )
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                                    Text(
+                                        text = "新记日常收支自动共享给家人",
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = ICostTextPrimary
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "首次开启不会自动上传过往历史账单；单笔账单可在记账面板或详情页随时设为「仅个人」",
+                                        fontSize = 11.sp,
+                                        color = ICostTextSecondary
+                                    )
+                                }
+                                Switch(
+                                    checked = mojiCloudConfig.familySyncEnabled,
+                                    enabled = !isWorking && isDraftMatchingBound,
+                                    onCheckedChange = { checked ->
+                                        isWorking = true
+                                        onToggleFamilySync(checked) { msg ->
+                                            isWorking = false
+                                            updateFeedback(
+                                                msg,
+                                                isError = msg.contains("失败") || msg.contains("错误")
+                                            )
+                                        }
+                                    },
+                                    colors = iCostUnifiedSwitchColors()
+                                )
+                            }
+
+                            if (mojiCloudConfig.familyMembers.isNotEmpty()) {
+                                HorizontalDivider(color = ICostDivider, thickness = 0.5.dp)
+                                Text(
+                                    text = "当前家庭服务器成员（共 ${mojiCloudConfig.familyMembers.size} 人 · 增量游标 #${mojiCloudConfig.familySyncCursor}）",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = ICostTextSecondary
+                                )
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    mojiCloudConfig.familyMembers.forEach { m ->
+                                        val isMe = m.userId == mojiCloudConfig.userId
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = if (isMe) ICostBlueAccent.copy(alpha = 0.12f) else ICostCellGray
+                                        ) {
+                                            Text(
+                                                text = if (isMe) {
+                                                    "${m.displayName.ifBlank { "我" }}（本机）"
+                                                } else {
+                                                    m.displayName.ifBlank { "家人" }
+                                                },
+                                                fontSize = 11.sp,
+                                                fontWeight = if (isMe) FontWeight.Bold else FontWeight.Medium,
+                                                color = if (isMe) ICostBlueAccent else ICostTextPrimary,
+                                                modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                OutlinedButton(
+                                    enabled = !isWorking && isDraftMatchingBound,
+                                    onClick = {
+                                        isWorking = true
+                                        updateFeedback("正在与云端同步家庭共享账本…", isError = false)
+                                        onSyncFamilyNow { msg ->
+                                            isWorking = false
+                                            updateFeedback(
+                                                msg,
+                                                isError = msg.contains("失败") || msg.contains("错误")
+                                            )
+                                        }
+                                    },
+                                    shape = RoundedCornerShape(14.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .heightIn(min = 46.dp)
+                                ) {
+                                    Text(
+                                        text = "刷新家庭账本",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        color = ICostBlueAccent,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+
+                                OutlinedButton(
+                                    enabled = !isWorking && isDraftMatchingBound && unsyncedCurrentMonthFamilyCount > 0,
+                                    onClick = { showSyncMonthFamilyConfirmDialog = true },
+                                    shape = RoundedCornerShape(14.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
+                                    modifier = Modifier
+                                        .weight(1.35f)
+                                        .heightIn(min = 46.dp)
+                                ) {
+                                    Text(
+                                        text = if (unsyncedCurrentMonthFamilyCount > 0) {
+                                            "一键同步本月已有出入账（$unsyncedCurrentMonthFamilyCount 笔）"
+                                        } else {
+                                            "本月出入账已全部同步"
+                                        },
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 12.sp,
+                                        color = if (unsyncedCurrentMonthFamilyCount > 0) ICostBlueAccent else ICostTextSecondary,
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -708,41 +928,50 @@ fun CloudAuthAndSyncScreen(
                                     onClick = {
                                         val draft = buildActiveSyncDraft()
                                         isWorking = true
-                                        feedbackIsError = false
-                                        feedbackBanner = "正在同步账本、识屏原图与自定义头像到云端…"
+                                        updateFeedback("正在同步账本、识屏原图与自定义头像到云端…", isError = false)
                                         onUploadCloud(draft, false) { msg ->
                                             isWorking = false
                                             if (msg.contains("冲突") || msg.contains("拒绝空账本")) {
                                                 forceUploadPromptReason = msg
                                                 showForceUploadConfirmDialog = true
                                             } else {
-                                                feedbackIsError = msg.contains("失败") || msg.contains("错误") || msg.contains("无效")
-                                                feedbackBanner = msg
+                                                updateFeedback(
+                                                    msg,
+                                                    isError = msg.contains("失败") || msg.contains("错误") || msg.contains("无效")
+                                                )
                                             }
                                         }
                                     },
                                     colors = ButtonDefaults.buttonColors(containerColor = ICostBlueAccent),
                                     shape = RoundedCornerShape(14.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
                                     modifier = Modifier
                                         .weight(1f)
-                                        .height(46.dp)
+                                        .heightIn(min = 46.dp)
                                 ) {
-                                    Text("立即同步上云", fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                    Text(
+                                        text = "立即同步上云",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        textAlign = TextAlign.Center
+                                    )
                                 }
 
                                 OutlinedButton(
                                     enabled = !isWorking && isDraftMatchingBound,
                                     onClick = { showPullRestoreConfirmDialog = true },
                                     shape = RoundedCornerShape(14.dp),
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 10.dp),
                                     modifier = Modifier
                                         .weight(1f)
-                                        .height(46.dp)
+                                        .heightIn(min = 46.dp)
                                 ) {
                                     Text(
                                         text = "从云端拉取恢复",
                                         fontWeight = FontWeight.Bold,
                                         fontSize = 13.sp,
-                                        color = ICostBlueAccent
+                                        color = ICostBlueAccent,
+                                        textAlign = TextAlign.Center
                                     )
                                 }
                             }
@@ -907,24 +1136,27 @@ fun CloudAuthAndSyncScreen(
                                             autoSyncEnabled = autoSyncEnabled
                                         )
                                         isWorking = true
-                                        feedbackIsError = false
-                                        feedbackBanner = "正在验证旧版专属密钥…"
+                                        updateFeedback("正在验证旧版专属密钥…", isError = false)
                                         onVerifyLegacySyncKey(legacyDraft) { msg ->
                                             isWorking = false
-                                            feedbackIsError = msg.contains("失败") || msg.contains("无效") || msg.contains("错误")
-                                            feedbackBanner = msg
+                                            updateFeedback(
+                                                msg,
+                                                isError = msg.contains("失败") || msg.contains("无效") || msg.contains("错误")
+                                            )
                                         }
                                     },
                                     shape = RoundedCornerShape(12.dp),
+                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 10.dp),
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .height(42.dp)
+                                        .heightIn(min = 44.dp)
                                 ) {
                                     Text(
                                         text = "使用旧版专属密钥验证连接",
                                         fontSize = 12.sp,
                                         fontWeight = FontWeight.Bold,
-                                        color = ICostTextPrimary
+                                        color = ICostTextPrimary,
+                                        textAlign = TextAlign.Center
                                     )
                                 }
                             }
@@ -948,11 +1180,47 @@ fun CloudAuthAndSyncScreen(
                     .fillMaxWidth()
                     .navigationBarsPadding()
             ) {
-                ICostSheetHeader(
-                    title = "检测到家庭服务器已有成员账本",
-                    subtitle = "换新机请点选你的原有账本认领恢复；新成员请创建独立账本",
-                    onClose = { if (!isWorking) requestDismiss() }
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 20.dp, end = 16.dp, top = 8.dp, bottom = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 12.dp)
+                    ) {
+                        Text(
+                            text = "检测到家庭服务器已有成员账本",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = ICostTextPrimary,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "换新机请点选你的原有账本认领恢复；新成员请创建独立账本",
+                            fontSize = 12.sp,
+                            color = ICostTextSecondary,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    ICostCircleIconButton(
+                        onClick = { if (!isWorking) requestDismiss() },
+                        size = 34.dp
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "关闭",
+                            tint = ICostTextSecondary,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
 
                 LazyColumn(
                     modifier = Modifier
@@ -1014,7 +1282,9 @@ fun CloudAuthAndSyncScreen(
                                             fontWeight = FontWeight.ExtraBold,
                                             color = ICostTextPrimary,
                                             maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis,
+                                            modifier = Modifier.weight(1f, fill = false)
                                         )
                                         if (member.hasAvatar) {
                                             Surface(
@@ -1026,6 +1296,8 @@ fun CloudAuthAndSyncScreen(
                                                     fontSize = 10.sp,
                                                     fontWeight = FontWeight.Bold,
                                                     color = ICostGreenIncome,
+                                                    maxLines = 1,
+                                                    softWrap = false,
                                                     modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
                                                 )
                                             }
@@ -1058,6 +1330,8 @@ fun CloudAuthAndSyncScreen(
                                         fontSize = 11.sp,
                                         fontWeight = FontWeight.Bold,
                                         color = ICostBlueAccent,
+                                        maxLines = 1,
+                                        softWrap = false,
                                         modifier = Modifier.padding(horizontal = 9.dp, vertical = 6.dp)
                                     )
                                 }
@@ -1074,16 +1348,18 @@ fun CloudAuthAndSyncScreen(
                                 triggerConnectFlow(createIfMissing = true)
                             },
                             shape = RoundedCornerShape(15.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(48.dp)
+                                .heightIn(min = 48.dp)
                                 .semantics { contentDescription = "我是新家人，创建独立账本" }
                         ) {
                             Text(
                                 text = "我是新家人，创建独立账本",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = ICostBlueAccent
+                                color = ICostBlueAccent,
+                                textAlign = TextAlign.Center
                             )
                         }
                     }
@@ -1123,12 +1399,10 @@ fun CloudAuthAndSyncScreen(
                         showMemberSelectionSheet = false
                         val draft = buildDeviceSkDraft()
                         isWorking = true
-                        feedbackIsError = false
-                        feedbackBanner = "正在接管「$displayTitle」并拉取恢复账本、原图与头像…"
+                        updateFeedback("正在接管「$displayTitle」并拉取恢复账本、原图与头像…", isError = false)
                         onClaimMemberAndRestore(draft, target) { ok, msg ->
                             isWorking = false
-                            feedbackIsError = !ok
-                            feedbackBanner = msg
+                            updateFeedback(msg, isError = !ok)
                         }
                     }
                 ) {
@@ -1137,6 +1411,42 @@ fun CloudAuthAndSyncScreen(
             },
             dismissButton = {
                 TextButton(onClick = { pendingClaimTarget = null }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    if (showSyncMonthFamilyConfirmDialog && !isWorking) {
+        AlertDialog(
+            onDismissRequest = { showSyncMonthFamilyConfirmDialog = false },
+            containerColor = ICostCardWhite,
+            title = { Text("同步本月已有出入账？", fontWeight = FontWeight.ExtraBold) },
+            text = {
+                Text(
+                    "将把本机本月尚未共享的 $unsyncedCurrentMonthFamilyCount 笔日常支出/收入脱敏摘要同步至家庭账本。\n\n内部转账、信用卡还款、借入借出、余额平账及医保个账拆分会被自动排除，个人账户余额不受任何影响。"
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showSyncMonthFamilyConfirmDialog = false
+                        isWorking = true
+                        updateFeedback("正在标记并同步本月日常出入账至家庭账本…", isError = false)
+                        onSyncCurrentMonthToFamily { msg ->
+                            isWorking = false
+                            updateFeedback(
+                                msg,
+                                isError = msg.contains("失败") || msg.contains("错误")
+                            )
+                        }
+                    }
+                ) {
+                    Text("确认同步", color = ICostBlueAccent, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSyncMonthFamilyConfirmDialog = false }) {
                     Text("取消")
                 }
             }
@@ -1160,12 +1470,13 @@ fun CloudAuthAndSyncScreen(
                         showReconnectPullPromptDialog = false
                         val draft = buildActiveSyncDraft()
                         isWorking = true
-                        feedbackIsError = false
-                        feedbackBanner = "正在从云端拉取恢复完整账本、原图与头像…"
+                        updateFeedback("正在从云端拉取恢复完整账本、原图与头像…", isError = false)
                         onRestoreCloud(draft) { msg ->
                             isWorking = false
-                            feedbackIsError = msg.contains("失败") || msg.contains("错误")
-                            feedbackBanner = msg
+                            updateFeedback(
+                                msg,
+                                isError = msg.contains("失败") || msg.contains("错误")
+                            )
                         }
                     }
                 ) {
@@ -1195,12 +1506,13 @@ fun CloudAuthAndSyncScreen(
                         showPullRestoreConfirmDialog = false
                         val draft = buildActiveSyncDraft()
                         isWorking = true
-                        feedbackIsError = false
-                        feedbackBanner = "正在从默记云拉取恢复账本、原图与头像…"
+                        updateFeedback("正在从默记云拉取恢复账本、原图与头像…", isError = false)
                         onRestoreCloud(draft) { msg ->
                             isWorking = false
-                            feedbackIsError = msg.contains("失败") || msg.contains("错误")
-                            feedbackBanner = msg
+                            updateFeedback(
+                                msg,
+                                isError = msg.contains("失败") || msg.contains("错误")
+                            )
                         }
                     }
                 ) {
@@ -1230,12 +1542,13 @@ fun CloudAuthAndSyncScreen(
                         showForceUploadConfirmDialog = false
                         val draft = buildActiveSyncDraft()
                         isWorking = true
-                        feedbackIsError = false
-                        feedbackBanner = "正在以本机数据强制同步覆盖云端…"
+                        updateFeedback("正在以本机数据强制同步覆盖云端…", isError = false)
                         onUploadCloud(draft, true) { msg ->
                             isWorking = false
-                            feedbackIsError = msg.contains("失败") || msg.contains("错误")
-                            feedbackBanner = msg
+                            updateFeedback(
+                                msg,
+                                isError = msg.contains("失败") || msg.contains("错误")
+                            )
                         }
                     }
                 ) {
@@ -1267,8 +1580,7 @@ fun CloudAuthAndSyncScreen(
                         isWorking = true
                         onDisconnectCloudSync { msg ->
                             isWorking = false
-                            feedbackIsError = false
-                            feedbackBanner = msg
+                            updateFeedback(msg, isError = false)
                         }
                     }
                 ) {

@@ -91,6 +91,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.moji.ai.data.backup.MoJiCloudSyncClient
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.model.AppearanceConfigManager
@@ -102,6 +103,7 @@ import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.SubCategoryDef
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.ui.FAMILY_LEDGER_NAME
 import com.moji.ai.ui.QuickBookkeepingTemplate
 import com.moji.ai.ui.screens.CategoryEditorBottomSheet
 import com.moji.ai.ui.screens.ICostColorTagChip
@@ -306,6 +308,12 @@ fun ICostCalculatorSheet(
     var timeManuallySet by remember { mutableStateOf(false) }
     // 本次记入的账本：仅作用于当前面板，不切换首页账本
     var targetLedger by remember { mutableStateOf(editingTransaction?.ledgerName ?: currentLedger) }
+    var syncToFamily by remember {
+        mutableStateOf(
+            editingTransaction?.syncToFamily
+                ?: (MoJiCloudSyncClient.isFamilyAutoShareActive() || currentLedger == FAMILY_LEDGER_NAME)
+        )
+    }
     // 防重复提交（「完成」后面板收起动画期间的连点）
     var isSubmitting by remember { mutableStateOf(false) }
     var inlineError by remember { mutableStateOf<String?>(null) }
@@ -400,7 +408,13 @@ fun ICostCalculatorSheet(
             targetWalletId = editingTransaction?.targetWalletId ?: initialTargetWalletId
             entryTimestamp = editingTransaction?.timestamp ?: System.currentTimeMillis()
             timeManuallySet = false
-            targetLedger = editingTransaction?.ledgerName ?: currentLedger
+            targetLedger = editingTransaction?.ledgerName ?: if (currentLedger == FAMILY_LEDGER_NAME) {
+                ledgers.firstOrNull { it != FAMILY_LEDGER_NAME } ?: "默认账本"
+            } else {
+                currentLedger
+            }
+            syncToFamily = editingTransaction?.syncToFamily
+                ?: (MoJiCloudSyncClient.isFamilyAutoShareActive() || currentLedger == FAMILY_LEDGER_NAME)
             isSubmitting = false
             inlineError = null
             showDiscardConfirm = false
@@ -742,10 +756,20 @@ fun ICostCalculatorSheet(
         }
 
         val normalizedTags = TagCatalog.joinTags(TagCatalog.parseTags(tagText))
+        val effectivePersonalLedger = if (targetLedger == FAMILY_LEDGER_NAME || targetLedger.isBlank()) {
+            ledgers.firstOrNull { it != FAMILY_LEDGER_NAME } ?: "默认账本"
+        } else {
+            targetLedger
+        }
+        val canSyncFamily = (actualType == TransactionType.EXPENSE || actualType == TransactionType.INCOME) &&
+            editingTransaction?.let { DedicatedFundManager.isCompositeMedicalPersonalChild(it) } != true &&
+            !normalizedTags.contains("PAYSLIP_MED") &&
+            !normalizedTags.contains("PAYSLIP_PROV")
+        val finalSyncToFamily = syncToFamily && canSyncFamily
 
         // 编辑时基于原账单 copy，保留退款金额、关联账单、原始采集文本、AI 置信度等字段
         val entity = editingTransaction?.copy(
-            ledgerName = targetLedger,
+            ledgerName = effectivePersonalLedger,
             type = actualType,
             amountCents = cents,
             currency = currency,
@@ -759,10 +783,11 @@ fun ICostCalculatorSheet(
             sourceWalletId = finalSourceId,
             targetWalletId = finalTargetId,
             reimbursable = finalReimbursable,
+            syncToFamily = finalSyncToFamily,
             tags = normalizedTags,
             timestamp = finalTimestamp
         ) ?: TransactionEntity(
-            ledgerName = targetLedger,
+            ledgerName = effectivePersonalLedger,
             type = actualType,
             amountCents = cents,
             currency = currency,
@@ -776,6 +801,7 @@ fun ICostCalculatorSheet(
             sourceWalletId = finalSourceId,
             targetWalletId = finalTargetId,
             reimbursable = finalReimbursable,
+            syncToFamily = finalSyncToFamily,
             tags = normalizedTags,
             timestamp = finalTimestamp,
             captureSource = "MANUAL"
@@ -1483,6 +1509,33 @@ fun ICostCalculatorSheet(
                                 onClick = { showWalletPickerForTarget = false }
                             )
                         }
+                        if (editingTransaction?.let { DedicatedFundManager.isCompositeMedicalPersonalChild(it) } != true) {
+                            item {
+                                Surface(
+                                    onClick = { syncToFamily = !syncToFamily },
+                                    shape = RoundedCornerShape(14.dp),
+                                    color = if (syncToFamily) {
+                                        if (AppearanceConfigManager.isDarkThemeActive) ICostBlueAccent.copy(alpha = 0.24f) else Color(0xFFEAF2FF)
+                                    } else {
+                                        ICostCellGray
+                                    },
+                                    modifier = Modifier.height(30.dp)
+                                ) {
+                                    Box(
+                                        contentAlignment = Alignment.Center,
+                                        modifier = Modifier.padding(horizontal = 10.dp)
+                                    ) {
+                                        Text(
+                                            text = if (syncToFamily) "🏠 家庭" else "🔒 仅个人",
+                                            fontSize = 12.sp,
+                                            fontWeight = if (syncToFamily) FontWeight.Bold else FontWeight.Medium,
+                                            color = if (syncToFamily) ICostBlueAccent else ICostTextSecondary,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                     if (txType == TransactionType.EXPENSE) {
                         item {
@@ -1996,7 +2049,12 @@ fun ICostCalculatorSheet(
                     ledgers.forEach { name ->
                         Surface(
                             onClick = {
-                                targetLedger = name
+                                if (name == FAMILY_LEDGER_NAME) {
+                                    syncToFamily = true
+                                    targetLedger = ledgers.firstOrNull { it != FAMILY_LEDGER_NAME } ?: "默认账本"
+                                } else {
+                                    targetLedger = name
+                                }
                                 showLedgerPicker = false
                             },
                             shape = RoundedCornerShape(12.dp),

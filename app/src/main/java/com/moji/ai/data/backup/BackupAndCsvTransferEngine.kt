@@ -106,7 +106,8 @@ data class BackupTransactionDto(
     val syncRevision: Long = 1L,
     val sourceWalletDeltaCents: Long? = null,
     val targetWalletDeltaCents: Long? = null,
-    val reimbursedAtMillis: Long? = null
+    val reimbursedAtMillis: Long? = null,
+    val syncToFamily: Boolean = false
 )
 
 @Serializable
@@ -296,7 +297,8 @@ object BackupAndCsvTransferEngine {
                     syncRevision = tx.syncRevision,
                     sourceWalletDeltaCents = tx.sourceWalletDeltaCents,
                     targetWalletDeltaCents = tx.targetWalletDeltaCents,
-                    reimbursedAtMillis = tx.reimbursedAtMillis
+                    reimbursedAtMillis = tx.reimbursedAtMillis,
+                    syncToFamily = tx.syncToFamily
                 )
             },
             recurringRules = recurringRules.map { r ->
@@ -407,8 +409,15 @@ object BackupAndCsvTransferEngine {
                 syncRevision = dto.syncRevision,
                 sourceWalletDeltaCents = dto.sourceWalletDeltaCents,
                 targetWalletDeltaCents = dto.targetWalletDeltaCents,
-                reimbursedAtMillis = dto.reimbursedAtMillis
-            )
+                reimbursedAtMillis = dto.reimbursedAtMillis,
+                syncToFamily = dto.syncToFamily
+            ).let { entity ->
+                if (entity.syncToFamily && !entity.isEligibleForFamilySync()) {
+                    entity.copy(syncToFamily = false)
+                } else {
+                    entity
+                }
+            }
         }
         return Triple(wallets, transactions, snapshot)
     }

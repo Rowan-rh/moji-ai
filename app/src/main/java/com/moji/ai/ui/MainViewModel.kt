@@ -31,6 +31,7 @@ import com.moji.ai.data.backup.WebDavConfig
 import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.AppDatabase
 import com.moji.ai.data.local.CaptureEvidenceEntity
+import com.moji.ai.data.local.FamilySharedTransactionEntity
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
@@ -77,6 +78,7 @@ import com.moji.ai.update.UpdateCheckState
 import com.moji.ai.widget.MoJiLedgerWidgetUpdater
 import com.moji.ai.widget.WidgetPinRequestResult
 import java.io.File
+import java.util.Calendar
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -88,6 +90,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -581,6 +585,31 @@ data class InstallmentPlanItem(
     val category: String = "数码"
 )
 
+const val FAMILY_LEDGER_NAME = "家庭账本"
+
+data class FamilyMemberBadgeInfo(
+    val userId: String,
+    val displayName: String,
+    val isSelf: Boolean,
+    val presetStyle: PresetAvatarStyle,
+    val customAvatarPath: String = "",
+    val avatarCacheKey: String = ""
+)
+
+data class FamilyMemberFilterOption(
+    val key: String,
+    val label: String,
+    val badge: FamilyMemberBadgeInfo? = null
+)
+
+private data class FamilyLedgerUiSnapshot(
+    val mergedTransactions: List<TransactionEntity> = emptyList(),
+    val ownerByTxId: Map<Long, FamilyMemberBadgeInfo> = emptyMap(),
+    val memberFilters: List<FamilyMemberFilterOption> = listOf(
+        FamilyMemberFilterOption(key = "ALL", label = "全部")
+    )
+)
+
 /**
  * 一次性的界面提示（Snackbar）。onUndo 不为空时提供「撤销」按钮。
  */
@@ -644,6 +673,144 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val webDavConfig: StateFlow<WebDavConfig> = _webDavConfig.asStateFlow()
 
     val mojiCloudConfig: StateFlow<MoJiCloudConfig> = MoJiCloudSyncClient.configFlow
+
+    private val familySharedTransactions: StateFlow<List<FamilySharedTransactionEntity>> =
+        repository.familySharedTransactionsFlow
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    private val familyLedgerSnapshot: StateFlow<FamilyLedgerUiSnapshot> = combine(
+        transactions,
+        familySharedTransactions,
+        mojiCloudConfig,
+        userProfileConfig
+    ) { ownTxs, sharedEntities, cloudCfg, selfProfile ->
+        val selfUid = cloudCfg.userId.ifBlank { "SELF" }
+        val selfName = selfProfile.nickname.ifBlank { "我" }
+        val selfBadge = FamilyMemberBadgeInfo(
+            userId = selfUid,
+            displayName = selfName,
+            isSelf = true,
+            presetStyle = selfProfile.presetAvatar,
+            customAvatarPath = selfProfile.customAvatarPath,
+            avatarCacheKey = if (selfProfile.customAvatarPath.isBlank()) {
+                ""
+            } else {
+                "${selfProfile.customAvatarPath}|${selfProfile.avatarUpdatedAtMillis}"
+            }
+        )
+
+        val memberMetaByUid = cloudCfg.familyMembers.associateBy { it.userId }
+        val badgeByUid = LinkedHashMap<String, FamilyMemberBadgeInfo>()
+        for (member in cloudCfg.familyMembers) {
+            if (member.userId.isBlank() || member.userId == cloudCfg.userId) continue
+            val cachedPath = MoJiCloudSyncClient
+                .resolveCachedFamilyMemberAvatarPath(app, member.userId, member.avatarSha256)
+                .orEmpty()
+            val presetIdx = (member.userId.hashCode() and 0x7FFFFFFF) % PresetAvatarStyle.entries.size
+            badgeByUid[member.userId] = FamilyMemberBadgeInfo(
+                userId = member.userId,
+                displayName = member.displayName.ifBlank { "家人" },
+                isSelf = false,
+                presetStyle = PresetAvatarStyle.entries[presetIdx],
+                customAvatarPath = cachedPath,
+                avatarCacheKey = if (cachedPath.isBlank()) "" else "$cachedPath|${member.avatarSha256}|${member.updatedAtMs}"
+            )
+        }
+
+        val ownerMap = HashMap<Long, FamilyMemberBadgeInfo>(ownTxs.size + sharedEntities.size)
+        val merged = ArrayList<TransactionEntity>(ownTxs.size + sharedEntities.size)
+
+        for (tx in ownTxs) {
+            if (tx.deletedAtMillis == null && tx.syncToFamily && tx.isEligibleForFamilySync()) {
+                merged.add(tx)
+                ownerMap[tx.id] = selfBadge
+            }
+        }
+
+        for (shared in sharedEntities) {
+            if (shared.deletedAtMillis != null) continue
+            if (cloudCfg.userId.isNotBlank() && shared.ownerUserId == cloudCfg.userId) continue
+            if (shared.type != TransactionType.EXPENSE && shared.type != TransactionType.INCOME) continue
+            val displayTx = shared.toReadOnlyDisplayTransaction(FAMILY_LEDGER_NAME)
+            val badge = badgeByUid.getOrPut(shared.ownerUserId) {
+                val meta = memberMetaByUid[shared.ownerUserId]
+                val cachedPath = MoJiCloudSyncClient
+                    .resolveCachedFamilyMemberAvatarPath(app, shared.ownerUserId, meta?.avatarSha256.orEmpty())
+                    .orEmpty()
+                val presetIdx = (shared.ownerUserId.hashCode() and 0x7FFFFFFF) % PresetAvatarStyle.entries.size
+                FamilyMemberBadgeInfo(
+                    userId = shared.ownerUserId,
+                    displayName = meta?.displayName?.ifBlank { null } ?: "家人",
+                    isSelf = false,
+                    presetStyle = PresetAvatarStyle.entries[presetIdx],
+                    customAvatarPath = cachedPath,
+                    avatarCacheKey = if (cachedPath.isBlank()) "" else "$cachedPath|${meta?.avatarSha256.orEmpty()}|${meta?.updatedAtMs ?: 0L}"
+                )
+            }
+            merged.add(displayTx)
+            ownerMap[displayTx.id] = badge
+        }
+
+        merged.sortWith(
+            compareByDescending<TransactionEntity> { it.timestamp }
+                .thenByDescending { it.id }
+        )
+
+        val filters = buildList {
+            add(FamilyMemberFilterOption(key = "ALL", label = "全部"))
+            add(FamilyMemberFilterOption(key = "SELF", label = "我", badge = selfBadge))
+            badgeByUid.values.forEach { b ->
+                add(FamilyMemberFilterOption(key = "UID:${b.userId}", label = b.displayName, badge = b))
+            }
+        }
+
+        FamilyLedgerUiSnapshot(
+            mergedTransactions = merged,
+            ownerByTxId = ownerMap,
+            memberFilters = filters
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), FamilyLedgerUiSnapshot())
+
+    val familyLedgerTransactions: StateFlow<List<TransactionEntity>> = familyLedgerSnapshot
+        .map { it.mergedTransactions }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val familyOwnerByTxId: StateFlow<Map<Long, FamilyMemberBadgeInfo>> = familyLedgerSnapshot
+        .map { it.ownerByTxId }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyMap())
+
+    val familyMemberFilterOptions: StateFlow<List<FamilyMemberFilterOption>> = familyLedgerSnapshot
+        .map { it.memberFilters }
+        .stateIn(
+            viewModelScope,
+            SharingStarted.WhileSubscribed(5000),
+            listOf(FamilyMemberFilterOption(key = "ALL", label = "全部"))
+        )
+
+    val currentMonthUnsyncedFamilyCount: StateFlow<Int> = transactions
+        .map { list ->
+            val nowCal = Calendar.getInstance()
+            val curYear = nowCal.get(Calendar.YEAR)
+            val curMonth = nowCal.get(Calendar.MONTH) + 1
+            val itemCal = Calendar.getInstance()
+            list.count { tx ->
+                if (tx.deletedAtMillis != null || tx.syncToFamily || !tx.isEligibleForFamilySync()) {
+                    false
+                } else {
+                    itemCal.timeInMillis = tx.timestamp
+                    itemCal.get(Calendar.YEAR) == curYear && (itemCal.get(Calendar.MONTH) + 1) == curMonth
+                }
+            }
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    init {
+        if (MoJiCloudSyncClient.configFlow.value.isTargetBound) {
+            viewModelScope.launch(Dispatchers.IO) {
+                MoJiCloudSyncClient.syncFamilyLedgerNow(app)
+            }
+        }
+    }
 
     /**
      * 从流体云胶囊或系统通知点击跳转进入 App 时，待直接打开详情页的账单 ID
@@ -954,12 +1121,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun applyQuickTemplateNow(tpl: QuickBookkeepingTemplate) {
         viewModelScope.launch {
             val allWallets = wallets.value.ifEmpty { repository.getAllWallets() }
-            when (val outcome = QuickTemplateHelper.evaluateQuickRecordOutcome(tpl, allWallets, _currentLedger.value)) {
+            val targetPersonalLedger = resolvePersonalWriteLedger(_currentLedger.value)
+            when (val outcome = QuickTemplateHelper.evaluateQuickRecordOutcome(tpl, allWallets, targetPersonalLedger)) {
                 is TemplateExecutionOutcome.OpenInCalculator -> {
                     requestFillCalculatorWithTemplate(outcome.template, outcome.message)
                 }
                 is TemplateExecutionOutcome.ReadyToRecord -> {
-                    val newId = repository.recordTransaction(outcome.transaction)
+                    val autoShare = (MoJiCloudSyncClient.isFamilyAutoShareActive() ||
+                        _currentLedger.value == FAMILY_LEDGER_NAME) &&
+                        outcome.transaction.isEligibleForFamilySync()
+                    val finalTx = if (autoShare) {
+                        outcome.transaction.copy(syncToFamily = true)
+                    } else {
+                        outcome.transaction
+                    }
+                    val newId = repository.recordTransaction(finalTx)
                     postMessage("已记一笔「${tpl.title}」", undoTransactionId = newId)
                 }
             }
@@ -968,6 +1144,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun duplicateTransactionNow(tx: TransactionEntity) {
         viewModelScope.launch {
+            if (tx.id < 0L) return@launch
             val isCompositeMain = DedicatedFundManager.isCompositeMedicalMain(tx)
             val isCompositeChild = DedicatedFundManager.isCompositeMedicalPersonalChild(tx)
             val cleanedTags = TagCatalog.joinTags(
@@ -982,9 +1159,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     tx.note.substringAfter("|", "").trim()
                 else -> tx.note
             }
-            val copyTx = tx.copy(
+            val baseCopy = tx.copy(
                 id = 0L,
                 syncUuid = java.util.UUID.randomUUID().toString(),
+                ledgerName = resolvePersonalWriteLedger(tx.ledgerName),
                 relatedTransactionId = null,
                 orderKey = "",
                 transactionNo = "",
@@ -997,6 +1175,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 reimbursed = false,
                 timestamp = System.currentTimeMillis(),
                 captureSource = "MANUAL_COPY"
+            )
+            val copyTx = baseCopy.copy(
+                syncToFamily = (MoJiCloudSyncClient.isFamilyAutoShareActive() ||
+                    _currentLedger.value == FAMILY_LEDGER_NAME) &&
+                    baseCopy.isEligibleForFamilySync()
             )
             val newId = repository.recordTransaction(copyTx)
             postMessage("已复制一笔到今天", undoTransactionId = newId)
@@ -1088,7 +1271,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
         viewModelScope.launch {
             val tx = TransactionEntity(
-                ledgerName = _currentLedger.value,
+                ledgerName = resolvePersonalWriteLedger(_currentLedger.value),
                 type = TransactionType.EXPENSE,
                 amountCents = totalPeriodCents,
                 currency = "CNY",
@@ -1128,11 +1311,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         uiPrefs.edit().putString("saved_installments_json", jsonCodec.encodeToString(updated)).apply()
     }
 
+    private fun ensureFamilyLedgerIncluded(raw: List<String>): List<String> {
+        val cleaned = raw.map { sanitizeLedgerName(it) }.filter { it.isNotEmpty() }.distinct()
+        if (FAMILY_LEDGER_NAME in cleaned) return cleaned
+        return if (cleaned.isEmpty()) {
+            listOf("默认账本", FAMILY_LEDGER_NAME)
+        } else {
+            listOf(cleaned.first(), FAMILY_LEDGER_NAME) + cleaned.drop(1)
+        }
+    }
+
+    private fun resolvePersonalWriteLedger(requested: String): String {
+        val sanitized = sanitizeLedgerName(requested)
+        if (sanitized.isNotEmpty() && sanitized != FAMILY_LEDGER_NAME) {
+            return sanitized
+        }
+        return _ledgers.value.firstOrNull { it != FAMILY_LEDGER_NAME } ?: "默认账本"
+    }
+
     private fun loadSavedLedgers(): List<String> {
         val raw = uiPrefs.getString("saved_ledgers", null)
-        if (raw.isNullOrBlank()) return listOf("默认账本", "日常家用", "旅行基金")
+        if (raw.isNullOrBlank()) {
+            return ensureFamilyLedgerIncluded(listOf("默认账本", FAMILY_LEDGER_NAME, "日常家用", "旅行基金"))
+        }
         val parsed = raw.split("||").map { it.trim() }.filter { it.isNotEmpty() }
-        return if (parsed.isEmpty()) listOf("默认账本") else parsed
+        return ensureFamilyLedgerIncluded(if (parsed.isEmpty()) listOf("默认账本") else parsed)
     }
 
     private fun sanitizeLedgerName(raw: String): String =
@@ -1144,6 +1347,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _currentLedger.value = sanitized
         uiPrefs.edit().putString("current_ledger", sanitized).apply()
         MoJiLedgerWidgetUpdater.enqueueUpdateAll(app)
+        if (sanitized == FAMILY_LEDGER_NAME && MoJiCloudSyncClient.configFlow.value.isTargetBound) {
+            viewModelScope.launch(Dispatchers.IO) {
+                MoJiCloudSyncClient.syncFamilyLedgerNow(app)
+            }
+        }
     }
 
     fun createLedger(name: String, switchToLedger: Boolean = true) {
@@ -1281,7 +1489,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             repository.reconcileWalletBalance(
                 walletId = walletId,
                 actualBalanceCents = actualCents,
-                ledgerName = _currentLedger.value,
+                ledgerName = resolvePersonalWriteLedger(_currentLedger.value),
                 recordAdjustmentTx = recordAdjustmentTx,
                 customNote = customNote
             )
@@ -1538,11 +1746,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 TagCatalog.syncDiscoveredTagsFromHistory(historyTagStrings)
             }
             app.merchantMemoryManager.replaceAllMemories(snapshot.merchantMemories)
-            val restoredLedgers = (snapshot.ledgers + backupTxs.map { it.ledgerName })
-                .map { sanitizeLedgerName(it) }
-                .filter { it.isNotEmpty() }
-                .distinct()
-                .ifEmpty { listOf("默认账本") }
+            val restoredLedgers = ensureFamilyLedgerIncluded(
+                (snapshot.ledgers + backupTxs.map { it.ledgerName })
+                    .map { sanitizeLedgerName(it) }
+                    .filter { it.isNotEmpty() }
+                    .distinct()
+                    .ifEmpty { listOf("默认账本") }
+            )
             _ledgers.value = restoredLedgers
             uiPrefs.edit().putString("saved_ledgers", restoredLedgers.joinToString("||")).apply()
             if (_currentLedger.value !in restoredLedgers) {
@@ -1829,6 +2039,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val ssText = if (bundle.syncedScreenshots > 0) "、${bundle.syncedScreenshots} 张原图" else ""
                         val avatarText = if (bundle.avatarWebpBytes != null) "及自定义头像" else ""
                         val failText = if (bundle.failedScreenshots > 0) "（另有 ${bundle.failedScreenshots} 张原图可稍后重试拉取）" else ""
+                        viewModelScope.launch(Dispatchers.IO) {
+                            MoJiCloudSyncClient.syncFamilyLedgerNow(app)
+                        }
                         onResult(
                             true,
                             "✅ 已接管「${targetMember.displayName.ifBlank { "原成员" }}」并恢复 v${bundle.revision}：${bundle.wallets.size} 个账户、$txCount 笔账单$ssText$avatarText$failText"
@@ -1852,6 +2065,96 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val msg = "已断开默记云同步连接，本机全部账本、账户与账单均已完整保留"
             postMessage(msg)
             onDone(msg)
+        }
+    }
+
+    fun setFamilySyncEnabled(enabled: Boolean, onResult: (String) -> Unit = {}) {
+        viewModelScope.launch {
+            MoJiCloudSyncClient.setFamilySyncEnabled(app, enabled)
+            if (enabled) {
+                if (MoJiCloudSyncClient.configFlow.value.isTargetBound) {
+                    val syncRes = MoJiCloudSyncClient.syncFamilyLedgerNow(app)
+                    val msg = syncRes.fold(
+                        onSuccess = { summary ->
+                            buildString {
+                                append("已开启家庭日常收支自动共享（新记支出/收入将自动进入家庭账本，历史账单默认不自动上传")
+                                if (summary.pulledItemCount > 0) {
+                                    append("；已拉回 ${summary.pulledItemCount} 条家人共享记录")
+                                }
+                                append("）")
+                            }
+                        },
+                        onFailure = {
+                            "已开启家庭收支自动共享（首次刷新家庭池暂未完成：${it.message}）"
+                        }
+                    )
+                    onResult(msg)
+                } else {
+                    onResult("已记录家庭共享偏好，连接云服务器后将自动生效")
+                }
+            } else {
+                onResult("已关闭新账单自动共享（过往已共享账单保持不变，可在单笔账单详情中撤回）")
+            }
+        }
+    }
+
+    fun syncFamilyLedgerManual(onResult: (String) -> Unit = {}) {
+        viewModelScope.launch {
+            val res = MoJiCloudSyncClient.syncFamilyLedgerNow(app)
+            res.fold(
+                onSuccess = { s ->
+                    val msg = "✅ 家庭共享账本已同步（推送 ${s.pushedUpsertCount} 笔更新" +
+                        (if (s.pushedTombstoneCount > 0) "、${s.pushedTombstoneCount} 笔撤回" else "") +
+                        "，拉取 ${s.pulledItemCount} 条记录 · 游标 #${s.nextCursor}）"
+                    onResult(msg)
+                },
+                onFailure = { err ->
+                    onResult("家庭账本同步失败：${err.message ?: "网络异常"}")
+                }
+            )
+        }
+    }
+
+    fun syncCurrentMonthBillsToFamily(onResult: (String) -> Unit = {}) {
+        viewModelScope.launch {
+            val markedCount = repository.enableFamilySyncForCurrentMonthEligibleTransactions()
+            if (markedCount <= 0) {
+                onResult("本月暂无未同步的日常支出/收入账单")
+                return@launch
+            }
+            if (MoJiCloudSyncClient.configFlow.value.isTargetBound) {
+                val syncRes = MoJiCloudSyncClient.syncFamilyLedgerNow(app)
+                syncRes.fold(
+                    onSuccess = {
+                        val msg = "✅ 已将本月 $markedCount 笔日常出入账同步至家庭账本（转账、还款、借贷及医保个账已自动隔离）"
+                        postMessage(msg)
+                        onResult(msg)
+                    },
+                    onFailure = { err ->
+                        val msg = "已标记本月 $markedCount 笔账单待共享，但上传暂失败：${err.message}"
+                        onResult(msg)
+                    }
+                )
+            } else {
+                val msg = "已标记本月 $markedCount 笔日常账单，连接云服务器后自动共享"
+                postMessage(msg)
+                onResult(msg)
+            }
+        }
+    }
+
+    fun toggleTransactionSyncToFamily(tx: TransactionEntity, enabled: Boolean) {
+        if (tx.id <= 0L || !tx.isEligibleForFamilySync()) return
+        viewModelScope.launch {
+            if (repository.setTransactionSyncToFamily(tx.id, enabled) != null) {
+                postMessage(
+                    if (enabled) "已加入家庭账本共享（后台自动同步）"
+                    else "已设为仅个人私密（将从家庭账本撤回）"
+                )
+                if (MoJiCloudSyncClient.configFlow.value.isTargetBound) {
+                    MoJiCloudSyncClient.syncFamilyLedgerNow(app)
+                }
+            }
         }
     }
 
@@ -1918,6 +2221,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val ssText = if (bundle.syncedScreenshots > 0) "、拉回 ${bundle.syncedScreenshots} 张账单原图" else ""
                         val avatarText = if (bundle.avatarWebpBytes != null) "、已同步自定义头像" else ""
                         val failText = if (bundle.failedScreenshots > 0) "（另有 ${bundle.failedScreenshots} 张原图下载失败，可稍后重新拉取补齐）" else ""
+                        viewModelScope.launch(Dispatchers.IO) {
+                            MoJiCloudSyncClient.syncFamilyLedgerNow(app)
+                        }
                         onResult("✅ 已从默记云 v${bundle.revision} 恢复：${bundle.wallets.size} 个账户、$txCount 笔账单$ssText$avatarText$failText")
                     } catch (ce: CancellationException) {
                         throw ce
@@ -2081,7 +2387,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             if (cents <= 0L) return@launch
             val rate = CurrencyRateManager.getEffectiveRateToCny(creditWallet.currency)
             val tx = TransactionEntity(
-                ledgerName = _currentLedger.value,
+                ledgerName = resolvePersonalWriteLedger(_currentLedger.value),
                 type = TransactionType.REPAYMENT,
                 amountCents = cents,
                 currency = creditWallet.currency,

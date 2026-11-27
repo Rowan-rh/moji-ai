@@ -3,7 +3,9 @@ package com.moji.ai.data.repository
 import androidx.room.withTransaction
 import com.moji.ai.data.backup.BackupAndCsvTransferEngine
 import com.moji.ai.data.backup.CsvParsePreviewResult
+import com.moji.ai.data.backup.MoJiCloudSyncClient
 import com.moji.ai.data.local.AppDatabase
+import com.moji.ai.data.local.FamilySharedTransactionEntity
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
@@ -129,10 +131,74 @@ class LedgerRepository(private val db: AppDatabase) {
     val walletsFlow = db.walletDao().observeAllWallets()
     val transactionsFlow = db.transactionDao().observeAllTransactions()
     val recurringRulesFlow = db.recurringRuleDao().observeAllRules()
+    val familySharedTransactionsFlow = db.familySharedTransactionDao().observeActiveSharedTransactions()
 
     suspend fun getAllWallets(): List<WalletEntity> = db.walletDao().getAllWallets()
 
     suspend fun getAllTransactions(): List<TransactionEntity> = db.transactionDao().getAllTransactions()
+
+    suspend fun getAllFamilySharedTransactions(): List<FamilySharedTransactionEntity> =
+        db.familySharedTransactionDao().getAllSharedTransactions()
+
+    suspend fun upsertFamilySharedTransactions(items: List<FamilySharedTransactionEntity>) {
+        if (items.isEmpty()) return
+        db.familySharedTransactionDao().upsertAll(items)
+    }
+
+    suspend fun deleteFamilySharedTransactionsByOwner(ownerUserId: String) {
+        if (ownerUserId.isBlank()) return
+        db.familySharedTransactionDao().deleteByOwnerUserId(ownerUserId)
+    }
+
+    suspend fun clearAllFamilySharedTransactions() {
+        db.familySharedTransactionDao().deleteAll()
+    }
+
+    suspend fun setTransactionSyncToFamily(
+        txId: Long,
+        syncToFamily: Boolean,
+        nowMillis: Long = System.currentTimeMillis()
+    ): TransactionEntity? = db.withTransaction {
+        if (txId <= 0L) return@withTransaction null
+        val txDao = db.transactionDao()
+        val existing = txDao.getTransactionById(txId) ?: return@withTransaction null
+        if (existing.deletedAtMillis != null) return@withTransaction null
+        val effectiveFlag = syncToFamily && existing.isEligibleForFamilySync()
+        if (existing.syncToFamily == effectiveFlag) return@withTransaction existing
+        txDao.updateTransactionSyncToFamilyById(txId, effectiveFlag, nowMillis)
+        txDao.getTransactionById(txId)
+    }
+
+    suspend fun enableFamilySyncForCurrentMonthEligibleTransactions(
+        nowMillis: Long = System.currentTimeMillis(),
+        timeZone: java.util.TimeZone = java.util.TimeZone.getDefault()
+    ): Int = db.withTransaction {
+        val cal = Calendar.getInstance(timeZone).apply { timeInMillis = nowMillis }
+        val year = cal.get(Calendar.YEAR)
+        val month = cal.get(Calendar.MONTH)
+        val maxDay = cal.getActualMaximum(Calendar.DAY_OF_MONTH)
+        val startOfMonth = Calendar.getInstance(timeZone).apply {
+            clear()
+            set(year, month, 1, 0, 0, 0)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val endOfMonth = Calendar.getInstance(timeZone).apply {
+            clear()
+            set(year, month, maxDay, 23, 59, 59)
+            set(Calendar.MILLISECOND, 999)
+        }.timeInMillis
+
+        val txDao = db.transactionDao()
+        var updatedCount = 0
+        for (tx in txDao.getAllTransactions()) {
+            if (tx.timestamp !in startOfMonth..endOfMonth) continue
+            if (tx.syncToFamily) continue
+            if (!tx.isEligibleForFamilySync()) continue
+            txDao.updateTransactionSyncToFamilyById(tx.id, true, nowMillis)
+            updatedCount++
+        }
+        updatedCount
+    }
 
     suspend fun getAllNonEmptyTagStrings(): List<String> = db.transactionDao().getAllNonEmptyTagStrings()
 
@@ -1128,7 +1194,7 @@ class LedgerRepository(private val db: AppDatabase) {
                         rule.title.contains("医保") -> "医保"
                         else -> ""
                     }
-                    val tx = TransactionEntity(
+                    val rawRecurringTx = TransactionEntity(
                         type = rule.type,
                         amountCents = rule.amountCents,
                         currency = rule.currency,
@@ -1142,6 +1208,14 @@ class LedgerRepository(private val db: AppDatabase) {
                         targetWalletId = resolvedTargetWalletId,
                         captureSource = "RECURRING"
                     )
+                    val tx = if (dedicatedTag.isEmpty() &&
+                        MoJiCloudSyncClient.isFamilyAutoShareActive() &&
+                        rawRecurringTx.isEligibleForFamilySync()
+                    ) {
+                        rawRecurringTx.copy(syncToFamily = true)
+                    } else {
+                        rawRecurringTx
+                    }
                     val id = recordSingleTransactionOnStore(roomStore, tx)
                     created.add(tx.copy(id = id))
 
@@ -1220,10 +1294,15 @@ class LedgerRepository(private val db: AppDatabase) {
             tx: TransactionEntity,
             nowMillis: Long = System.currentTimeMillis()
         ): Long {
-            val normalized = if (!tx.reimbursable && tx.reimbursed) {
+            val normalizedReimb = if (!tx.reimbursable && tx.reimbursed) {
                 tx.copy(reimbursed = false, reimbursedAtMillis = null)
             } else {
                 tx
+            }
+            val normalized = if (normalizedReimb.syncToFamily && !normalizedReimb.isEligibleForFamilySync()) {
+                normalizedReimb.copy(syncToFamily = false)
+            } else {
+                normalizedReimb
             }
             val finalTx = applyWalletImpactOnStore(store, normalized, nowMillis)
             val id = store.insertTransaction(finalTx)
@@ -1239,10 +1318,15 @@ class LedgerRepository(private val db: AppDatabase) {
             nowMillis: Long = System.currentTimeMillis()
         ): Boolean {
             val oldTx = store.getTransactionById(updatedTx.id) ?: return false
-            val normalizedBase = if (!updatedTx.reimbursable && updatedTx.reimbursed) {
+            val normalizedReimb = if (!updatedTx.reimbursable && updatedTx.reimbursed) {
                 updatedTx.copy(reimbursed = false, reimbursedAtMillis = null)
             } else {
                 updatedTx
+            }
+            val normalizedBase = if (normalizedReimb.syncToFamily && !normalizedReimb.isEligibleForFamilySync()) {
+                normalizedReimb.copy(syncToFamily = false)
+            } else {
+                normalizedReimb
             }
 
             // AC-1 ③：拦截已发生退款的支出账单被改为其他类型，或编辑后折算本位币金额小于累计已退金额 refundedAmountCents
@@ -1979,7 +2063,8 @@ class LedgerRepository(private val db: AppDatabase) {
                     dedupFingerprint = "KEY:${effectiveOrderKey}_$netPayCents",
                     captureSource = request.captureSource,
                     updatedAtMillis = now,
-                    syncDirty = true
+                    syncDirty = true,
+                    syncToFamily = MoJiCloudSyncClient.isFamilyAutoShareActive()
                 )
                 val appliedMain = applyWalletImpactOnStore(store, rawMain)
                 val mainId = store.insertTransaction(appliedMain)
@@ -2022,7 +2107,8 @@ class LedgerRepository(private val db: AppDatabase) {
                     dedupFingerprint = "KEY:${effectiveOrderKey}_$medDepositCents${DedicatedFundManager.PAYSLIP_MEDICAL_CHILD_SUFFIX}",
                     captureSource = request.captureSource,
                     updatedAtMillis = now,
-                    syncDirty = true
+                    syncDirty = true,
+                    syncToFamily = false
                 )
                 val appliedMed = applyWalletImpactOnStore(store, rawMed)
                 val medId = store.insertTransaction(appliedMed)
@@ -2066,7 +2152,8 @@ class LedgerRepository(private val db: AppDatabase) {
                     dedupFingerprint = "KEY:${effectiveOrderKey}_$provDepositCents${DedicatedFundManager.PAYSLIP_PROVIDENT_CHILD_SUFFIX}",
                     captureSource = request.captureSource,
                     updatedAtMillis = now,
-                    syncDirty = true
+                    syncDirty = true,
+                    syncToFamily = false
                 )
                 val appliedProv = applyWalletImpactOnStore(store, rawProv)
                 val provId = store.insertTransaction(appliedProv)

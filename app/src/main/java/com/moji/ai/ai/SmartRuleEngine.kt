@@ -35,6 +35,7 @@ data class SmartConditionRule(
     val markReimbursable: Boolean = false, // 自动标记为待报销
     val appendTag: String = "",            // 自动追加标签
     val overrideSourceWalletId: Long? = null,
+    val excludeFromFamily: Boolean = false, // 若为 true，自动豁免不同步至家庭账本
     val interceptIgnore: Boolean = false   // 若为 true，则直接作为非账单噪声拦截不入账
 ) {
     fun conditionSummary(): String {
@@ -58,6 +59,7 @@ data class SmartConditionRule(
         if (targetLedger.isNotBlank()) actions.add("账本「$targetLedger」")
         if (markReimbursable) actions.add("标为待报销")
         if (appendTag.isNotBlank()) actions.add("标签#$appendTag")
+        if (excludeFromFamily) actions.add("不同步家庭")
         return if (actions.isEmpty()) "保持原样" else actions.joinToString(" · ")
     }
 }
@@ -255,7 +257,8 @@ class SmartRuleEngine(context: Context) {
                 ledgerName = rule.targetLedger.ifBlank { currentTx.ledgerName },
                 reimbursable = if (rule.markReimbursable) true else currentTx.reimbursable,
                 tags = newTags,
-                sourceWalletId = rule.overrideSourceWalletId ?: currentTx.sourceWalletId
+                sourceWalletId = rule.overrideSourceWalletId ?: currentTx.sourceWalletId,
+                syncToFamily = if (rule.excludeFromFamily) false else currentTx.syncToFamily
             )
         }
 

@@ -48,6 +48,7 @@ data class LedgerWidgetSnapshot(
 object LedgerWidgetSnapshotCalculator {
 
     const val DEFAULT_LEDGER_NAME = "默认账本"
+    const val FAMILY_LEDGER_NAME = "家庭账本"
     const val SYSTEM_RECONCILE_CATEGORY = "平账"
     const val MASKED_AMOUNT_TEXT = "¥****"
     const val COMPACT_WIDTH_THRESHOLD_DP = 180
@@ -67,7 +68,8 @@ object LedgerWidgetSnapshotCalculator {
         privacyMasked: Boolean = false,
         appearanceConfig: AppearanceSettingsConfig = AppearanceSettingsConfig(),
         nowMillis: Long = System.currentTimeMillis(),
-        timeZone: TimeZone = TimeZone.getDefault()
+        timeZone: TimeZone = TimeZone.getDefault(),
+        familySharedTransactions: List<TransactionEntity> = emptyList()
     ): LedgerWidgetSnapshot {
         val resolvedLedger = currentLedger.trim().ifEmpty { DEFAULT_LEDGER_NAME }
 
@@ -109,8 +111,15 @@ object LedgerWidgetSnapshotCalculator {
         var todayTxCount = 0
         var monthExpenseCents = 0L
 
-        for (tx in transactions) {
-            if (tx.ledgerName != resolvedLedger) continue
+        val isFamilyScope = resolvedLedger == FAMILY_LEDGER_NAME
+        val sourceItems = if (isFamilyScope) {
+            transactions.filter { (it.syncToFamily && it.isEligibleForFamilySync()) || it.ledgerName == FAMILY_LEDGER_NAME } +
+                familySharedTransactions
+        } else {
+            transactions.filter { it.ledgerName == resolvedLedger }
+        }
+
+        for (tx in sourceItems) {
             if (tx.deletedAtMillis != null) continue
             if (tx.type != TransactionType.EXPENSE) continue
             if (tx.category == SYSTEM_RECONCILE_CATEGORY) continue

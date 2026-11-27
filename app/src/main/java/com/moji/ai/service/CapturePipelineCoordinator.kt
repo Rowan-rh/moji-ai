@@ -4,6 +4,7 @@ import com.moji.ai.ai.AiAccountingEngine
 import com.moji.ai.ai.AiParseTraceCollector
 import com.moji.ai.ai.SmartRuleEngine
 import com.moji.ai.ai.SmartRuleExecutionResult
+import com.moji.ai.data.backup.MoJiCloudSyncClient
 import com.moji.ai.data.local.CaptureEvidenceEntity
 import java.io.File
 import com.moji.ai.data.local.TransactionEntity
@@ -1094,8 +1095,15 @@ class CapturePipelineCoordinator internal constructor(
             return null
         }
 
+        // 若已开启「家庭共享账本」，日常 EXPENSE / INCOME 默认标记 syncToFamily = true；随后再过条件规则以便命中「不同步家庭」时自动豁免
+        val initialFamilyCandidate = if (MoJiCloudSyncClient.isFamilyAutoShareActive() && rawParsedTx.isEligibleForFamilySync()) {
+            rawParsedTx.copy(syncToFamily = true)
+        } else {
+            rawParsedTx
+        }
+
         // 执行 When -> Then 可视化条件规则管道
-        val ruleEval = smartRuleEngine?.evaluateAndApply(rawParsedTx, mergedText)
+        val ruleEval = smartRuleEngine?.evaluateAndApply(initialFamilyCandidate, mergedText)
         val parsedTx: TransactionEntity
         val matchedRuleNames: String
         var smartRuleTraceSummary = ""
@@ -1152,7 +1160,7 @@ class CapturePipelineCoordinator internal constructor(
                 }
             }
             null -> {
-                parsedTx = rawParsedTx
+                parsedTx = initialFamilyCandidate
                 matchedRuleNames = ""
             }
         }

@@ -16,6 +16,9 @@
    - 内置 `expected_revision` 版本锁与空账本防误抹除守卫（`409 Conflict`），防止新手机认领账号后尚未拉取就误用空库覆盖云端数据。
    - 自动按用户保留最近 `N` 个历史版本（默认 `10` 版），所有文件写入均采用临时文件 `fsync` + 原子 `rename`。
    - 识屏账单截图（`data_dir/screenshots/`）与个人自定义头像（`data_dir/avatars/<user_id>.webp`，限制 `16B ~ 512KB` WebP）均强校验 `RIFF....WEBP` 魔数后原子落盘，换机恢复时一键完整还原。
+4. **「个人管资产，家庭看收支」增量家庭共享池（`family_transactions`）**：
+   - 独立幂等表 `family_transactions` 按 `(app_env, tx_uuid)` 唯一约束严格隔离 `prod` 与 `qa`，采用单调自增游标 `seq` 支持多设备毫秒级增量推拉（`POST /api/v1/family/sync`），仅存储脱敏收支展示字段（`EXPENSE` / `INCOME` 金额、币种、分类、商户、备注、标签、成员昵称/预设头像及软删除墓碑 `deleted_at_ms`），**零钱包卡号、零抓取原文、零识屏截图路径**。
+   - 强所有权门禁：仅账单原作者（`owner_user_id == claims.uid`）可更新或软删除名下家庭账单，越权覆写直接以 `403 (forbidden_not_tx_owner)` 拦截；支持同环境成员按需拉取家人自定义头像（`GET /api/v1/family/avatar/:user_id`）。
 
 ## 部署到 ECS 指南
 
@@ -92,3 +95,5 @@ ssh root@203.0.113.10 "chmod 0755 /opt/moji-cloud/moji-cloud-server && systemctl
 | `POST /api/v1/screenshots/missing` | Bearer Token | 批量比对本地账单原图 `SHA-256`，仅返回云端缺失项 |
 | `PUT /api/v1/screenshots/:sha256` | Bearer Token | 上传单张 `image/webp` 账单原图（服务端强校验 `SHA-256` 与 WebP 魔数） |
 | `GET /api/v1/screenshots/:sha256` | Bearer Token | 下载当前用户名下的指定账单原图 |
+| `POST /api/v1/family/sync` | Bearer Token | 家庭共享账本增量推拉（校验 `owner_user_id == claims.uid`，返回 `since_seq` 之后增量变更、家庭成员列表与最新 `latest_seq`） |
+| `GET /api/v1/family/avatar/:user_id` | Bearer Token | 下载同一 `app_env` 下指定家庭成员的云端自定义头像（`image/webp`） |

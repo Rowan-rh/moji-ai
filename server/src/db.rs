@@ -12,8 +12,78 @@ use crate::auth::now_millis;
 use crate::error::AppError;
 
 const MAX_MISSING_CHECK_BATCH: usize = 20_000;
+const MAX_FAMILY_SYNC_PUSH_BATCH: usize = 2_000;
+const DEFAULT_FAMILY_SYNC_PULL_LIMIT: usize = 500;
+const MAX_FAMILY_SYNC_PULL_LIMIT: usize = 2_000;
 pub const MIN_USER_AVATAR_BYTES: usize = 16;
 pub const MAX_USER_AVATAR_BYTES: usize = 512 * 1024;
+
+fn default_cny_currency() -> String {
+    "CNY".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FamilyTxMutationInput {
+    pub tx_uuid: String,
+    pub tx_type: String,
+    #[serde(default = "default_cny_currency")]
+    pub currency: String,
+    #[serde(default)]
+    pub amount_cents: i64,
+    #[serde(default)]
+    pub amount_cny_cents: i64,
+    #[serde(default)]
+    pub refunded_amount_cents: i64,
+    #[serde(default)]
+    pub category: String,
+    #[serde(default)]
+    pub merchant: String,
+    #[serde(default)]
+    pub note: String,
+    #[serde(default)]
+    pub tags: String,
+    pub occurred_at_ms: i64,
+    pub updated_at_ms: i64,
+    #[serde(default)]
+    pub deleted_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FamilyTxDeltaItem {
+    pub seq: i64,
+    pub tx_uuid: String,
+    pub owner_user_id: String,
+    pub tx_type: String,
+    pub currency: String,
+    pub amount_cents: i64,
+    pub amount_cny_cents: i64,
+    pub refunded_amount_cents: i64,
+    pub category: String,
+    pub merchant: String,
+    pub note: String,
+    pub tags: String,
+    pub occurred_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub deleted_at_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FamilyCircleMemberInfo {
+    pub user_id: String,
+    pub display_name: String,
+    pub avatar_sha256: String,
+    pub avatar_updated_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FamilySyncResult {
+    pub accepted_count: usize,
+    pub items: Vec<FamilyTxDeltaItem>,
+    pub next_since_seq: i64,
+    pub latest_seq: i64,
+    pub has_more: bool,
+    pub members: Vec<FamilyCircleMemberInfo>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountSummary {
@@ -246,6 +316,29 @@ impl CloudStore {
                 created_at_ms INTEGER NOT NULL,
                 PRIMARY KEY (user_id, sha256)
             );
+
+            -- 7. 家庭共享账单增量池（按 app_env 严格物理隔离 prod/qa，仅存脱敏收支展示字段）
+            CREATE TABLE IF NOT EXISTS family_transactions (
+                seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                app_env TEXT NOT NULL,
+                tx_uuid TEXT NOT NULL,
+                owner_user_id TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+                tx_type TEXT NOT NULL,
+                currency TEXT NOT NULL DEFAULT 'CNY',
+                amount_cents INTEGER NOT NULL DEFAULT 0,
+                amount_cny_cents INTEGER NOT NULL DEFAULT 0,
+                refunded_amount_cents INTEGER NOT NULL DEFAULT 0,
+                category TEXT NOT NULL DEFAULT '',
+                merchant TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                tags TEXT NOT NULL DEFAULT '',
+                occurred_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                deleted_at_ms INTEGER,
+                UNIQUE(app_env, tx_uuid)
+            );
+            CREATE INDEX IF NOT EXISTS idx_family_tx_env_seq ON family_transactions(app_env, seq);
+            CREATE INDEX IF NOT EXISTS idx_family_tx_owner ON family_transactions(owner_user_id);
             "#,
         )
         .map_err(|e| format!("init sqlite schema: {e}"))?;
@@ -282,6 +375,492 @@ impl CloudStore {
     #[cfg(test)]
     pub fn set_max_user_screenshot_bytes(&mut self, max_bytes: usize) {
         self.max_user_screenshot_bytes = max_bytes;
+    }
+
+    /// 推送本人家庭共享账单变更（含新建/编辑/退款冲销校准/删除墓碑）并按 `since_seq` 增量拉取同环境家庭账单池与成员摘要
+    pub fn sync_family_transactions(
+        &self,
+        caller_uid: &str,
+        app_env: &str,
+        member_label: &str,
+        since_seq: i64,
+        requested_limit: Option<usize>,
+        mutations: &[FamilyTxMutationInput],
+    ) -> Result<FamilySyncResult, AppError> {
+        validate_uuid(caller_uid)?;
+        if mutations.len() > MAX_FAMILY_SYNC_PUSH_BATCH {
+            return Err(AppError::BadRequest(
+                "batch_too_large",
+                format!("单次家庭账单同步最多推送 {MAX_FAMILY_SYNC_PUSH_BATCH} 笔变更"),
+            ));
+        }
+
+        let clean_since_seq = since_seq.max(0);
+        let pull_limit = requested_limit
+            .unwrap_or(DEFAULT_FAMILY_SYNC_PULL_LIMIT)
+            .clamp(1, MAX_FAMILY_SYNC_PULL_LIMIT);
+        let clean_member_label = sanitize_short_text(member_label, 48);
+        let now = now_millis();
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| AppError::Internal(format!("begin family sync tx: {e}")))?;
+
+        let user_row: Option<(String, String, String)> = tx
+            .query_row(
+                "SELECT app_env, status, display_name FROM users WHERE user_id = ?1",
+                params![caller_uid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| AppError::Internal(format!("query caller user: {e}")))?;
+        let (stored_env, status, existing_display_name) = user_row.ok_or_else(|| {
+            AppError::Unauthorized("user_not_found", "云端身份不存在或已失效".to_string())
+        })?;
+        if status != "active" {
+            return Err(AppError::Forbidden(
+                "account_disabled",
+                "当前云同步账号已停用".to_string(),
+            ));
+        }
+        if stored_env != app_env {
+            return Err(AppError::Forbidden(
+                "env_mismatch",
+                format!("账号环境不匹配（云端为 {stored_env}，当前请求为 {app_env}）"),
+            ));
+        }
+
+        if !clean_member_label.is_empty()
+            && clean_member_label != existing_display_name
+            && !is_default_or_device_member_label(&clean_member_label, "")
+        {
+            tx.execute(
+                "UPDATE users SET display_name = ?1, updated_at_ms = ?2 WHERE user_id = ?3",
+                params![clean_member_label, now, caller_uid],
+            )
+            .map_err(|e| AppError::Internal(format!("update caller display_name: {e}")))?;
+        }
+
+        let mut accepted_count = 0usize;
+
+        for item in mutations {
+            let clean_uuid = normalize_family_tx_uuid(&item.tx_uuid)?;
+            let clean_type = normalize_family_tx_type(&item.tx_type)?;
+            let clean_currency = normalize_currency_code(&item.currency);
+            if item.amount_cents < 0 || item.amount_cny_cents < 0 || item.refunded_amount_cents < 0 {
+                return Err(AppError::BadRequest(
+                    "invalid_amount",
+                    "账单金额或已退款金额不能为负数".to_string(),
+                ));
+            }
+            if item.deleted_at_ms.is_none() && (item.amount_cents == 0 && item.amount_cny_cents == 0)
+            {
+                return Err(AppError::BadRequest(
+                    "invalid_amount",
+                    "有效家庭共享账单金额必须大于 0".to_string(),
+                ));
+            }
+
+            let clean_cny = if item.amount_cny_cents > 0 {
+                item.amount_cny_cents
+            } else {
+                item.amount_cents
+            };
+            let clean_refunded = item.refunded_amount_cents.clamp(0, clean_cny);
+            let clean_category = sanitize_short_text(&item.category, 48);
+            let clean_merchant = sanitize_short_text(&item.merchant, 96);
+            let clean_note = sanitize_short_text(&item.note, 240);
+            let clean_tags = sanitize_short_text(&item.tags, 160);
+            let clean_occurred = if item.occurred_at_ms > 0 {
+                item.occurred_at_ms
+            } else {
+                now
+            };
+            let clean_updated = if item.updated_at_ms > 0 {
+                item.updated_at_ms
+            } else {
+                now
+            };
+            let clean_deleted = item.deleted_at_ms.map(|ts| if ts > 0 { ts } else { now });
+
+            #[allow(clippy::type_complexity)]
+            let existing: Option<(
+                String,
+                String,
+                String,
+                i64,
+                i64,
+                i64,
+                String,
+                String,
+                String,
+                String,
+                i64,
+                Option<i64>,
+            )> = tx
+                .query_row(
+                    r#"
+                    SELECT owner_user_id, tx_type, currency, amount_cents, amount_cny_cents,
+                           refunded_amount_cents, category, merchant, note, tags,
+                           occurred_at_ms, deleted_at_ms
+                    FROM family_transactions
+                    WHERE app_env = ?1 AND tx_uuid = ?2
+                    "#,
+                    params![app_env, clean_uuid],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get(4)?,
+                            r.get(5)?,
+                            r.get(6)?,
+                            r.get(7)?,
+                            r.get(8)?,
+                            r.get(9)?,
+                            r.get(10)?,
+                            r.get(11)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(|e| AppError::Internal(format!("query existing family tx: {e}")))?;
+
+            if let Some((
+                ref ex_owner,
+                ref ex_type,
+                ref ex_currency,
+                ex_amt,
+                ex_cny,
+                ex_ref,
+                ref ex_cat,
+                ref ex_merch,
+                ref ex_note,
+                ref ex_tags,
+                ex_occurred,
+                ex_deleted,
+            )) = existing
+            {
+                if ex_owner != caller_uid {
+                    return Err(AppError::Forbidden(
+                        "forbidden_not_tx_owner",
+                        "无权修改或删除其他家庭成员创建的账单".to_string(),
+                    ));
+                }
+
+                // 若客户端本地已硬删除仅上传 tx_uuid 墓碑，沿用云端已有摘要字段避免丢失展示信息
+                let (
+                    final_type,
+                    final_currency,
+                    final_amt,
+                    final_cny,
+                    final_ref,
+                    final_cat,
+                    final_merch,
+                    final_note,
+                    final_tags,
+                    final_occurred,
+                ) = if clean_deleted.is_some() && item.amount_cents == 0 && item.amount_cny_cents == 0 {
+                    (
+                        ex_type.clone(),
+                        ex_currency.clone(),
+                        ex_amt,
+                        ex_cny,
+                        ex_ref,
+                        ex_cat.clone(),
+                        ex_merch.clone(),
+                        ex_note.clone(),
+                        ex_tags.clone(),
+                        ex_occurred,
+                    )
+                } else {
+                    (
+                        clean_type,
+                        clean_currency,
+                        item.amount_cents,
+                        clean_cny,
+                        clean_refunded,
+                        clean_category,
+                        clean_merchant,
+                        clean_note,
+                        clean_tags,
+                        clean_occurred,
+                    )
+                };
+
+                let unchanged = ex_type == &final_type
+                    && ex_currency == &final_currency
+                    && ex_amt == final_amt
+                    && ex_cny == final_cny
+                    && ex_ref == final_ref
+                    && ex_cat == &final_cat
+                    && ex_merch == &final_merch
+                    && ex_note == &final_note
+                    && ex_tags == &final_tags
+                    && ex_occurred == final_occurred
+                    && ex_deleted.is_some() == clean_deleted.is_some();
+
+                if unchanged {
+                    accepted_count += 1;
+                    continue;
+                }
+
+                tx.execute(
+                    "DELETE FROM family_transactions WHERE app_env = ?1 AND tx_uuid = ?2",
+                    params![app_env, clean_uuid],
+                )
+                .map_err(|e| AppError::Internal(format!("delete old family tx for seq bump: {e}")))?;
+
+                tx.execute(
+                    r#"
+                    INSERT INTO family_transactions (
+                        app_env, tx_uuid, owner_user_id, tx_type, currency,
+                        amount_cents, amount_cny_cents, refunded_amount_cents,
+                        category, merchant, note, tags,
+                        occurred_at_ms, updated_at_ms, deleted_at_ms
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                    "#,
+                    params![
+                        app_env,
+                        clean_uuid,
+                        caller_uid,
+                        final_type,
+                        final_currency,
+                        final_amt,
+                        final_cny,
+                        final_ref,
+                        final_cat,
+                        final_merch,
+                        final_note,
+                        final_tags,
+                        final_occurred,
+                        clean_updated,
+                        clean_deleted,
+                    ],
+                )
+                .map_err(|e| AppError::Internal(format!("reinsert updated family tx: {e}")))?;
+                accepted_count += 1;
+            } else {
+                // 若云端原本不存在该 tx_uuid 且客户端仅上送墓碑，则幂等忽略，避免产生无意义空墓碑
+                if clean_deleted.is_some() {
+                    accepted_count += 1;
+                    continue;
+                }
+                tx.execute(
+                    r#"
+                    INSERT INTO family_transactions (
+                        app_env, tx_uuid, owner_user_id, tx_type, currency,
+                        amount_cents, amount_cny_cents, refunded_amount_cents,
+                        category, merchant, note, tags,
+                        occurred_at_ms, updated_at_ms, deleted_at_ms
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL)
+                    "#,
+                    params![
+                        app_env,
+                        clean_uuid,
+                        caller_uid,
+                        clean_type,
+                        clean_currency,
+                        item.amount_cents,
+                        clean_cny,
+                        clean_refunded,
+                        clean_category,
+                        clean_merchant,
+                        clean_note,
+                        clean_tags,
+                        clean_occurred,
+                        clean_updated,
+                    ],
+                )
+                .map_err(|e| AppError::Internal(format!("insert family tx: {e}")))?;
+                accepted_count += 1;
+            }
+        }
+
+        let latest_seq: i64 = tx
+            .query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM family_transactions WHERE app_env = ?1",
+                params![app_env],
+                |r| r.get(0),
+            )
+            .map_err(|e| AppError::Internal(format!("query max family seq: {e}")))?;
+
+        let fetch_limit = (pull_limit + 1) as i64;
+        let mut items = Vec::new();
+        {
+            let mut stmt = tx
+                .prepare(
+                    r#"
+                    SELECT seq, tx_uuid, owner_user_id, tx_type, currency,
+                           amount_cents, amount_cny_cents, refunded_amount_cents,
+                           category, merchant, note, tags,
+                           occurred_at_ms, updated_at_ms, deleted_at_ms
+                    FROM family_transactions
+                    WHERE app_env = ?1 AND seq > ?2
+                    ORDER BY seq ASC
+                    LIMIT ?3
+                    "#,
+                )
+                .map_err(|e| AppError::Internal(format!("prepare family delta query: {e}")))?;
+            let rows = stmt
+                .query_map(params![app_env, clean_since_seq, fetch_limit], |r| {
+                    Ok(FamilyTxDeltaItem {
+                        seq: r.get(0)?,
+                        tx_uuid: r.get(1)?,
+                        owner_user_id: r.get(2)?,
+                        tx_type: r.get(3)?,
+                        currency: r.get(4)?,
+                        amount_cents: r.get(5)?,
+                        amount_cny_cents: r.get(6)?,
+                        refunded_amount_cents: r.get(7)?,
+                        category: r.get(8)?,
+                        merchant: r.get(9)?,
+                        note: r.get(10)?,
+                        tags: r.get(11)?,
+                        occurred_at_ms: r.get(12)?,
+                        updated_at_ms: r.get(13)?,
+                        deleted_at_ms: r.get(14)?,
+                    })
+                })
+                .map_err(|e| AppError::Internal(format!("query family delta rows: {e}")))?;
+            for r in rows {
+                items.push(r.map_err(|e| AppError::Internal(format!("map family delta: {e}")))?);
+            }
+        }
+
+        let has_more = items.len() > pull_limit;
+        if has_more {
+            items.truncate(pull_limit);
+        }
+        let next_since_seq = if has_more {
+            items
+                .last()
+                .map(|x| x.seq)
+                .unwrap_or(clean_since_seq)
+        } else {
+            latest_seq.max(clean_since_seq)
+        };
+
+        let mut members = Vec::new();
+        {
+            let mut member_stmt = tx
+                .prepare(
+                    r#"
+                    SELECT u.user_id,
+                           u.display_name,
+                           u.avatar_sha256,
+                           u.avatar_updated_at_ms,
+                           COALESCE(
+                               (SELECT d.member_label FROM user_devices d WHERE d.user_id = u.user_id AND d.member_label != '' ORDER BY d.last_sync_at_ms DESC LIMIT 1),
+                               (SELECT d.device_name FROM user_devices d WHERE d.user_id = u.user_id AND d.device_name != '' ORDER BY d.last_sync_at_ms DESC LIMIT 1),
+                               ''
+                           ) AS fallback_label
+                    FROM users u
+                    WHERE u.app_env = ?1 AND u.status = 'active'
+                    ORDER BY u.created_at_ms ASC
+                    "#,
+                )
+                .map_err(|e| AppError::Internal(format!("prepare family members: {e}")))?;
+            let member_rows = member_stmt
+                .query_map(params![app_env], |r| {
+                    let uid: String = r.get(0)?;
+                    let disp: String = r.get(1)?;
+                    let av_sha: String = r.get(2)?;
+                    let av_ts: i64 = r.get(3)?;
+                    let fb: String = r.get(4)?;
+                    let effective_name = if !disp.trim().is_empty() {
+                        disp
+                    } else if !fb.trim().is_empty() {
+                        fb
+                    } else {
+                        "家庭成员".to_string()
+                    };
+                    Ok(FamilyCircleMemberInfo {
+                        user_id: uid,
+                        display_name: effective_name,
+                        avatar_sha256: av_sha,
+                        avatar_updated_at_ms: av_ts,
+                    })
+                })
+                .map_err(|e| AppError::Internal(format!("query family members: {e}")))?;
+            for m in member_rows {
+                members.push(m.map_err(|e| AppError::Internal(format!("map family member: {e}")))?);
+            }
+        }
+
+        tx.commit()
+            .map_err(|e| AppError::Internal(format!("commit family sync tx: {e}")))?;
+
+        Ok(FamilySyncResult {
+            accepted_count,
+            items,
+            next_since_seq,
+            latest_seq,
+            has_more,
+            members,
+        })
+    }
+
+    /// 读取同一 `app_env` 环境内活跃家庭成员的自定义头像 WebP 字节流（严禁跨 `prod`/`qa` 环境读取）
+    pub fn load_family_member_avatar(
+        &self,
+        caller_uid: &str,
+        caller_env: &str,
+        target_uid: &str,
+    ) -> Result<Vec<u8>, AppError> {
+        self.verify_active_user(caller_uid, caller_env)?;
+        validate_uuid(target_uid)?;
+
+        let target_row: Option<(String, String, String)> = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+            conn.query_row(
+                "SELECT app_env, status, avatar_sha256 FROM users WHERE user_id = ?1",
+                params![target_uid],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .map_err(|e| AppError::Internal(format!("query target member avatar: {e}")))?
+        };
+
+        let (target_env, target_status, avatar_sha) = target_row.ok_or_else(|| {
+            AppError::NotFound("member_not_found", "目标家庭成员不存在".to_string())
+        })?;
+        if target_status != "active" {
+            return Err(AppError::Forbidden(
+                "account_disabled",
+                "目标家庭成员账号已停用".to_string(),
+            ));
+        }
+        if target_env != caller_env {
+            return Err(AppError::Forbidden(
+                "env_mismatch",
+                "禁止跨应用环境读取家庭成员头像".to_string(),
+            ));
+        }
+        if avatar_sha.trim().is_empty() {
+            return Err(AppError::NotFound(
+                "avatar_not_found",
+                "该家庭成员尚未设置自定义头像".to_string(),
+            ));
+        }
+
+        let blob_path = self.data_dir.join("avatars").join(format!("{target_uid}.webp"));
+        if !blob_path.exists() {
+            return Err(AppError::NotFound(
+                "avatar_not_found",
+                "该家庭成员头像文件不存在".to_string(),
+            ));
+        }
+        fs::read(&blob_path)
+            .map_err(|e| AppError::Internal(format!("read member avatar {:?}: {e}", blob_path)))
     }
 
     pub fn bind_or_login_with_sync_key<F>(
@@ -1758,6 +2337,47 @@ fn validate_uuid(raw: &str) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+
+fn normalize_family_tx_uuid(raw: &str) -> Result<String, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 64
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest(
+            "invalid_tx_uuid",
+            "非法家庭账单标识 tx_uuid（需为 1~64 位字母数字/连字符）".to_string(),
+        ));
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+fn normalize_family_tx_type(raw: &str) -> Result<String, AppError> {
+    let upper = raw.trim().to_ascii_uppercase();
+    match upper.as_str() {
+        "EXPENSE" | "INCOME" => Ok(upper),
+        _ => Err(AppError::BadRequest(
+            "invalid_tx_type",
+            "家庭账单仅允许同步日常支出（EXPENSE）或日常收入（INCOME）".to_string(),
+        )),
+    }
+}
+
+fn normalize_currency_code(raw: &str) -> String {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphabetic())
+        .take(8)
+        .collect();
+    if cleaned.is_empty() {
+        "CNY".to_string()
+    } else {
+        cleaned.to_ascii_uppercase()
+    }
 }
 
 pub fn normalize_sha256(raw: &str) -> Result<String, AppError> {

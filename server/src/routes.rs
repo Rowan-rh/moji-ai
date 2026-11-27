@@ -20,7 +20,8 @@ use crate::auth::{
 use crate::config::ServerConfig;
 use crate::db::{
     AccountSummary, BoundDeviceInfo, BoundIdentityInfo, CloudStore, DeviceLoginOutcome,
-    FamilyMemberSummary, PulledSnapshotData, SnapshotHistoryItem,
+    FamilyMemberSummary, FamilySyncResult, FamilyTxMutationInput, PulledSnapshotData,
+    SnapshotHistoryItem,
 };
 use crate::error::AppError;
 
@@ -133,6 +134,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .layer(DefaultBodyLimit::max(1024 * 1024));
 
+    let family_routes = Router::new()
+        .route("/api/v1/family/sync", post(sync_family_ledger))
+        .route(
+            "/api/v1/family/avatar/:user_id",
+            get(get_family_member_avatar),
+        )
+        .layer(DefaultBodyLimit::max(8 * 1024 * 1024));
+
     Router::new()
         .route("/api/v1/health", get(health_check))
         .route("/api/v1/auth/key-login", post(key_login))
@@ -145,6 +154,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .merge(snapshot_routes)
         .merge(screenshot_upload_routes)
         .merge(avatar_routes)
+        .merge(family_routes)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -843,4 +853,64 @@ async fn delete_profile_avatar(
         deleted: true,
         updated_at_ms,
     }))
+}
+
+#[derive(Deserialize)]
+pub struct FamilySyncRequest {
+    #[serde(default)]
+    pub since_seq: i64,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub member_label: String,
+    #[serde(default)]
+    pub mutations: Vec<FamilyTxMutationInput>,
+}
+
+async fn sync_family_ledger(
+    State(state): State<Arc<AppState>>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+    Json(req): Json<FamilySyncRequest>,
+) -> Result<Json<FamilySyncResult>, AppError> {
+    let uid = claims.uid;
+    let env = claims.env;
+
+    let result = spawn_blocking(move || {
+        state.store.sync_family_transactions(
+            &uid,
+            &env,
+            &req.member_label,
+            req.since_seq,
+            req.limit,
+            &req.mutations,
+        )
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("join sync_family_ledger: {e}")))??;
+
+    Ok(Json(result))
+}
+
+async fn get_family_member_avatar(
+    State(state): State<Arc<AppState>>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+    Path(target_user_id): Path<String>,
+) -> Result<Response, AppError> {
+    let caller_uid = claims.uid;
+    let caller_env = claims.env;
+
+    let bytes = spawn_blocking(move || {
+        state
+            .store
+            .load_family_member_avatar(&caller_uid, &caller_env, &target_user_id)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("join get_family_member_avatar: {e}")))??;
+
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "image/webp")],
+        bytes,
+    )
+        .into_response())
 }

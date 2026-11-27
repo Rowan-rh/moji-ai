@@ -76,8 +76,12 @@ import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.CurrencyRateManager
 import com.moji.ai.data.model.MedicalExpenseInsights
 import com.moji.ai.data.model.MedicalExpenseInsightsCalculator
+import com.moji.ai.data.model.PresetAvatarStyle
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.ui.FAMILY_LEDGER_NAME
+import com.moji.ai.ui.FamilyMemberBadgeInfo
+import com.moji.ai.ui.components.FamilyMemberAvatarBadge
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
 import com.moji.ai.ui.theme.ICostAssetImage
@@ -426,6 +430,12 @@ private data class TagBreakdownItem(
     val transactions: List<TransactionEntity>
 )
 
+private data class FamilyMemberContributionItem(
+    val badge: FamilyMemberBadgeInfo,
+    val totalCents: Long,
+    val txCount: Int
+)
+
 @Composable
 fun ICostStatisticsScreen(
     transactions: List<TransactionEntity>,
@@ -437,8 +447,11 @@ fun ICostStatisticsScreen(
     currentLedger: String? = null,
     hideAmounts: Boolean = false,
     onSelectTransaction: (TransactionEntity) -> Unit = {},
-    customCurrencyRates: Map<String, Double> = emptyMap()
+    customCurrencyRates: Map<String, Double> = emptyMap(),
+    familyTransactions: List<TransactionEntity> = emptyList(),
+    familyOwnerByTxId: Map<Long, FamilyMemberBadgeInfo> = emptyMap()
 ) {
+    val isFamilyLedger = currentLedger == FAMILY_LEDGER_NAME
     val catalogTags by TagCatalog.tagsFlow.collectAsState()
     val observedCustomRates by CurrencyRateManager.customRatesFlow.collectAsState()
     val effectiveCustomRates = if (customCurrencyRates.isNotEmpty()) customCurrencyRates else observedCustomRates
@@ -450,6 +463,7 @@ fun ICostStatisticsScreen(
     var showFilterMenu by remember { mutableStateOf(false) }
 
     var overviewExpanded by rememberSaveable { mutableStateOf(true) }
+    var memberContribExpanded by rememberSaveable { mutableStateOf(true) }
     var reimburseExpanded by rememberSaveable { mutableStateOf(true) }
     var transferExpanded by rememberSaveable { mutableStateOf(true) }
     var barChartExpanded by rememberSaveable { mutableStateOf(true) }
@@ -457,6 +471,7 @@ fun ICostStatisticsScreen(
     var donutChartExpanded by rememberSaveable { mutableStateOf(true) }
     var tagRankExpanded by rememberSaveable { mutableStateOf(true) }
 
+    var memberContribMetric by rememberSaveable { mutableIntStateOf(0) } // 0: 支出贡献, 1: 收入贡献
     var barChartMetric by rememberSaveable { mutableIntStateOf(0) } // 0: 支出, 1: 收入, 2: 结余
     var trendMetric by rememberSaveable { mutableIntStateOf(0) }    // 0: 净资产, 1: 总资产, 2: 总负债
     var donutMetric by rememberSaveable { mutableIntStateOf(0) }    // 0: 支出, 1: 收入
@@ -487,6 +502,14 @@ fun ICostStatisticsScreen(
         donutProgress.animateTo(1f, tween(durationMillis = 560, easing = FastOutSlowInEasing))
     }
 
+    val memberContribProgress = remember { Animatable(0f) }
+    LaunchedEffect(rangeMode, year, month, weekOffset, memberContribMetric, isFamilyLedger) {
+        if (isFamilyLedger) {
+            memberContribProgress.snapTo(0f)
+            memberContribProgress.animateTo(1f, tween(durationMillis = 520, easing = FastOutSlowInEasing))
+        }
+    }
+
     // 全账本有效流水（钱包余额为跨账本全局共享，净资产趋势统一基于全账本有效流水倒推）
     val globalValidTrendTxs = remember(transactions, filterWalletId) {
         transactions.filter { tx ->
@@ -494,12 +517,16 @@ fun ICostStatisticsScreen(
                 (filterWalletId == null || tx.sourceWalletId == filterWalletId || tx.targetWalletId == filterWalletId)
         }
     }
-    // 当前账本 + 筛选账户（不含时间）
-    val scopedTxs = remember(transactions, currentLedger, filterWalletId) {
-        transactions.filter { tx ->
-            tx.deletedAtMillis == null &&
-                (currentLedger == null || tx.ledgerName == currentLedger) &&
-                (filterWalletId == null || tx.sourceWalletId == filterWalletId || tx.targetWalletId == filterWalletId)
+    // 当前账本 + 筛选账户（不含时间；家庭账本物理隔离个人钱包筛选，聚合全员共享收支）
+    val scopedTxs = remember(transactions, familyTransactions, isFamilyLedger, currentLedger, filterWalletId) {
+        if (isFamilyLedger) {
+            familyTransactions.filter { it.deletedAtMillis == null }
+        } else {
+            transactions.filter { tx ->
+                tx.deletedAtMillis == null &&
+                    (currentLedger == null || tx.ledgerName == currentLedger) &&
+                    (filterWalletId == null || tx.sourceWalletId == filterWalletId || tx.targetWalletId == filterWalletId)
+            }
         }
     }
     val earliestMillis = remember(scopedTxs, globalValidTrendTxs) {
@@ -732,6 +759,42 @@ fun ICostStatisticsScreen(
             .sortedByDescending { it.totalCents }
     }
 
+    val familyMemberContributions = remember(isFamilyLedger, nonAnchorTxs, familyOwnerByTxId, memberContribMetric) {
+        if (!isFamilyLedger) {
+            emptyList()
+        } else {
+            val targetType = if (memberContribMetric == 0) TransactionType.EXPENSE else TransactionType.INCOME
+            val fallbackBadge = FamilyMemberBadgeInfo(
+                userId = "SELF_LOCAL",
+                displayName = "我",
+                isSelf = true,
+                presetStyle = PresetAvatarStyle.MINT_CLASSIC
+            )
+            val grouped = mutableMapOf<String, Pair<FamilyMemberBadgeInfo, MutableList<TransactionEntity>>>()
+            nonAnchorTxs.forEach { tx ->
+                if (tx.type == targetType) {
+                    val badge = familyOwnerByTxId[tx.id] ?: fallbackBadge
+                    grouped.getOrPut(badge.userId) { badge to mutableListOf() }.second.add(tx)
+                }
+            }
+            grouped.values
+                .map { (badge, list) ->
+                    val sum = if (targetType == TransactionType.EXPENSE) {
+                        list.sumOf { netExpenseOf(it) }
+                    } else {
+                        list.sumOf { it.amountCnyCents }
+                    }
+                    FamilyMemberContributionItem(
+                        badge = badge,
+                        totalCents = sum,
+                        txCount = list.size
+                    )
+                }
+                .filter { it.totalCents > 0L }
+                .sortedByDescending { it.totalCents }
+        }
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 115.dp),
@@ -744,58 +807,77 @@ fun ICostStatisticsScreen(
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Box {
+                if (isFamilyLedger) {
                     Surface(
-                        onClick = { showFilterMenu = true },
                         shape = RoundedCornerShape(20.dp),
                         color = ICostCardWhite,
                         modifier = Modifier.heightIn(min = 40.dp)
                     ) {
-                        val activeWalletName = wallets.firstOrNull { it.id == filterWalletId }?.name
                         Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 14.dp)) {
                             Text(
-                                text = activeWalletName ?: "筛选",
+                                text = "🏠 家庭账本共看",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Medium,
-                                color = if (filterWalletId != null) Color(0xFF1677FF) else ICostTextPrimary,
+                                color = ICostBlueAccent,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
-                    DropdownMenu(
-                        expanded = showFilterMenu,
-                        onDismissRequest = { showFilterMenu = false },
-                        containerColor = ICostCardWhite
-                    ) {
-                        DropdownMenuItem(
-                            text = {
+                } else {
+                    Box {
+                        Surface(
+                            onClick = { showFilterMenu = true },
+                            shape = RoundedCornerShape(20.dp),
+                            color = ICostCardWhite,
+                            modifier = Modifier.heightIn(min = 40.dp)
+                        ) {
+                            val activeWalletName = wallets.firstOrNull { it.id == filterWalletId }?.name
+                            Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 14.dp)) {
                                 Text(
-                                    "全部账户",
-                                    fontSize = 14.sp,
-                                    fontWeight = if (filterWalletId == null) FontWeight.Bold else FontWeight.Normal
+                                    text = activeWalletName ?: "筛选",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = if (filterWalletId != null) Color(0xFF1677FF) else ICostTextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                            },
-                            onClick = {
-                                filterWalletId = null
-                                showFilterMenu = false
                             }
-                        )
-                        if (wallets.isNotEmpty()) HorizontalDivider(color = ICostDivider)
-                        wallets.forEach { w ->
+                        }
+                        DropdownMenu(
+                            expanded = showFilterMenu,
+                            onDismissRequest = { showFilterMenu = false },
+                            containerColor = ICostCardWhite
+                        ) {
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        w.name,
+                                        "全部账户",
                                         fontSize = 14.sp,
-                                        fontWeight = if (filterWalletId == w.id) FontWeight.Bold else FontWeight.Normal
+                                        fontWeight = if (filterWalletId == null) FontWeight.Bold else FontWeight.Normal
                                     )
                                 },
                                 onClick = {
-                                    filterWalletId = w.id
+                                    filterWalletId = null
                                     showFilterMenu = false
                                 }
                             )
+                            if (wallets.isNotEmpty()) HorizontalDivider(color = ICostDivider)
+                            wallets.forEach { w ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            w.name,
+                                            fontSize = 14.sp,
+                                            fontWeight = if (filterWalletId == w.id) FontWeight.Bold else FontWeight.Normal
+                                        )
+                                    },
+                                    onClick = {
+                                        filterWalletId = w.id
+                                        showFilterMenu = false
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -948,22 +1030,191 @@ fun ICostStatisticsScreen(
             )
         }
 
-        // 6. 卡片二：报销统计
-        item {
-            ICostBentoStatsCard(
-                title = "报销统计",
-                badgeAsset = "chart_budget_red.webp",
-                expanded = reimburseExpanded,
-                onToggle = { reimburseExpanded = !reimburseExpanded },
-                cells = listOf(
-                    "待报销" to formatMoneyCents(pendingReimburseCents, "CNY", hideAmounts),
-                    "已报销" to formatMoneyCents(settledReimburseCents, "CNY", hideAmounts)
-                )
-            )
+        // 5.5 家庭账本专属：家庭成员收支贡献卡片（展示各成员支出/收入金额与占比条）
+        if (isFamilyLedger) {
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .iCostHorizontalSwipeTrigger(
+                            onSwipeRight = { memberContribMetric = (memberContribMetric + 1) % 2 },
+                            onSwipeLeft = { memberContribMetric = (memberContribMetric + 1) % 2 }
+                        ),
+                    shape = RoundedCornerShape(22.dp),
+                    colors = CardDefaults.cardColors(containerColor = ICostCardWhite),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                ) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        StatsCardHeader(
+                            badgeAsset = "chart_classification.webp",
+                            title = "家庭成员收支贡献",
+                            expanded = memberContribExpanded,
+                            onToggle = { memberContribExpanded = !memberContribExpanded }
+                        )
+
+                        AnimatedVisibility(
+                            visible = memberContribExpanded,
+                            enter = expandVertically(
+                                animationSpec = spring(dampingRatio = 0.78f, stiffness = Spring.StiffnessMediumLow)
+                            ) + fadeIn(tween(180)),
+                            exit = shrinkVertically(tween(180)) + fadeOut(tween(130))
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(top = 14.dp),
+                                verticalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                ChartMiniSegmentToggle(
+                                    options = listOf("支出贡献", "收入贡献"),
+                                    selectedIndex = memberContribMetric,
+                                    onSelect = { memberContribMetric = it }
+                                )
+
+                                val periodTotalCents = if (memberContribMetric == 0) netExpenseCents else totalIncomeCents
+                                val denominatorCents = periodTotalCents.coerceAtLeast(1L)
+
+                                if (familyMemberContributions.isEmpty() || periodTotalCents <= 0L) {
+                                    Text(
+                                        text = "当前周期暂无家庭成员${if (memberContribMetric == 0) "支出" else "收入"}账单",
+                                        fontSize = 13.sp,
+                                        color = ICostTextSecondary,
+                                        modifier = Modifier.padding(vertical = 16.dp)
+                                    )
+                                } else {
+                                    HorizontalDivider(color = ICostDivider)
+
+                                    familyMemberContributions.forEachIndexed { idx, item ->
+                                        val barColor = ICostChartPalette[idx % ICostChartPalette.size]
+                                        val ratio = (item.totalCents.toFloat() / denominatorCents.toFloat()).coerceIn(0f, 1f)
+                                        val pctStr = if (hideAmounts) "**.**%" else String.format(Locale.US, "%.1f%%", ratio * 100f)
+
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            FamilyMemberAvatarBadge(
+                                                badge = item.badge,
+                                                size = 34.dp,
+                                                borderWidth = 1.dp
+                                            )
+                                            Spacer(modifier = Modifier.width(12.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                        modifier = Modifier
+                                                            .weight(1f, fill = false)
+                                                            .padding(end = 8.dp)
+                                                    ) {
+                                                        Text(
+                                                            text = item.badge.displayName,
+                                                            fontSize = 14.sp,
+                                                            fontWeight = FontWeight.SemiBold,
+                                                            color = ICostTextPrimary,
+                                                            maxLines = 1,
+                                                            softWrap = false,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                            modifier = Modifier.weight(1f, fill = false)
+                                                        )
+                                                        if (item.badge.isSelf) {
+                                                            Spacer(modifier = Modifier.width(6.dp))
+                                                            Surface(
+                                                                shape = RoundedCornerShape(6.dp),
+                                                                color = ICostBlueAccent.copy(alpha = 0.12f)
+                                                            ) {
+                                                                Text(
+                                                                    text = "本人",
+                                                                    fontSize = 10.sp,
+                                                                    fontWeight = FontWeight.Medium,
+                                                                    color = ICostBlueAccent,
+                                                                    maxLines = 1,
+                                                                    softWrap = false,
+                                                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 1.dp)
+                                                                )
+                                                            }
+                                                        }
+                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                        Text(
+                                                            text = pctStr,
+                                                            fontSize = 12.sp,
+                                                            color = ICostTextSecondary,
+                                                            maxLines = 1,
+                                                            softWrap = false
+                                                        )
+                                                    }
+                                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                                        Text(
+                                                            text = formatMoneyCents(item.totalCents, "CNY", hideAmounts),
+                                                            fontFamily = ICDinFontFamily,
+                                                            fontSize = 16.sp,
+                                                            fontWeight = FontWeight.Bold,
+                                                            color = ICostTextPrimary,
+                                                            maxLines = 1,
+                                                            softWrap = false
+                                                        )
+                                                        Spacer(modifier = Modifier.width(4.dp))
+                                                        Text(
+                                                            text = "${item.txCount}笔",
+                                                            fontSize = 11.sp,
+                                                            color = ICostTextSecondary,
+                                                            maxLines = 1,
+                                                            softWrap = false
+                                                        )
+                                                    }
+                                                }
+                                                Spacer(modifier = Modifier.height(6.dp))
+                                                val barFrac = (ratio * memberContribProgress.value).coerceIn(0f, 1f)
+                                                Box(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .height(6.dp)
+                                                        .clip(RoundedCornerShape(3.dp))
+                                                        .background(ICostCellGray)
+                                                ) {
+                                                    if (barFrac > 0f) {
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .fillMaxWidth(barFrac.coerceIn(0.025f, 1f))
+                                                                .height(6.dp)
+                                                                .clip(RoundedCornerShape(3.dp))
+                                                                .background(barColor)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
-        // 6.5 卡片二点五：医疗与医保费用四维透视（当周期内存在医疗/医保账单时自动呈现）
-        if (medicalInsights.hasData) {
+        // 6. 卡片二：报销统计（仅个人账本展示）
+        if (!isFamilyLedger) {
+            item {
+                ICostBentoStatsCard(
+                    title = "报销统计",
+                    badgeAsset = "chart_budget_red.webp",
+                    expanded = reimburseExpanded,
+                    onToggle = { reimburseExpanded = !reimburseExpanded },
+                    cells = listOf(
+                        "待报销" to formatMoneyCents(pendingReimburseCents, "CNY", hideAmounts),
+                        "已报销" to formatMoneyCents(settledReimburseCents, "CNY", hideAmounts)
+                    )
+                )
+            }
+        }
+
+        // 6.5 卡片二点五：医疗与医保费用四维透视（仅个人账本周期内存在医疗/医保账单时呈现）
+        if (!isFamilyLedger && medicalInsights.hasData) {
             item {
                 ICostMedicalFourDimCard(
                     insights = medicalInsights,
@@ -974,21 +1225,23 @@ fun ICostStatisticsScreen(
             }
         }
 
-        // 7. 卡片三：流转统计
-        item {
-            ICostBentoStatsCard(
-                title = "流转统计",
-                badgeAsset = "chart_transfer.webp",
-                expanded = transferExpanded,
-                onToggle = { transferExpanded = !transferExpanded },
-                cells = listOf(
-                    "还款" to formatMoneyCents(repaymentCents, "CNY", hideAmounts),
-                    "转账" to formatMoneyCents(transferCents, "CNY", hideAmounts),
-                    "借入" to formatMoneyCents(loanInCents, "CNY", hideAmounts),
-                    "借出" to formatMoneyCents(loanOutCents, "CNY", hideAmounts),
-                    "分期还款" to formatMoneyCents(installmentPayCents, "CNY", hideAmounts)
+        // 7. 卡片三：流转统计（仅个人账本展示）
+        if (!isFamilyLedger) {
+            item {
+                ICostBentoStatsCard(
+                    title = "流转统计",
+                    badgeAsset = "chart_transfer.webp",
+                    expanded = transferExpanded,
+                    onToggle = { transferExpanded = !transferExpanded },
+                    cells = listOf(
+                        "还款" to formatMoneyCents(repaymentCents, "CNY", hideAmounts),
+                        "转账" to formatMoneyCents(transferCents, "CNY", hideAmounts),
+                        "借入" to formatMoneyCents(loanInCents, "CNY", hideAmounts),
+                        "借出" to formatMoneyCents(loanOutCents, "CNY", hideAmounts),
+                        "分期还款" to formatMoneyCents(installmentPayCents, "CNY", hideAmounts)
+                    )
                 )
-            )
+            }
         }
 
         // 8. 卡片四：收支柱状图（左右滑动切换 支出 / 收入 / 结余）
@@ -1148,15 +1401,16 @@ fun ICostStatisticsScreen(
             }
         }
 
-        // 9. 卡片五：资产趋势图（按账户余额与账单倒推，左右滑动切换 净资产 / 总资产 / 总负债）
-        item {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .iCostHorizontalSwipeTrigger(
-                        onSwipeRight = { trendMetric = (trendMetric + 2) % 3 },
-                        onSwipeLeft = { trendMetric = (trendMetric + 1) % 3 }
-                    ),
+        // 9. 卡片五：资产趋势图（仅个人账本展示；按账户余额与账单倒推，左右滑动切换 净资产 / 总资产 / 总负债）
+        if (!isFamilyLedger) {
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .iCostHorizontalSwipeTrigger(
+                            onSwipeRight = { trendMetric = (trendMetric + 2) % 3 },
+                            onSwipeLeft = { trendMetric = (trendMetric + 1) % 3 }
+                        ),
                 shape = RoundedCornerShape(22.dp),
                 colors = CardDefaults.cardColors(containerColor = ICostCardWhite),
                 elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
@@ -1301,6 +1555,7 @@ fun ICostStatisticsScreen(
                     }
                 }
             }
+        }
         }
 
         // 10. 卡片六：分类详情（左右滑动切换 支出分类 / 收入分类）
