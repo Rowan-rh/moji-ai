@@ -93,7 +93,11 @@ import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TagDef
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.ui.FAMILY_LEDGER_NAME
+import com.moji.ai.ui.FamilyMemberBadgeInfo
+import com.moji.ai.ui.FamilyMemberFilterOption
 import com.moji.ai.ui.QuickBookkeepingTemplate
+import com.moji.ai.ui.components.FamilyMemberAvatarBadge
 import com.moji.ai.ui.components.ICostConfirmDialog
 import com.moji.ai.ui.components.parseYuanToCents
 import com.moji.ai.ui.components.sanitizeMoneyInput
@@ -160,14 +164,33 @@ fun ICostLedgerHomeScreen(
     onToggleReimburse: (TransactionEntity) -> Unit = {},
     onQuickRefund: (TransactionEntity) -> Unit = {},
     onDeleteTransaction: (Long) -> Unit = {},
-    onOpenAgentTriage: () -> Unit = {}
+    onOpenAgentTriage: () -> Unit = {},
+    familyTransactions: List<TransactionEntity> = emptyList(),
+    familyOwnerByTxId: Map<Long, FamilyMemberBadgeInfo> = emptyMap(),
+    familyMemberFilters: List<FamilyMemberFilterOption> = emptyList(),
+    isCloudBound: Boolean = false,
+    isFamilySyncEnabled: Boolean = false,
+    onRefreshFamilyLedger: (() -> Unit)? = null,
+    onOpenCloudSyncPage: (() -> Unit)? = null
 ) {
     val walletMap = remember(wallets) { wallets.associateBy { it.id } }
     val catalogTags by TagCatalog.tagsFlow.collectAsState()
+    val isFamilyLedger = currentLedger == FAMILY_LEDGER_NAME
     // 以下界面状态在切换底部 Tab 后保留
     var searchQuery by rememberSaveable { mutableStateOf("") }
+    var selectedMemberFilterKey by rememberSaveable { mutableStateOf("ALL") }
     var showQuickTemplatesBar by rememberSaveable { mutableStateOf(false) }
     var collapsedDayKeys by rememberSaveable { mutableStateOf(listOf<String>()) }
+
+    val effectiveMemberFilterKey = remember(selectedMemberFilterKey, familyMemberFilters, isFamilyLedger) {
+        if (!isFamilyLedger) {
+            "ALL"
+        } else if (familyMemberFilters.any { it.key == selectedMemberFilterKey }) {
+            selectedMemberFilterKey
+        } else {
+            "ALL"
+        }
+    }
 
     var showLedgerSwitcher by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
@@ -178,19 +201,46 @@ fun ICostLedgerHomeScreen(
 
     val pagerState = rememberPagerState(initialPage = 0, pageCount = { 3 })
 
-    // 当前账本 + 当月全部账单（汇总卡片、日历都基于它，不受搜索影响）
-    val allMonthTransactions = remember(transactions, currentLedger, selectedYear, selectedMonth) {
+    // 当前账本 + 当月全部账单（汇总卡片、日历都基于它，不受搜索影响；家庭账本支持按成员胶囊筛选）
+    val allMonthTransactions = remember(
+        transactions,
+        familyTransactions,
+        familyOwnerByTxId,
+        isFamilyLedger,
+        effectiveMemberFilterKey,
+        currentLedger,
+        selectedYear,
+        selectedMonth
+    ) {
         val cal = Calendar.getInstance()
-        transactions.filter { tx ->
-            cal.timeInMillis = tx.timestamp
-            tx.ledgerName == currentLedger &&
-                cal.get(Calendar.YEAR) == selectedYear &&
-                (cal.get(Calendar.MONTH) + 1) == selectedMonth
+        if (isFamilyLedger) {
+            familyTransactions.filter { tx ->
+                cal.timeInMillis = tx.timestamp
+                val inMonth = cal.get(Calendar.YEAR) == selectedYear &&
+                    (cal.get(Calendar.MONTH) + 1) == selectedMonth
+                if (!inMonth) return@filter false
+                when {
+                    effectiveMemberFilterKey == "ALL" -> true
+                    effectiveMemberFilterKey == "SELF" -> tx.id > 0L
+                    effectiveMemberFilterKey.startsWith("UID:") -> {
+                        val targetUid = effectiveMemberFilterKey.removePrefix("UID:")
+                        familyOwnerByTxId[tx.id]?.userId == targetUid
+                    }
+                    else -> true
+                }
+            }
+        } else {
+            transactions.filter { tx ->
+                cal.timeInMillis = tx.timestamp
+                tx.ledgerName == currentLedger &&
+                    cal.get(Calendar.YEAR) == selectedYear &&
+                    (cal.get(Calendar.MONTH) + 1) == selectedMonth
+            }
         }
     }
     val trimmedQuery = searchQuery.trim()
-    // 列表展示用：再叠加搜索词（支持搜分类、商户、备注、标签、交易单号、商户单号、支付方式）
-    val monthTransactions = remember(allMonthTransactions, trimmedQuery) {
+    // 列表展示用：再叠加搜索词（支持搜分类、商户、备注、标签、交易单号、商户单号、支付方式及家庭成员昵称）
+    val monthTransactions = remember(allMonthTransactions, trimmedQuery, isFamilyLedger, familyOwnerByTxId) {
         if (trimmedQuery.isEmpty()) allMonthTransactions else allMonthTransactions.filter { tx ->
             tx.category.contains(trimmedQuery, ignoreCase = true) ||
                 tx.merchant.contains(trimmedQuery, ignoreCase = true) ||
@@ -198,7 +248,8 @@ fun ICostLedgerHomeScreen(
                 tx.tags.contains(trimmedQuery, ignoreCase = true) ||
                 tx.transactionNo.contains(trimmedQuery, ignoreCase = true) ||
                 tx.merchantOrderNo.contains(trimmedQuery, ignoreCase = true) ||
-                tx.paymentMethodRaw.contains(trimmedQuery, ignoreCase = true)
+                tx.paymentMethodRaw.contains(trimmedQuery, ignoreCase = true) ||
+                (isFamilyLedger && familyOwnerByTxId[tx.id]?.displayName?.contains(trimmedQuery, ignoreCase = true) == true)
         }
     }
 
@@ -216,9 +267,13 @@ fun ICostLedgerHomeScreen(
 
     val monthBalanceCents = monthIncomeCents - monthExpenseCents
 
-    // 待梳理账单统计（跨月份统计当前账本所有待梳理账单，提示一键交由 Agent 归档）
-    val pendingTriageList = remember(transactions, currentLedger) {
-        transactions.filter { it.ledgerName == currentLedger && CategoryCatalog.isPendingTriage(it.category) }
+    // 待梳理账单统计（仅在个人账本展示，避免个人未共享流水混入家庭账本）
+    val pendingTriageList = remember(transactions, currentLedger, isFamilyLedger) {
+        if (isFamilyLedger) {
+            emptyList()
+        } else {
+            transactions.filter { it.ledgerName == currentLedger && CategoryCatalog.isPendingTriage(it.category) }
+        }
     }
 
     // 报销统计
@@ -403,6 +458,128 @@ fun ICostLedgerHomeScreen(
                             color = if (showQuickTemplatesBar) Color(0xFFD97706) else ICostTextSecondary,
                             fontWeight = FontWeight.Medium
                         )
+                    }
+                }
+            }
+        }
+
+        // 2.1 家庭账本专属：成员筛选胶囊栏 + 云共享状态提示
+        if (isFamilyLedger) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        val chipOptions = familyMemberFilters.ifEmpty {
+                            listOf(FamilyMemberFilterOption(key = "ALL", label = "全部"))
+                        }
+                        LazyRow(
+                            modifier = Modifier.weight(1f),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(chipOptions, key = { it.key }) { opt ->
+                                val selected = effectiveMemberFilterKey == opt.key
+                                Surface(
+                                    onClick = { selectedMemberFilterKey = opt.key },
+                                    shape = RoundedCornerShape(16.dp),
+                                    color = if (selected) {
+                                        ICostBlueAccent
+                                    } else {
+                                        ICostCardWhite
+                                    }
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 7.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        if (opt.badge != null) {
+                                            FamilyMemberAvatarBadge(
+                                                badge = opt.badge,
+                                                size = 16.dp,
+                                                borderWidth = if (selected) 0.8.dp else 0.5.dp
+                                            )
+                                        }
+                                        Text(
+                                            text = opt.label,
+                                            fontSize = 12.sp,
+                                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                            color = if (selected) Color.White else ICostTextPrimary,
+                                            maxLines = 1
+                                        )
+                                    }
+                                }
+                            }
+                        }
+
+                        if (isCloudBound && onRefreshFamilyLedger != null) {
+                            Surface(
+                                shape = RoundedCornerShape(14.dp),
+                                color = ICostCardWhite,
+                                modifier = Modifier.iCostPressScale(pressedScale = 0.92f) {
+                                    onRefreshFamilyLedger()
+                                }
+                            ) {
+                                Text(
+                                    text = "↻ 刷新",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostBlueAccent,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    if (!isCloudBound || !isFamilySyncEnabled) {
+                        Surface(
+                            shape = RoundedCornerShape(16.dp),
+                            color = ICostCardWhite,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .then(
+                                    if (onOpenCloudSyncPage != null) {
+                                        Modifier.iCostPressScale(pressedScale = 0.98f) { onOpenCloudSyncPage() }
+                                    } else {
+                                        Modifier
+                                    }
+                                )
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = if (!isCloudBound) {
+                                        "连接默记云并开启家庭共享后，可与家人实时合看日常收支（个人资产零混淆）"
+                                    } else {
+                                        "本机尚未开启「日常收支自动共享」，仅展示已手动共享及家人同步的账单"
+                                    },
+                                    fontSize = 11.sp,
+                                    color = ICostTextSecondary,
+                                    modifier = Modifier.weight(1f).padding(end = 8.dp)
+                                )
+                                if (onOpenCloudSyncPage != null) {
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = ICostBlueAccent.copy(alpha = 0.12f)
+                                    ) {
+                                        Text(
+                                            text = if (!isCloudBound) "去连接" else "共享设置",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ICostBlueAccent,
+                                            modifier = Modifier.padding(horizontal = 9.dp, vertical = 5.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1197,54 +1374,61 @@ fun ICostLedgerHomeScreen(
                             ) {
                                 Column(modifier = Modifier.fillMaxWidth()) {
                                     dayList.forEachIndexed { index, tx ->
-                                        val canRefund = tx.type == TransactionType.EXPENSE &&
+                                        val isReadOnlySharedRow = tx.id < 0L || tx.captureSource == "FAMILY_SHARED"
+                                        val canRefund = !isReadOnlySharedRow &&
+                                            tx.type == TransactionType.EXPENSE &&
                                             (tx.amountCnyCents - tx.refundedAmountCents) > 0L
-                                        val pendingReimburse = tx.type == TransactionType.EXPENSE &&
+                                        val pendingReimburse = !isReadOnlySharedRow &&
+                                            tx.type == TransactionType.EXPENSE &&
                                             tx.reimbursable && !tx.reimbursed
-                                        // 最多 3 个操作：编辑 / (报销入账 | 退款 | 复制) / 删除
-                                        val swipeActions = buildList {
-                                            add(
-                                                SwipeActionItem(
-                                                    label = "编辑",
-                                                    iconAsset = "detail_edit.webp",
-                                                    backgroundColor = ICostBlueAccent,
-                                                    onClick = { onEditTransaction(tx) }
-                                                )
-                                            )
-                                            when {
-                                                pendingReimburse -> add(
+                                        // 他人家庭共享账单严格只读，禁用侧滑操作；本人账单保留最多 3 个快捷操作
+                                        val swipeActions = if (isReadOnlySharedRow) {
+                                            emptyList()
+                                        } else {
+                                            buildList {
+                                                add(
                                                     SwipeActionItem(
-                                                        label = "报销",
-                                                        iconAsset = "detail_claim.webp",
-                                                        backgroundColor = ICostGreenIncome,
-                                                        onClick = { settlingTx = tx }
+                                                        label = "编辑",
+                                                        iconAsset = "detail_edit.webp",
+                                                        backgroundColor = ICostBlueAccent,
+                                                        onClick = { onEditTransaction(tx) }
                                                     )
                                                 )
-                                                canRefund -> add(
-                                                    SwipeActionItem(
-                                                        label = "退款",
-                                                        iconAsset = "detail_refund.webp",
-                                                        backgroundColor = ICostAmberGold,
-                                                        onClick = { refundingTx = tx }
+                                                when {
+                                                    pendingReimburse -> add(
+                                                        SwipeActionItem(
+                                                            label = "报销",
+                                                            iconAsset = "detail_claim.webp",
+                                                            backgroundColor = ICostGreenIncome,
+                                                            onClick = { settlingTx = tx }
+                                                        )
                                                     )
-                                                )
-                                                else -> add(
+                                                    canRefund -> add(
+                                                        SwipeActionItem(
+                                                            label = "退款",
+                                                            iconAsset = "detail_refund.webp",
+                                                            backgroundColor = ICostAmberGold,
+                                                            onClick = { refundingTx = tx }
+                                                        )
+                                                    )
+                                                    else -> add(
+                                                        SwipeActionItem(
+                                                            label = "复制",
+                                                            iconAsset = "detail_template.webp",
+                                                            backgroundColor = Color(0xFFF59E0B),
+                                                            onClick = { onDuplicateTransaction(tx) }
+                                                        )
+                                                    )
+                                                }
+                                                add(
                                                     SwipeActionItem(
-                                                        label = "复制",
-                                                        iconAsset = "detail_template.webp",
-                                                        backgroundColor = Color(0xFFF59E0B),
-                                                        onClick = { onDuplicateTransaction(tx) }
+                                                        label = "删除",
+                                                        iconAsset = "detail_delete.webp",
+                                                        backgroundColor = ICostCoralRed,
+                                                        onClick = { deletingTx = tx }
                                                     )
                                                 )
                                             }
-                                            add(
-                                                SwipeActionItem(
-                                                    label = "删除",
-                                                    iconAsset = "detail_delete.webp",
-                                                    backgroundColor = ICostCoralRed,
-                                                    onClick = { deletingTx = tx }
-                                                )
-                                            )
                                         }
 
                                         ICostSwipeActionRow(
@@ -1256,7 +1440,8 @@ fun ICostLedgerHomeScreen(
                                                 tx = tx,
                                                 walletMap = walletMap,
                                                 catalogTags = catalogTags,
-                                                childPersonalSumCents = compositeChildSumByParentId[tx.id] ?: 0L,
+                                                childPersonalSumCents = if (tx.id > 0L) compositeChildSumByParentId[tx.id] ?: 0L else 0L,
+                                                familyOwnerBadge = if (isFamilyLedger) familyOwnerByTxId[tx.id] else null,
                                                 onClick = { onClickTransaction(tx) }
                                             )
                                         }
@@ -1423,6 +1608,7 @@ fun ICostLedgerSwitcherDialog(
                         .verticalScroll(rememberScrollState())
                 ) {
                     ledgers.forEach { name ->
+                        val isFamilyItem = name == FAMILY_LEDGER_NAME
                         Surface(
                             onClick = { onSelectLedger(name) },
                             shape = RoundedCornerShape(12.dp),
@@ -1433,12 +1619,37 @@ fun ICostLedgerSwitcherDialog(
                             },
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Text(
-                                text = if (name == currentLedger) "✓  $name" else name,
-                                fontWeight = if (name == currentLedger) FontWeight.Bold else FontWeight.Medium,
-                                color = if (name == currentLedger) ICostBlueAccent else ICostTextPrimary,
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
-                            )
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                val displayLabel = if (isFamilyItem) "🏠 $name" else name
+                                Text(
+                                    text = if (name == currentLedger) "✓  $displayLabel" else displayLabel,
+                                    fontWeight = if (name == currentLedger) FontWeight.Bold else FontWeight.Medium,
+                                    color = if (name == currentLedger) ICostBlueAccent else ICostTextPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (isFamilyItem) {
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = ICostBlueAccent.copy(alpha = 0.14f)
+                                    ) {
+                                        Text(
+                                            text = "家人共看",
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ICostBlueAccent,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1505,6 +1716,7 @@ private fun ICostLedgerRow(
     walletMap: Map<Long, WalletEntity>,
     catalogTags: List<TagDef>,
     childPersonalSumCents: Long = 0L,
+    familyOwnerBadge: FamilyMemberBadgeInfo? = null,
     onClick: () -> Unit
 ) {
     val timeStr = remember(tx.timestamp) {
@@ -1708,14 +1920,40 @@ private fun ICostLedgerRow(
                         .padding(end = 8.dp)
                 )
 
-                Text(
-                    text = walletLabel,
-                    fontSize = 11.sp,
-                    color = ICostTextSecondary,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis
-                )
+                if (familyOwnerBadge != null) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        FamilyMemberAvatarBadge(
+                            badge = familyOwnerBadge,
+                            size = 16.dp,
+                            borderWidth = 0.6.dp
+                        )
+                        Text(
+                            text = if (familyOwnerBadge.isSelf) {
+                                "${familyOwnerBadge.displayName.take(6)}·我"
+                            } else {
+                                familyOwnerBadge.displayName.take(8)
+                            },
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = if (familyOwnerBadge.isSelf) ICostBlueAccent else ICostTextPrimary,
+                            maxLines = 1,
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                } else {
+                    Text(
+                        text = walletLabel,
+                        fontSize = 11.sp,
+                        color = ICostTextSecondary,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
 
             if (hasTagsRow) {

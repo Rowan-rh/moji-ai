@@ -10,6 +10,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -52,6 +53,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -79,6 +81,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.ai.AgentBillTriageEngine
@@ -94,6 +97,8 @@ import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
 import com.moji.ai.service.CaptureDebugTraceEntry
 import com.moji.ai.service.DebugTraceOutcome
+import com.moji.ai.ui.FAMILY_LEDGER_NAME
+import com.moji.ai.ui.FamilyMemberBadgeInfo
 import com.moji.ai.ui.TransactionProvenanceBundle
 import com.moji.ai.ui.screens.ICostColorTagChip
 import com.moji.ai.ui.theme.ICDinFontFamily
@@ -109,20 +114,111 @@ import com.moji.ai.ui.theme.ICostCoralRed
 import com.moji.ai.ui.theme.ICostDivider
 import com.moji.ai.ui.theme.ICostExpenseColor
 import com.moji.ai.ui.theme.ICostFormField
+import com.moji.ai.ui.theme.ICostGreenIncome
 import com.moji.ai.ui.theme.ICostIncomeColor
 import com.moji.ai.ui.theme.ICostSearchBg
 import com.moji.ai.ui.theme.ICostTextPrimary
 import com.moji.ai.ui.theme.ICostTextSecondary
+import com.moji.ai.ui.theme.PresetAvatarIllustration
 import com.moji.ai.ui.theme.WalletBrandAvatar
 import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.formatWalletDisplayName
 import com.moji.ai.ui.theme.iCostHorizontalSwipeTrigger
 import com.moji.ai.ui.theme.iCostPressScale
+import com.moji.ai.ui.theme.iCostUnifiedSwitchColors
 import com.moji.ai.ui.theme.resolveTransactionBadgeColor
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
+
+private val familyAvatarBitmapCache = ConcurrentHashMap<String, ImageBitmap>()
+
+@Composable
+fun FamilyMemberAvatarBadge(
+    badge: FamilyMemberBadgeInfo,
+    size: Dp = 16.dp,
+    borderWidth: Dp = 0.8.dp,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val cacheKey = badge.avatarCacheKey
+    val customBitmap by produceState<ImageBitmap?>(
+        initialValue = if (cacheKey.isNotEmpty()) familyAvatarBitmapCache[cacheKey] else null,
+        key1 = cacheKey
+    ) {
+        if (cacheKey.isEmpty() || badge.customAvatarPath.isBlank()) {
+            value = null
+            return@produceState
+        }
+        val hit = familyAvatarBitmapCache[cacheKey]
+        if (hit != null) {
+            value = hit
+            return@produceState
+        }
+        val decoded = withContext(Dispatchers.IO) {
+            runCatching {
+                val target = File(badge.customAvatarPath)
+                if (!target.exists() || !target.isFile) return@runCatching null
+                val len = target.length()
+                if (len < 16L || len > 524_288L) return@runCatching null
+                val canonical = target.canonicalPath
+                val profileRoot = File(context.filesDir, "profile").canonicalPath + File.separator
+                val familyRoot = File(context.filesDir, "family_avatars").canonicalPath + File.separator
+                if (!canonical.startsWith(profileRoot) && !canonical.startsWith(familyRoot)) {
+                    return@runCatching null
+                }
+                BitmapFactory.decodeFile(canonical)?.asImageBitmap()
+            }.getOrNull()
+        }
+        if (decoded != null) {
+            if (familyAvatarBitmapCache.size >= 16) {
+                familyAvatarBitmapCache.clear()
+            }
+            familyAvatarBitmapCache[cacheKey] = decoded
+        }
+        value = decoded
+    }
+
+    val borderColor = if (AppearanceConfigManager.isDarkThemeActive) {
+        Color(0xFF2E3442)
+    } else {
+        Color.White
+    }
+
+    Box(
+        modifier = modifier
+            .size(size)
+            .clip(CircleShape)
+            .background(Color(badge.presetStyle.bgHex))
+            .then(
+                if (borderWidth > 0.dp) {
+                    Modifier.border(borderWidth, borderColor, CircleShape)
+                } else {
+                    Modifier
+                }
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        val bmp = customBitmap
+        if (bmp != null) {
+            Image(
+                bitmap = bmp,
+                contentDescription = badge.displayName,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(CircleShape)
+            )
+        } else {
+            PresetAvatarIllustration(
+                style = badge.presetStyle,
+                modifier = Modifier.size(size * 0.78f)
+            )
+        }
+    }
+}
 
 /**
  * 通用二次确认弹窗（删除、退款、报销入账等不可轻易撤回的操作）。
@@ -177,9 +273,13 @@ fun TransactionDetailSheet(
     allTransactions: List<TransactionEntity> = emptyList(),
     onInspectRelatedTransaction: ((TransactionEntity) -> Unit)? = null,
     onLoadProvenance: (suspend (TransactionEntity) -> TransactionProvenanceBundle)? = null,
-    onShowMessage: (String) -> Unit = {}
+    onShowMessage: (String) -> Unit = {},
+    familyOwnerBadge: FamilyMemberBadgeInfo? = null,
+    onToggleSyncToFamily: ((TransactionEntity, Boolean) -> Unit)? = null
 ) {
     BackHandler(onBack = onDismiss)
+
+    val isReadOnlyFamilyShared = tx.id < 0L || tx.captureSource == "FAMILY_SHARED"
 
     val walletMap = remember(wallets) { wallets.associateBy { it.id } }
     val isCompositeChild = remember(tx) { DedicatedFundManager.isCompositeMedicalPersonalChild(tx) }
@@ -532,15 +632,67 @@ fun TransactionDetailSheet(
                 if (effectiveOrderKey.isNotBlank()) {
                     DetailKeyValueRow("订单唯一Key", effectiveOrderKey, singleLine = true, compactFont = true)
                 }
+                if (familyOwnerBadge != null) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 8.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "记录成员",
+                            fontSize = 14.sp,
+                            color = ICostTextSecondary,
+                            maxLines = 1,
+                            softWrap = false
+                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            FamilyMemberAvatarBadge(
+                                badge = familyOwnerBadge,
+                                size = 20.dp
+                            )
+                            Text(
+                                text = if (familyOwnerBadge.isSelf) "${familyOwnerBadge.displayName}（我）" else familyOwnerBadge.displayName,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = ICostTextPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            if (isReadOnlyFamilyShared) {
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = ICostBlueAccent.copy(alpha = 0.12f)
+                                ) {
+                                    Text(
+                                        text = "只读共享",
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostBlueAccent,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
                 DetailKeyValueRow("账本", tx.ledgerName, singleLine = true)
                 DetailKeyValueRow(
                     "资金账户",
-                    when (tx.type) {
-                        TransactionType.TRANSFER, TransactionType.REPAYMENT ->
-                            "${formatWalletDisplayName(sourceWallet, "转出")} → ${formatWalletDisplayName(targetWallet, "转入")}"
-                        TransactionType.INCOME, TransactionType.REFUND_OFFSET ->
-                            formatWalletDisplayName(targetWallet ?: sourceWallet)
-                        else -> formatWalletDisplayName(sourceWallet)
+                    if (isReadOnlyFamilyShared) {
+                        "家人个人账户（已隐私隔离）"
+                    } else {
+                        when (tx.type) {
+                            TransactionType.TRANSFER, TransactionType.REPAYMENT ->
+                                "${formatWalletDisplayName(sourceWallet, "转出")} → ${formatWalletDisplayName(targetWallet, "转入")}"
+                            TransactionType.INCOME, TransactionType.REFUND_OFFSET ->
+                                formatWalletDisplayName(targetWallet ?: sourceWallet)
+                            else -> formatWalletDisplayName(sourceWallet)
+                        }
                     },
                     singleLine = true
                 )
@@ -625,9 +777,47 @@ fun TransactionDetailSheet(
                         "AI_OCR" -> "端侧截屏 OCR 识账"
                         "AI_NOTIFICATION" -> "通知栏静默识账"
                         "AI_FUSED", "AI_MERGED" -> "多通道证据融合识账"
+                        "FAMILY_SHARED" -> "默记云家庭共享账单（不计入本机个人钱包余额）"
                         else -> tx.captureSource
                     }
                     DetailKeyValueRow("识账来源", sourceLabel, singleLine = true)
+                }
+                if (!isReadOnlyFamilyShared && tx.isEligibleForFamilySync() && onToggleSyncToFamily != null) {
+                    HorizontalDivider(
+                        color = ICostDivider,
+                        thickness = 0.5.dp,
+                        modifier = Modifier.padding(vertical = 6.dp)
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f).padding(end = 10.dp)) {
+                            Text(
+                                text = "🏠 同步至家庭账本",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = ICostTextPrimary
+                            )
+                            Text(
+                                text = if (tx.syncToFamily) {
+                                    "已对家庭成员共享脱敏收支摘要（个人账户与原图不外泄）"
+                                } else {
+                                    "当前仅个人可见，不进入家庭账本"
+                                },
+                                fontSize = 11.sp,
+                                color = ICostTextSecondary
+                            )
+                        }
+                        Switch(
+                            checked = tx.syncToFamily,
+                            onCheckedChange = { enabled -> onToggleSyncToFamily(tx, enabled) },
+                            colors = iCostUnifiedSwitchColors()
+                        )
+                    }
                 }
             }
         }
@@ -688,80 +878,95 @@ fun TransactionDetailSheet(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        // 1:1 iCost 双卡操作行：左「编辑 / 删除」，右「退款 / 存为模板」（对齐 05_detail_full.png）
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            DetailActionPairCard(
-                modifier = Modifier.weight(1f),
-                leftAsset = "detail_edit.webp",
-                leftLabel = "编辑",
-                leftColor = ICostBlueAccent,
-                onLeft = {
-                    onDismiss()
-                    onEdit(tx)
-                },
-                rightAsset = "detail_delete.webp",
-                rightLabel = "删除",
-                rightColor = ICostCoralRed,
-                onRight = { showDeleteConfirm = true }
-            )
-            DetailActionPairCard(
-                modifier = Modifier.weight(1f),
-                leftAsset = "detail_refund.webp",
-                leftLabel = "退款",
-                leftColor = if (canRefund) ICostBlueAccent else ICostTextSecondary,
-                onLeft = if (canRefund) ({ showRefundDialog = true }) else null,
-                rightAsset = "detail_template.webp",
-                rightLabel = "存模板",
-                rightColor = Color(0xFFF59E0B),
-                onRight = { onSaveAsTemplate(tx) }
-            )
-        }
+        if (isReadOnlyFamilyShared) {
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = ICostCardWhite,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "这是家庭成员共享的只读日常收支记录，仅在「家庭账本」中汇总展示，不会影响你的个人钱包余额、净资产或备份快照；仅账单记录者本人可修改或撤回。",
+                    fontSize = 12.sp,
+                    color = ICostTextSecondary,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)
+                )
+            }
+        } else {
+            // 1:1 iCost 双卡操作行：左「编辑 / 删除」，右「退款 / 存为模板」（对齐 05_detail_full.png）
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                DetailActionPairCard(
+                    modifier = Modifier.weight(1f),
+                    leftAsset = "detail_edit.webp",
+                    leftLabel = "编辑",
+                    leftColor = ICostBlueAccent,
+                    onLeft = {
+                        onDismiss()
+                        onEdit(tx)
+                    },
+                    rightAsset = "detail_delete.webp",
+                    rightLabel = "删除",
+                    rightColor = ICostCoralRed,
+                    onRight = { showDeleteConfirm = true }
+                )
+                DetailActionPairCard(
+                    modifier = Modifier.weight(1f),
+                    leftAsset = "detail_refund.webp",
+                    leftLabel = "退款",
+                    leftColor = if (canRefund) ICostBlueAccent else ICostTextSecondary,
+                    onLeft = if (canRefund) ({ showRefundDialog = true }) else null,
+                    rightAsset = "detail_template.webp",
+                    rightLabel = "存模板",
+                    rightColor = Color(0xFFF59E0B),
+                    onRight = { onSaveAsTemplate(tx) }
+                )
+            }
 
-        // 待报销账单：单独的「报销到账」入口，与退款互不影响
-        if (canReimburse) {
-            Spacer(modifier = Modifier.height(10.dp))
-            DetailWideActionButton(
-                assetFile = "detail_claim.webp",
-                label = "报销到账",
-                onClick = { showSettleDialog = true }
-            )
-        }
+            // 待报销账单：单独的「报销到账」入口，与退款互不影响
+            if (canReimburse) {
+                Spacer(modifier = Modifier.height(10.dp))
+                DetailWideActionButton(
+                    assetFile = "detail_claim.webp",
+                    label = "报销到账",
+                    onClick = { showSettleDialog = true }
+                )
+            }
 
-        val canSplitExpense = tx.type == TransactionType.EXPENSE &&
-            tx.amountCents >= 2L &&
-            !tx.reimbursed &&
-            !isCompositeChild &&
-            linkedCompositeChildren.isEmpty() &&
-            !DedicatedFundManager.isCompositeMedicalMain(tx) &&
-            !parsedMedicalNote.hasExplicitBreakdown
-        if (canSplitExpense) {
-            Spacer(modifier = Modifier.height(10.dp))
-            DetailWideActionButton(
-                assetFile = "setting_category.webp",
-                label = "拆分账单",
-                onClick = { showSplitDialog = true }
-            )
-        }
+            val canSplitExpense = tx.type == TransactionType.EXPENSE &&
+                tx.amountCents >= 2L &&
+                !tx.reimbursed &&
+                !isCompositeChild &&
+                linkedCompositeChildren.isEmpty() &&
+                !DedicatedFundManager.isCompositeMedicalMain(tx) &&
+                !parsedMedicalNote.hasExplicitBreakdown
+            if (canSplitExpense) {
+                Spacer(modifier = Modifier.height(10.dp))
+                DetailWideActionButton(
+                    assetFile = "setting_category.webp",
+                    label = "拆分账单",
+                    onClick = { showSplitDialog = true }
+                )
+            }
 
-        if (onDuplicate != null && !isCompositeChild) {
-            Spacer(modifier = Modifier.height(10.dp))
-            DetailWideActionButton(
-                assetFile = "detail_template.webp",
-                label = "再记一笔相同的",
-                onClick = { onDuplicate(tx) }
-            )
-        }
+            if (onDuplicate != null && !isCompositeChild) {
+                Spacer(modifier = Modifier.height(10.dp))
+                DetailWideActionButton(
+                    assetFile = "detail_template.webp",
+                    label = "再记一笔相同的",
+                    onClick = { onDuplicate(tx) }
+                )
+            }
 
-        if (tx.captureSource != "MANUAL" && onLoadProvenance != null) {
-            Spacer(modifier = Modifier.height(14.dp))
-            TransactionProvenanceCollapsibleCard(
-                tx = tx,
-                onLoadProvenance = onLoadProvenance,
-                onShowMessage = onShowMessage
-            )
+            if (tx.captureSource != "MANUAL" && onLoadProvenance != null) {
+                Spacer(modifier = Modifier.height(14.dp))
+                TransactionProvenanceCollapsibleCard(
+                    tx = tx,
+                    onLoadProvenance = onLoadProvenance,
+                    onShowMessage = onShowMessage
+                )
+            }
         }
 
         Spacer(modifier = Modifier.height(36.dp))
@@ -1296,13 +1501,18 @@ fun MonthlyCalendarSheet(
     onDismiss: () -> Unit,
     onSelectTransaction: (TransactionEntity) -> Unit,
     allTransactions: List<TransactionEntity>? = null,
-    currentLedger: String? = null
+    currentLedger: String? = null,
+    familyOwnerByTxId: Map<Long, FamilyMemberBadgeInfo> = emptyMap()
 ) {
     BackHandler(onBack = onDismiss)
 
     val sourceTransactions = remember(allTransactions, currentLedger, monthTransactions) {
         if (allTransactions != null) {
-            if (currentLedger == null) allTransactions else allTransactions.filter { it.ledgerName == currentLedger }
+            if (currentLedger == null || currentLedger == FAMILY_LEDGER_NAME) {
+                allTransactions
+            } else {
+                allTransactions.filter { it.ledgerName == currentLedger }
+            }
         } else {
             monthTransactions
         }
@@ -1675,13 +1885,40 @@ fun MonthlyCalendarSheet(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
                                     )
-                                    Text(
-                                        text = if (subtitleExtra.isNotBlank()) "$timeStr · $subtitleExtra" else timeStr,
-                                        fontSize = 12.sp,
-                                        color = ICostTextSecondary,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                                    val ownerBadge = if (currentLedger == FAMILY_LEDGER_NAME) {
+                                        familyOwnerByTxId[item.id]
+                                    } else {
+                                        null
+                                    }
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                    ) {
+                                        if (ownerBadge != null) {
+                                            FamilyMemberAvatarBadge(
+                                                badge = ownerBadge,
+                                                size = 14.dp,
+                                                borderWidth = 0.5.dp
+                                            )
+                                        }
+                                        Text(
+                                            text = buildString {
+                                                if (ownerBadge != null) {
+                                                    append(if (ownerBadge.isSelf) "我" else ownerBadge.displayName)
+                                                    append(" · ")
+                                                }
+                                                append(timeStr)
+                                                if (subtitleExtra.isNotBlank()) {
+                                                    append(" · ")
+                                                    append(subtitleExtra)
+                                                }
+                                            },
+                                            fontSize = 12.sp,
+                                            color = ICostTextSecondary,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
                                 }
                                 if (isRefunded) {
                                     val netOrigExpCents = LedgerRepository.computeRemainingRefundableOrigCents(item)
