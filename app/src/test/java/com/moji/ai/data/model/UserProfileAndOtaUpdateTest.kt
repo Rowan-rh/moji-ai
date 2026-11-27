@@ -337,4 +337,24 @@ class UserProfileAndOtaUpdateTest {
         assertTrue(sampleMaxInt >= 524288)
         assertTrue(Int.MAX_VALUE / sampleMaxInt <= UserProfileManager.MAX_DECODE_LONG_SIDE_PX)
     }
+
+    @Test
+    fun isValidWebpAvatarBytes_enforcesMagicHeaderAndCloudSizeBounds() {
+        val validWebp = byteArrayOf(
+            'R'.code.toByte(), 'I'.code.toByte(), 'F'.code.toByte(), 'F'.code.toByte(),
+            0x20, 0x00, 0x00, 0x00,
+            'W'.code.toByte(), 'E'.code.toByte(), 'B'.code.toByte(), 'P'.code.toByte(),
+            'V'.code.toByte(), 'P'.code.toByte(), '8'.code.toByte(), 'L'.code.toByte(),
+            0x01, 0x02, 0x03, 0x04
+        )
+        assertTrue(UserProfileManager.isValidWebpAvatarBytes(validWebp))
+        assertFalse(UserProfileManager.isValidWebpAvatarBytes(ByteArray(0)))
+        assertFalse(UserProfileManager.isValidWebpAvatarBytes(ByteArray(12)))
+        assertFalse(UserProfileManager.isValidWebpAvatarBytes("PNG_FAKE_HEADER_12345678".toByteArray()))
+
+        val oversizedWebp = ByteArray(UserProfileManager.MAX_CLOUD_AVATAR_BYTES + 1).apply {
+            validWebp.copyInto(this, 0, 0, 16)
+        }
+        assertFalse(UserProfileManager.isValidWebpAvatarBytes(oversizedWebp))
+    }
 }
