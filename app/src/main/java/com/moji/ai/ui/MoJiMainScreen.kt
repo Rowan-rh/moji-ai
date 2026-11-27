@@ -182,6 +182,7 @@ import com.moji.ai.ui.screens.AppLockUnlockOverlay
 import com.moji.ai.ui.screens.AppearanceManagementScreen
 import com.moji.ai.ui.screens.CaptureAppWhitelistScreen
 import com.moji.ai.ui.screens.CategoryManagementScreen
+import com.moji.ai.ui.screens.CloudAuthAndSyncScreen
 import com.moji.ai.ui.screens.CurrencyManagementScreen
 import com.moji.ai.ui.screens.ICostAssetsScreen
 import com.moji.ai.ui.screens.ICostLedgerHomeScreen
@@ -336,6 +337,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     var showReminderManagementPage by rememberSaveable { mutableStateOf(false) }
     var showAppearanceManagementPage by rememberSaveable { mutableStateOf(false) }
     var showCaptureAppWhitelistPage by rememberSaveable { mutableStateOf(false) }
+    var showCloudAuthAndSyncPage by rememberSaveable { mutableStateOf(false) }
     var isAssetSubpageOpen by rememberSaveable { mutableStateOf(false) }
     val settingsListState = rememberLazyListState()
     val appearanceListState = rememberLazyListState()
@@ -352,6 +354,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         showReminderManagementPage ||
         showAppearanceManagementPage ||
         showCaptureAppWhitelistPage ||
+        showCloudAuthAndSyncPage ||
         isAssetSubpageOpen
 
     LaunchedEffect(pendingTemplateDraftForCalc) {
@@ -407,6 +410,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
             showReminderManagementPage = false
             showAppearanceManagementPage = false
             showCaptureAppWhitelistPage = false
+            showCloudAuthAndSyncPage = false
             calendarMonthTxs = null
             showCalculatorSheet = false
             editingTx = null
@@ -436,6 +440,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
         showReminderManagementPage = false
         showAppearanceManagementPage = false
         showCaptureAppWhitelistPage = false
+        showCloudAuthAndSyncPage = false
         calendarMonthTxs = null
         inspectingTx = null
         editingTx = null
@@ -704,8 +709,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 },
                 mojiCloudConfig = mojiCloudConfig,
                 onOpenMoJiCloudSync = {
-                    backupInitialTab = 3
-                    showBackupTransferSheet = true
+                    showCloudAuthAndSyncPage = true
                 },
                 onOpenWebDavSync = {
                     backupInitialTab = 4
@@ -996,6 +1000,82 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onRequestPinWidget = { viewModel.requestPinDesktopWidget() },
                 onBack = { showAppearanceManagementPage = false },
                 listState = appearanceListState
+            )
+        }
+
+        // 全屏「默记云同步」独立管理页面（URL + 服务器 SK + 设备指纹免密连接与换新机认领接管）—— 二级侧滑推入转场
+        AnimatedVisibility(
+            visible = showCloudAuthAndSyncPage,
+            enter = slideInHorizontally(
+                initialOffsetX = { it },
+                animationSpec = tween(280, easing = FastOutSlowInEasing)
+            ) + fadeIn(tween(200)),
+            exit = slideOutHorizontally(
+                targetOffsetX = { it },
+                animationSpec = tween(240, easing = FastOutSlowInEasing)
+            ) + fadeOut(tween(180))
+        ) {
+            CloudAuthAndSyncScreen(
+                mojiCloudConfig = mojiCloudConfig,
+                userProfileConfig = userProfileConfig,
+                statusMessage = sandboxStatus,
+                onBack = { showCloudAuthAndSyncPage = false },
+                onOpenProfileEditor = { showProfileEditorSheet = true },
+                onSaveNickname = { name -> viewModel.updateUserNickname(name) },
+                onSaveConfig = { cfg -> viewModel.updateMoJiCloudConfig(cfg) },
+                onConnectDeviceSk = { cfg, createIfMissing, onDone ->
+                    viewModel.connectMoJiCloudWithDeviceSk(
+                        draftConfig = cfg,
+                        createIfMissing = createIfMissing,
+                        onSelectionRequired = { members ->
+                            onDone(
+                                Result.success(
+                                    MoJiCloudSyncClient.DeviceConnectOutcome.SelectionRequired(
+                                        serverUrl = cfg.serverUrl,
+                                        serverAccessCode = cfg.serverAccessCode,
+                                        memberLabel = cfg.memberLabel,
+                                        members = members
+                                    )
+                                )
+                            )
+                        },
+                        onBound = { boundCfg, requiresInitialPull, msg ->
+                            onDone(
+                                Result.success(
+                                    MoJiCloudSyncClient.DeviceConnectOutcome.Bound(
+                                        config = boundCfg,
+                                        isNewAccount = false,
+                                        requiresInitialPull = requiresInitialPull,
+                                        message = msg
+                                    )
+                                )
+                            )
+                        },
+                        onError = { errMsg ->
+                            onDone(Result.failure(IllegalStateException(errMsg)))
+                        }
+                    )
+                },
+                onClaimMemberAndRestore = { cfg, targetMember, onDone ->
+                    viewModel.claimMoJiCloudMemberAndRestore(cfg, targetMember, onDone)
+                },
+                onDisconnectCloudSync = { onDone ->
+                    viewModel.disconnectMoJiCloudSync(onDone)
+                },
+                onUploadCloud = { cfg, forceOverwrite, onDone ->
+                    viewModel.uploadBackupToMoJiCloud(
+                        draftConfig = cfg,
+                        forceOverwrite = forceOverwrite,
+                        onConflict = { conflictMsg -> onDone(conflictMsg) },
+                        onResult = onDone
+                    )
+                },
+                onRestoreCloud = { cfg, onDone ->
+                    viewModel.restoreBackupFromMoJiCloud(cfg, onDone)
+                },
+                onVerifyLegacySyncKey = { cfg, onDone ->
+                    viewModel.verifyMoJiCloudKey(cfg, onDone)
+                }
             )
         }
 
@@ -1298,6 +1378,10 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                         showBackupTransferSheet = false
                         showPayslipImportSheet = true
                     },
+                    onOpenCloudAuthScreen = {
+                        showBackupTransferSheet = false
+                        showCloudAuthAndSyncPage = true
+                    },
                     onClose = requestDismiss
                 )
             }
@@ -1399,8 +1483,7 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     onClearCustomAvatar = { viewModel.clearCustomUserAvatar() },
                     onOpenCloudSync = {
                         showProfileEditorSheet = false
-                        backupInitialTab = 3
-                        showBackupTransferSheet = true
+                        showCloudAuthAndSyncPage = true
                     },
                     onClose = requestDismiss
                 )
@@ -1797,7 +1880,11 @@ private fun ICostSettingsFullScreen(
             // 顶部「个人资料与账号同步卡」（56dp 头像 + 昵称 + 云端状态胶囊 + 预留登录身份挂载位）
             item {
                 val isCloudBound = mojiCloudConfig.isTargetBound
-                val maskedKey = MoJiCloudSyncClient.maskedSyncKeyHint(mojiCloudConfig.syncKey)
+                val boundIdentityHint = if (mojiCloudConfig.usesLegacySyncKeyAuth) {
+                    MoJiCloudSyncClient.maskedSyncKeyHint(mojiCloudConfig.syncKey)
+                } else {
+                    mojiCloudConfig.deviceFingerprintHint.ifBlank { "免密设备指纹" }
+                }
                 Surface(
                     shape = RoundedCornerShape(22.dp),
                     color = ICostCardWhite,
@@ -1923,7 +2010,7 @@ private fun ICostSettingsFullScreen(
                                         }
                                         Text(
                                             text = if (isCloudBound) {
-                                                "云端已连接 ($maskedKey)"
+                                                "云端已连接 ($boundIdentityHint)"
                                             } else {
                                                 "本地记账 · 开启云同步 ›"
                                             },
@@ -1939,8 +2026,10 @@ private fun ICostSettingsFullScreen(
                             Text(
                                 text = if (isCloudBound && mojiCloudConfig.remoteRevision > 0L) {
                                     "云端版本 v${mojiCloudConfig.remoteRevision}"
+                                } else if (isCloudBound) {
+                                    "免密云同步已就绪"
                                 } else {
-                                    "支持后续账号绑定"
+                                    "URL + SK 免密同步"
                                 },
                                 fontSize = 11.sp,
                                 color = ICostTextSecondary,
@@ -1978,13 +2067,15 @@ private fun ICostSettingsFullScreen(
                 val cloudRowTrailing = when {
                     mojiCloudConfig.isTargetBound && mojiCloudConfig.remoteRevision > 0L ->
                         "已连接 · v${mojiCloudConfig.remoteRevision}"
-                    mojiCloudConfig.isTargetBound -> "已绑定专属密钥"
-                    else -> "免登录专属密钥"
+                    mojiCloudConfig.isTargetBound && mojiCloudConfig.usesLegacySyncKeyAuth ->
+                        "已连旧版密钥"
+                    mojiCloudConfig.isTargetBound -> "免密已连接"
+                    else -> "URL + SK 免密同步"
                 }
                 SettingsSectionTitle("数据与更新")
                 SettingsGroupCard(
                     rows = listOf(
-                        SettingRowDef("setting_backup.webp", "默记云存储", cloudRowTrailing, onClick = onOpenMoJiCloudSync),
+                        SettingRowDef("setting_backup.webp", "默记云同步", cloudRowTrailing, onClick = onOpenMoJiCloudSync),
                         SettingRowDef("setting_import.webp", "数据导入", "iCost / 微信 / 支付宝", onClick = onOpenCsvImport),
                         SettingRowDef("cat_salary.webp", "工资条导入", "OCR / 薪资表三路分账", onClick = onOpenPayslipImport),
                         SettingRowDef("setting_export.webp", "数据导出", "CSV", onClick = onOpenCsvExport),
@@ -3525,6 +3616,7 @@ private fun BackupAndCsvTransferSheet(
     onUploadWebDav: (WebDavConfig, (String) -> Unit) -> Unit = { _, _ -> },
     onRestoreWebDav: (WebDavConfig, (String) -> Unit) -> Unit = { _, _ -> },
     onOpenPayslipImport: () -> Unit = {},
+    onOpenCloudAuthScreen: () -> Unit = {},
     onClose: () -> Unit = {}
 ) {
     val context = LocalContext.current
@@ -4280,6 +4372,43 @@ private fun BackupAndCsvTransferSheet(
             } else if (currentTab == 3) {
                 val activeDraft = currentCloudDraft()
                 val isBoundNow = activeDraft.isTargetBound
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = ICostBlueAccent.copy(alpha = 0.12f),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(onClick = onOpenCloudAuthScreen)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "前往新版「默记云同步」独立设置页",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostBlueAccent
+                                )
+                                Text(
+                                    text = "支持 URL + 服务器 SK + 本机指纹免密连接、换新机认领家庭成员及头像同步",
+                                    fontSize = 11.sp,
+                                    color = ICostTextSecondary
+                                )
+                            }
+                            Text(
+                                text = "打开 ›",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = ICostBlueAccent
+                            )
+                        }
+                    }
+                }
                 item {
                     ICostFormCard {
                         Row(
@@ -5413,9 +5542,9 @@ private fun UserProfileEditorBottomSheet(
                         placeholder = UserProfileManager.DEFAULT_NICKNAME,
                         singleLine = true,
                         supportingText = if (mojiCloudConfig.isTargetBound) {
-                            "保存后将联动更新默记云成员标签；相册自定义头像文件仅保存在本机"
+                            "保存后将联动更新默记云成员昵称；相册自定义头像与预设头像均支持随默记云自动同步"
                         } else {
-                            "留空将自动回退为「${UserProfileManager.DEFAULT_NICKNAME}」；昵称与预设头像支持随备份快照恢复"
+                            "留空将自动回退为「${UserProfileManager.DEFAULT_NICKNAME}」；连接默记云后支持同步自定义头像与昵称"
                         },
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -5432,7 +5561,7 @@ private fun UserProfileEditorBottomSheet(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "暂未绑定默记云同步，可生成免登录专属密钥跨设备备份",
+                                text = "暂未连接默记云同步，填入服务器 URL 与 SK 即可免密备份账本与头像",
                                 fontSize = 11.sp,
                                 color = ICostTextSecondary,
                                 modifier = Modifier.weight(1f)

@@ -759,7 +759,7 @@ object MoJiCloudSyncClient {
         rawSeed: String,
         appEnv: String = currentAppEnv
     ): String {
-        val cleanSeed = rawSeed.trim()
+        val cleanSeed = rawSeed.trim().lowercase(Locale.US)
         require(cleanSeed.isNotEmpty()) { "device fingerprint seed must not be blank" }
         return sha256Hex("moji-client-device-fp-v1:$appEnv:$cleanSeed".toByteArray(Charsets.UTF_8))
     }
@@ -791,11 +791,16 @@ object MoJiCloudSyncClient {
         return computeDeviceFingerprintFromSeed(seed, currentAppEnv)
     }
 
+    fun maskedDeviceFingerprintHint(rawFingerprint: String): String {
+        val clean = rawFingerprint.trim()
+        if (clean.isEmpty()) return ""
+        return "FP-****-${clean.takeLast(4).uppercase(Locale.US)}"
+    }
+
     fun maskedDeviceFingerprintHint(context: Context): String {
         val storedHint = _configFlow.value.deviceFingerprintHint.trim()
         if (storedHint.isNotEmpty()) return storedHint
-        val fp = getDeviceFingerprint(context)
-        return "FP-****-${fp.takeLast(4).uppercase(Locale.US)}"
+        return maskedDeviceFingerprintHint(getDeviceFingerprint(context))
     }
 
     /**
@@ -1616,7 +1621,7 @@ object MoJiCloudSyncClient {
                         ?: "上传自定义头像失败（HTTP ${resp.code}）"
                     return Result.failure(IllegalStateException(msg))
                 }
-                val _ = runCatching { jsonCodec.decodeFromString<PutAvatarRespDto>(txt) }.getOrNull()
+                runCatching { jsonCodec.decodeFromString<PutAvatarRespDto>(txt) }
             }
             return Result.success(Unit)
         } else if (config.remoteAvatarSha256.isNotBlank() || config.lastSyncedAvatarSha256.isNotBlank()) {
