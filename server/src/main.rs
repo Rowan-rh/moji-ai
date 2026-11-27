@@ -1089,4 +1089,326 @@ mod tests {
             StatusCode::NOT_FOUND
         );
     }
+
+    #[tokio::test]
+    async fn test_family_ledger_delta_sync_ownership_403_and_env_isolation() {
+        let (_tmp, app) = make_test_app(Some("family-8888"), 10);
+
+        // 成员 A (prod)、成员 B (prod)、测试号 QA (qa)
+        let (_, res_a) = send_json(
+            &app,
+            "POST",
+            "/api/v1/auth/device-login",
+            None,
+            Some(json!({
+                "server_access_code": "family-8888",
+                "device_fingerprint": "101010101010101010101010101010101010101010101010101010101010aaaa",
+                "member_label": "阿豪",
+                "app_env": "prod"
+            })),
+        )
+        .await;
+        let uid_a = res_a["user_id"].as_str().unwrap().to_string();
+        let tok_a = res_a["access_token"].as_str().unwrap().to_string();
+
+        let (_, res_b) = send_json(
+            &app,
+            "POST",
+            "/api/v1/auth/device-login",
+            None,
+            Some(json!({
+                "server_access_code": "family-8888",
+                "device_fingerprint": "202020202020202020202020202020202020202020202020202020202020bbbb",
+                "member_label": "小美",
+                "app_env": "prod",
+                "create_if_missing": true
+            })),
+        )
+        .await;
+        let uid_b = res_b["user_id"].as_str().unwrap().to_string();
+        let tok_b = res_b["access_token"].as_str().unwrap().to_string();
+
+        let (_, res_qa) = send_json(
+            &app,
+            "POST",
+            "/api/v1/auth/device-login",
+            None,
+            Some(json!({
+                "server_access_code": "family-8888",
+                "device_fingerprint": "303030303030303030303030303030303030303030303030303030303030cccc",
+                "member_label": "QA成员",
+                "app_env": "qa",
+                "create_if_missing": true
+            })),
+        )
+        .await;
+        let tok_qa = res_qa["access_token"].as_str().unwrap().to_string();
+
+        // 成员 A 上传自定义头像，成员 B 同环境可读取，QA 跨环境读取返回 403
+        let mut avatar_a = Vec::new();
+        avatar_a.extend_from_slice(b"RIFF");
+        avatar_a.extend_from_slice(&20u32.to_le_bytes());
+        avatar_a.extend_from_slice(b"WEBP");
+        avatar_a.extend_from_slice(b"VP8Xfamilyavtr01");
+        let put_av = Request::builder()
+            .method("PUT")
+            .uri("/api/v1/profile/avatar")
+            .header("Authorization", format!("Bearer {tok_a}"))
+            .body(Body::from(avatar_a.clone()))
+            .unwrap();
+        assert_eq!(app.clone().oneshot(put_av).await.unwrap().status(), StatusCode::OK);
+
+        let get_av_b = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/family/avatar/{uid_a}"))
+            .header("Authorization", format!("Bearer {tok_b}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp_av_b = app.clone().oneshot(get_av_b).await.unwrap();
+        assert_eq!(resp_av_b.status(), StatusCode::OK);
+        let bytes_av_b = resp_av_b.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes_av_b.as_ref(), avatar_a.as_slice());
+
+        let get_av_qa = Request::builder()
+            .method("GET")
+            .uri(format!("/api/v1/family/avatar/{uid_a}"))
+            .header("Authorization", format!("Bearer {tok_qa}"))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(get_av_qa).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+
+        // 非 EXPENSE/INCOME 类型（如 TRANSFER）直接拦截返回 400
+        let (st_bad_type, bad_type_res) = send_json(
+            &app,
+            "POST",
+            "/api/v1/family/sync",
+            Some(&tok_a),
+            Some(json!({
+                "since_seq": 0,
+                "mutations": [{
+                    "tx_uuid": "tx-transfer-blocked",
+                    "tx_type": "TRANSFER",
+                    "amount_cents": 10000,
+                    "amount_cny_cents": 10000,
+                    "occurred_at_ms": 1700000001000i64,
+                    "updated_at_ms": 1700000001000i64
+                }]
+            })),
+        )
+        .await;
+        assert_eq!(st_bad_type, StatusCode::BAD_REQUEST);
+        assert_eq!(bad_type_res["error"], "invalid_tx_type");
+
+        // 成员 A 推送 1 笔支出 + 1 笔收入
+        let (st_push_a, push_a_res) = send_json(
+            &app,
+            "POST",
+            "/api/v1/family/sync",
+            Some(&tok_a),
+            Some(json!({
+                "since_seq": 0,
+                "member_label": "阿豪",
+                "mutations": [
+                    {
+                        "tx_uuid": "tx-a-dinner-001",
+                        "tx_type": "EXPENSE",
+                        "currency": "CNY",
+                        "amount_cents": 12800,
+                        "amount_cny_cents": 12800,
+                        "refunded_amount_cents": 0,
+                        "category": "餐饮-三餐",
+                        "merchant": "海底捞",
+                        "note": "家庭聚餐",
+                        "tags": "聚餐",
+                        "occurred_at_ms": 1700000010000i64,
+                        "updated_at_ms": 1700000010000i64
+                    },
+                    {
+                        "tx_uuid": "tx-a-bonus-002",
+                        "tx_type": "INCOME",
+                        "currency": "CNY",
+                        "amount_cents": 500000,
+                        "amount_cny_cents": 500000,
+                        "category": "奖金",
+                        "merchant": "季度奖金",
+                        "occurred_at_ms": 1700000020000i64,
+                        "updated_at_ms": 1700000020000i64
+                    }
+                ]
+            })),
+        )
+        .await;
+        assert_eq!(st_push_a, StatusCode::OK);
+        assert_eq!(push_a_res["accepted_count"], 2);
+        assert_eq!(push_a_res["items"].as_array().unwrap().len(), 2);
+        assert_eq!(push_a_res["members"].as_array().unwrap().len(), 2);
+
+        // QA 环境拉取 prod 池必须完全隔离（0 条记录、仅含 QA 成员）
+        let (st_qa_pull, qa_pull) = send_json(
+            &app,
+            "POST",
+            "/api/v1/family/sync",
+            Some(&tok_qa),
+            Some(json!({ "since_seq": 0, "mutations": [] })),
+        )
+        .await;
+        assert_eq!(st_qa_pull, StatusCode::OK);
+        assert_eq!(qa_pull["items"].as_array().unwrap().len(), 0);
+        assert_eq!(qa_pull["members"].as_array().unwrap().len(), 1);
+
+        // 成员 B 拉取增量并同时推送自己的 1 笔买菜支出
+        let (st_sync_b, sync_b) = send_json(
+            &app,
+            "POST",
+            "/api/v1/family/sync",
+            Some(&tok_b),
+            Some(json!({
+                "since_seq": 0,
+                "member_label": "小美",
+                "mutations": [{
+                    "tx_uuid": "tx-b-grocery-001",
+                    "tx_type": "EXPENSE",
+                    "currency": "CNY",
+                    "amount_cents": 6550,
+                    "amount_cny_cents": 6550,
+                    "category": "买菜",
+                    "merchant": "盒马鲜生",
+                    "occurred_at_ms": 1700000030000i64,
+                    "updated_at_ms": 1700000030000i64
+                }]
+            })),
+        )
+        .await;
+        assert_eq!(st_sync_b, StatusCode::OK);
+        assert_eq!(sync_b["items"].as_array().unwrap().len(), 3);
+        let cursor_b = sync_b["next_since_seq"].as_i64().unwrap();
+        assert!(cursor_b >= 3);
+        assert_eq!(sync_b["items"][0]["owner_user_id"], uid_a);
+        assert_eq!(sync_b["items"][2]["owner_user_id"], uid_b);
+
+        // AC-F3 越权拦截：成员 B 企图修改或删除成员 A 的 tx-a-dinner-001 必须返回 HTTP 403 forbidden_not_tx_owner
+        let (st_forbid_edit, forbid_edit) = send_json(
+            &app,
+            "POST",
+            "/api/v1/family/sync",
+            Some(&tok_b),
+            Some(json!({
+                "since_seq": cursor_b,
+                "mutations": [{
+                    "tx_uuid": "tx-a-dinner-001",
+                    "tx_type": "EXPENSE",
+                    "amount_cents": 1,
+                    "amount_cny_cents": 1,
+                    "occurred_at_ms": 1700000010000i64,
+                    "updated_at_ms": 1700000090000i64
+                }]
+            })),
+        )
+        .await;
+        assert_eq!(st_forbid_edit, StatusCode::FORBIDDEN);
+        assert_eq!(forbid_edit["error"], "forbidden_not_tx_owner");
+
+        let (st_forbid_del, forbid_del) = send_json(
+            &app,
+            "POST",
+            "/api/v1/family/sync",
+            Some(&tok_b),
+            Some(json!({
+                "since_seq": cursor_b,
+                "mutations": [{
+                    "tx_uuid": "tx-a-dinner-001",
+                    "tx_type": "EXPENSE",
+                    "amount_cents": 0,
+                    "amount_cny_cents": 0,
+                    "occurred_at_ms": 1700000010000i64,
+                    "updated_at_ms": 1700000095000i64,
+                    "deleted_at_ms": 1700000095000i64
+                }]
+            })),
+        )
+        .await;
+        assert_eq!(st_forbid_del, StatusCode::FORBIDDEN);
+        assert_eq!(forbid_del["error"], "forbidden_not_tx_owner");
+
+        // 成员 A 发生部分退款（refunded_amount_cents = 2800），游标推进，成员 B 增量拉取仅收到该更新记录
+        let (st_refund_a, _) = send_json(
+            &app,
+            "POST",
+            "/api/v1/family/sync",
+            Some(&tok_a),
+            Some(json!({
+                "since_seq": 0,
+                "mutations": [{
+                    "tx_uuid": "tx-a-dinner-001",
+                    "tx_type": "EXPENSE",
+                    "currency": "CNY",
+                    "amount_cents": 12800,
+                    "amount_cny_cents": 12800,
+                    "refunded_amount_cents": 2800,
+                    "category": "餐饮-三餐",
+                    "merchant": "海底捞",
+                    "note": "家庭聚餐(退菜)",
+                    "tags": "聚餐",
+                    "occurred_at_ms": 1700000010000i64,
+                    "updated_at_ms": 1700000100000i64
+                }]
+            })),
+        )
+        .await;
+        assert_eq!(st_refund_a, StatusCode::OK);
+
+        let (_, delta_b_after_refund) = send_json(
+            &app,
+            "POST",
+            "/api/v1/family/sync",
+            Some(&tok_b),
+            Some(json!({ "since_seq": cursor_b, "mutations": [] })),
+        )
+        .await;
+        let refund_items = delta_b_after_refund["items"].as_array().unwrap();
+        assert_eq!(refund_items.len(), 1);
+        assert_eq!(refund_items[0]["tx_uuid"], "tx-a-dinner-001");
+        assert_eq!(refund_items[0]["refunded_amount_cents"], 2800);
+        let cursor_b2 = delta_b_after_refund["next_since_seq"].as_i64().unwrap();
+        assert!(cursor_b2 > cursor_b);
+
+        // 成员 A 撤销/删除 tx-a-bonus-002（仅传墓碑 deleted_at_ms），成员 B 增量收到 deleted_at_ms 墓碑
+        let (st_tomb_a, _) = send_json(
+            &app,
+            "POST",
+            "/api/v1/family/sync",
+            Some(&tok_a),
+            Some(json!({
+                "since_seq": cursor_b2,
+                "mutations": [{
+                    "tx_uuid": "tx-a-bonus-002",
+                    "tx_type": "EXPENSE",
+                    "amount_cents": 0,
+                    "amount_cny_cents": 0,
+                    "occurred_at_ms": 1700000200000i64,
+                    "updated_at_ms": 1700000200000i64,
+                    "deleted_at_ms": 1700000200000i64
+                }]
+            })),
+        )
+        .await;
+        assert_eq!(st_tomb_a, StatusCode::OK);
+
+        let (_, delta_b_after_tomb) = send_json(
+            &app,
+            "POST",
+            "/api/v1/family/sync",
+            Some(&tok_b),
+            Some(json!({ "since_seq": cursor_b2, "mutations": [] })),
+        )
+        .await;
+        let tomb_items = delta_b_after_tomb["items"].as_array().unwrap();
+        assert_eq!(tomb_items.len(), 1);
+        assert_eq!(tomb_items[0]["tx_uuid"], "tx-a-bonus-002");
+        assert_eq!(tomb_items[0]["tx_type"], "INCOME");
+        assert_eq!(tomb_items[0]["deleted_at_ms"], 1700000200000i64);
+    }
 }
