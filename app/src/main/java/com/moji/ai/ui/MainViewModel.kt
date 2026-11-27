@@ -30,6 +30,7 @@ import com.moji.ai.data.backup.MoJiFullBackupSnapshot
 import com.moji.ai.data.backup.WebDavConfig
 import com.moji.ai.data.backup.WebDavSyncClient
 import com.moji.ai.data.local.AppDatabase
+import com.moji.ai.data.local.CaptureEvidenceEntity
 import com.moji.ai.data.local.RecurringRuleEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
@@ -65,7 +66,11 @@ import com.moji.ai.data.model.UserProfileManager
 import com.moji.ai.notification.DailyReminderScheduler
 import com.moji.ai.notification.SilentBookkeepingNotifier
 import com.moji.ai.service.BillScreenshotStorage
+import com.moji.ai.service.CaptureDebugTraceEntry
+import com.moji.ai.service.CaptureDebugTraceStore
 import com.moji.ai.service.CaptureObservabilityLogEntry
+import com.moji.ai.service.DebugTraceQuotaTier
+import com.moji.ai.service.DebugTraceStorageStats
 import com.moji.ai.update.AppUpdateConfig
 import com.moji.ai.update.ReleaseUpdateInfo
 import com.moji.ai.update.UpdateCheckState
@@ -2832,4 +2837,98 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runAgentBillTriage()
         }
     }
+
+    // ==================== 识账调试模式与双入口推理溯源（AC-1 ~ AC-5） ====================
+
+    val debugTraceStats: StateFlow<DebugTraceStorageStats>
+        get() = CaptureDebugTraceStore.statsFlow
+
+    fun refreshDebugTraceStats() {
+        viewModelScope.launch(Dispatchers.IO) {
+            CaptureDebugTraceStore.managerOrNull()?.refreshStatsFromDisk()
+        }
+    }
+
+    fun showUiMessage(text: String) {
+        postMessage(text)
+    }
+
+    fun setDebugTraceEnabled(enabled: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            CaptureDebugTraceStore.setEnabled(enabled)
+            val stats = CaptureDebugTraceStore.statsFlow.value
+            if (enabled) {
+                postMessage("已开启识账调试模式（配额上限 ${stats.tier.label}）")
+            } else if (stats.entryCount > 0) {
+                postMessage("已关闭调试模式（已保留 ${stats.entryCount} 条历史日志供查看/导出）")
+            } else {
+                postMessage("已关闭识账调试模式")
+            }
+        }
+    }
+
+    fun setDebugTraceQuotaTier(tier: DebugTraceQuotaTier) {
+        viewModelScope.launch(Dispatchers.IO) {
+            CaptureDebugTraceStore.setQuotaTier(tier)
+            postMessage("调试日志空间上限已切换为 ${tier.label}")
+        }
+    }
+
+    fun clearDebugTraces() {
+        viewModelScope.launch(Dispatchers.IO) {
+            CaptureDebugTraceStore.clearAllTraces()
+            postMessage("已清空本地识账推理日志")
+        }
+    }
+
+    suspend fun loadAllDebugTraces(): List<CaptureDebugTraceEntry> = withContext(Dispatchers.IO) {
+        CaptureDebugTraceStore.readAllTracesNewestFirst()
+    }
+
+    suspend fun exportDebugTracesToUri(uri: Uri): Result<Int> = withContext(Dispatchers.IO) {
+        runCatching {
+            val out = app.contentResolver.openOutputStream(uri, "wt")
+                ?: app.contentResolver.openOutputStream(uri)
+                ?: throw IllegalStateException("无法打开目标文件输出流")
+            out.use { stream ->
+                CaptureDebugTraceStore.exportJsonlToStream(stream)
+            }
+        }.onSuccess { count ->
+            postMessage("已导出 $count 条脱敏推理轨迹 (.jsonl)")
+        }.onFailure { err ->
+            postMessage("导出诊断包失败：${err.localizedMessage ?: "I/O 异常"}")
+        }
+    }
+
+    suspend fun loadTransactionProvenance(tx: TransactionEntity): TransactionProvenanceBundle =
+        withContext(Dispatchers.IO) {
+            val evidences = if (tx.id > 0L) {
+                repository.getEvidencesForTransaction(tx.id)
+            } else {
+                emptyList()
+            }
+            val keyHint = tx.orderKey.ifBlank { tx.transactionNo }.ifBlank { tx.merchantOrderNo }
+            val traces = CaptureDebugTraceStore.getTracesForTransaction(
+                transactionId = tx.id,
+                orderKey = keyHint
+            )
+            val report = CaptureDebugTraceStore.formatTransactionProvenanceReport(
+                tx = tx,
+                evidences = evidences,
+                traces = traces
+            )
+            TransactionProvenanceBundle(
+                transaction = tx,
+                evidences = evidences,
+                traces = traces,
+                formattedReport = report
+            )
+        }
 }
+
+data class TransactionProvenanceBundle(
+    val transaction: TransactionEntity,
+    val evidences: List<CaptureEvidenceEntity> = emptyList(),
+    val traces: List<CaptureDebugTraceEntry> = emptyList(),
+    val formattedReport: String = ""
+)

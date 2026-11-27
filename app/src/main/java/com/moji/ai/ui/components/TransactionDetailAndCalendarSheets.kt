@@ -1,7 +1,11 @@
 package com.moji.ai.ui.components
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.BitmapFactory
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
@@ -9,6 +13,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import java.io.File
@@ -50,12 +55,14 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -75,6 +82,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.moji.ai.ai.AgentBillTriageEngine
+import com.moji.ai.data.local.CaptureEvidenceEntity
 import com.moji.ai.data.local.TransactionEntity
 import com.moji.ai.data.local.WalletEntity
 import com.moji.ai.data.repository.LedgerRepository
@@ -84,6 +92,9 @@ import com.moji.ai.data.model.CurrencyCode
 import com.moji.ai.data.model.DedicatedFundManager
 import com.moji.ai.data.model.TagCatalog
 import com.moji.ai.data.model.TransactionType
+import com.moji.ai.service.CaptureDebugTraceEntry
+import com.moji.ai.service.DebugTraceOutcome
+import com.moji.ai.ui.TransactionProvenanceBundle
 import com.moji.ai.ui.screens.ICostColorTagChip
 import com.moji.ai.ui.theme.ICDinFontFamily
 import com.moji.ai.ui.theme.ICostAmberGold
@@ -164,7 +175,9 @@ fun TransactionDetailSheet(
     onSplitTransaction: (expenseId: Long, categoryA: String, amountAYuan: Double, categoryB: String, noteB: String) -> Unit = { _, _, _, _, _ -> },
     onDuplicate: ((TransactionEntity) -> Unit)? = null,
     allTransactions: List<TransactionEntity> = emptyList(),
-    onInspectRelatedTransaction: ((TransactionEntity) -> Unit)? = null
+    onInspectRelatedTransaction: ((TransactionEntity) -> Unit)? = null,
+    onLoadProvenance: (suspend (TransactionEntity) -> TransactionProvenanceBundle)? = null,
+    onShowMessage: (String) -> Unit = {}
 ) {
     BackHandler(onBack = onDismiss)
 
@@ -739,6 +752,15 @@ fun TransactionDetailSheet(
                 assetFile = "detail_template.webp",
                 label = "再记一笔相同的",
                 onClick = { onDuplicate(tx) }
+            )
+        }
+
+        if (tx.captureSource != "MANUAL" && onLoadProvenance != null) {
+            Spacer(modifier = Modifier.height(14.dp))
+            TransactionProvenanceCollapsibleCard(
+                tx = tx,
+                onLoadProvenance = onLoadProvenance,
+                onShowMessage = onShowMessage
             )
         }
 
@@ -1764,6 +1786,370 @@ private fun CalendarSummaryMetric(label: String, amountText: String, color: Colo
             fontSize = 15.sp,
             fontWeight = FontWeight.Bold,
             color = color
+        )
+    }
+}
+
+/**
+ * 账单详情页底部默认折叠的「数据来源与推理溯源」卡片（AC-5.2）：
+ * - 对齐 iCost 卡片圆角规范 (`ICostCardWhite` + `RoundedCornerShape(22.dp)`)；
+ * - 仅针对非手动账单 (`tx.captureSource != "MANUAL"`) 渲染；
+ * - 展开后在后台 IO 线程读取 `capture_evidences` 多源凭据与关联的多段 6 步推理轨迹（如 `AI_FUSED` 展示初始入账 + 跨道融合全链路），支持一键复制完整脱敏溯源报告。
+ */
+@Composable
+private fun TransactionProvenanceCollapsibleCard(
+    tx: TransactionEntity,
+    onLoadProvenance: suspend (TransactionEntity) -> TransactionProvenanceBundle,
+    onShowMessage: (String) -> Unit
+) {
+    val context = LocalContext.current
+    var expanded by rememberSaveable(tx.id) { mutableStateOf(false) }
+    var bundle by remember(tx.id) { mutableStateOf<TransactionProvenanceBundle?>(null) }
+    var isLoading by remember(tx.id) { mutableStateOf(false) }
+    var copiedFeedback by remember(tx.id) { mutableStateOf(false) }
+
+    LaunchedEffect(tx.id, tx.updatedAtMillis, expanded) {
+        if (expanded) {
+            isLoading = true
+            bundle = onLoadProvenance(tx)
+            isLoading = false
+        }
+    }
+
+    val timeFmt = remember { SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.CHINA) }
+
+    Surface(
+        shape = RoundedCornerShape(22.dp),
+        color = ICostCardWhite,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null
+                    ) {
+                        expanded = !expanded
+                        copiedFeedback = false
+                    },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "数据来源与推理溯源",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextPrimary
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    val subtitleText = when {
+                        !expanded -> "点击展开原始采集凭据与 6 步 AI 推理轨迹"
+                        isLoading -> "正在读取采集凭据与推理轨迹…"
+                        bundle != null -> {
+                            val evCnt = bundle?.evidences?.size ?: 0
+                            val trCnt = bundle?.traces?.size ?: 0
+                            "已关联 $evCnt 份原始凭据 · $trCnt 段推理轨迹"
+                        }
+                        else -> "多源证据链与推理过程溯源"
+                    }
+                    Text(
+                        text = subtitleText,
+                        fontSize = 12.sp,
+                        color = ICostTextSecondary
+                    )
+                }
+                Icon(
+                    imageVector = if (expanded) Icons.Default.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = if (expanded) "收起溯源详情" else "展开溯源详情",
+                    tint = ICostTextSecondary,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    HorizontalDivider(color = ICostDivider)
+
+                    val loaded = bundle
+                    if (isLoading && loaded == null) {
+                        Text(
+                            text = "正在加载溯源记录…",
+                            fontSize = 13.sp,
+                            color = ICostTextSecondary
+                        )
+                    } else if (loaded != null) {
+                        // 1. 多源原始采集凭据
+                        Text(
+                            text = "一、绑定的原始采集凭据 (${loaded.evidences.size} 份)",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ICostTextPrimary
+                        )
+                        if (loaded.evidences.isEmpty()) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(ICostBgGray)
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(
+                                    text = "主表留存来源：${tx.captureSource}",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostBlueAccent
+                                )
+                                Text(
+                                    text = tx.rawCapturedText.ifBlank { "无原始文本留存" }.take(500),
+                                    fontSize = 11.sp,
+                                    color = ICostTextSecondary,
+                                    lineHeight = 16.sp
+                                )
+                            }
+                        } else {
+                            loaded.evidences.sortedBy { it.capturedAtMillis }.forEachIndexed { idx, ev ->
+                                EvidenceProvenanceItem(
+                                    index = idx + 1,
+                                    evidence = ev,
+                                    timeFmt = timeFmt
+                                )
+                            }
+                        }
+
+                        // 2. 6 步全链路推理轨迹（支持 AI_FUSED 多段融合展示）
+                        Text(
+                            text = "二、6 步全链路推理轨迹 (${loaded.traces.size} 段)",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ICostTextPrimary
+                        )
+                        if (loaded.traces.isEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(14.dp))
+                                    .background(ICostBgGray)
+                                    .padding(12.dp)
+                            ) {
+                                Text(
+                                    text = "该笔账单入账时「设置 → 智能记账 → 识账调试模式」处于关闭状态，或更早轨迹已被环形配额自动淘汰。开启调试模式后，后续新入账单将完整记录 6 步推理链路。",
+                                    fontSize = 12.sp,
+                                    color = ICostTextSecondary,
+                                    lineHeight = 17.sp
+                                )
+                            }
+                        } else {
+                            loaded.traces.forEachIndexed { idx, trace ->
+                                TraceSegmentProvenanceCard(
+                                    segmentIndex = idx + 1,
+                                    totalSegments = loaded.traces.size,
+                                    trace = trace,
+                                    timeFmt = timeFmt
+                                )
+                            }
+                        }
+
+                        // 3. 一键复制完整脱敏溯源报告
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = ICostBlueAccent.copy(alpha = 0.12f),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .iCostPressScale(pressedScale = 0.97f) {
+                                    val safeReport = loaded.formattedReport.let { raw ->
+                                        val bytes = raw.toByteArray(Charsets.UTF_8)
+                                        if (bytes.size > 240 * 1024) {
+                                            String(bytes, 0, 240 * 1024, Charsets.UTF_8) + "\n... [超出剪贴板安全上限已截断]"
+                                        } else {
+                                            raw
+                                        }
+                                    }
+                                    val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                    cm?.setPrimaryClip(ClipData.newPlainText("MoJiBillProvenance", safeReport))
+                                    copiedFeedback = true
+                                    onShowMessage("已复制脱敏完整溯源报告")
+                                }
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier.padding(vertical = 11.dp, horizontal = 12.dp)
+                            ) {
+                                Text(
+                                    text = if (copiedFeedback) "✓ 已复制完整溯源报告" else "复制完整溯源报告",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = ICostBlueAccent
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EvidenceProvenanceItem(
+    index: Int,
+    evidence: CaptureEvidenceEntity,
+    timeFmt: SimpleDateFormat
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(ICostBgGray)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "凭据 #$index · ${evidence.captureSource}",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = ICostBlueAccent
+            )
+            Text(
+                text = timeFmt.format(Date(evidence.capturedAtMillis)),
+                fontSize = 11.sp,
+                color = ICostTextSecondary
+            )
+        }
+        Text(
+            text = "来源包名：${evidence.sourcePackage.ifBlank { "-" }}" +
+                if (evidence.paymentMethodRaw.isNotBlank()) " · 付款方式：${evidence.paymentMethodRaw}" else "",
+            fontSize = 11.sp,
+            color = ICostTextPrimary
+        )
+        if (evidence.transactionNo.isNotBlank() || evidence.merchantOrderNo.isNotBlank()) {
+            Text(
+                text = "单号：${evidence.transactionNo.ifBlank { "-" }}" +
+                    if (evidence.merchantOrderNo.isNotBlank()) " | 商户单号：${evidence.merchantOrderNo}" else "",
+                fontSize = 11.sp,
+                color = ICostTextSecondary
+            )
+        }
+        if (evidence.screenshotPath.isNotBlank() || evidence.screenshotSha256.isNotBlank()) {
+            Text(
+                text = "原图引用：${File(evidence.screenshotPath).name} (sha256=${evidence.screenshotSha256.take(12)})",
+                fontSize = 11.sp,
+                color = ICostTextSecondary
+            )
+        }
+        if (evidence.rawText.isNotBlank()) {
+            Text(
+                text = "原文：${evidence.rawText.take(360)}",
+                fontSize = 11.sp,
+                color = ICostTextSecondary,
+                lineHeight = 15.sp
+            )
+        }
+    }
+}
+
+@Composable
+private fun TraceSegmentProvenanceCard(
+    segmentIndex: Int,
+    totalSegments: Int,
+    trace: CaptureDebugTraceEntry,
+    timeFmt: SimpleDateFormat
+) {
+    val badgeColor = when (trace.outcome) {
+        DebugTraceOutcome.RECORDED -> ICostIncomeColor
+        DebugTraceOutcome.REFUND_OFFSET -> Color(0xFF0D9488)
+        DebugTraceOutcome.FUSED_PATCH -> ICostBlueAccent
+        DebugTraceOutcome.DEDUP_BLOCKED -> ICostAmberGold
+        DebugTraceOutcome.DUPLICATE_SUSPECTED -> ICostCoralRed
+        else -> ICostTextSecondary
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(14.dp))
+            .background(ICostBgGray)
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(5.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = if (totalSegments > 1) {
+                    "第 $segmentIndex/$totalSegments 段 · ${trace.outcome.badgeLabel}"
+                } else {
+                    "${trace.outcome.badgeLabel} (${trace.outcome.name})"
+                },
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = badgeColor
+            )
+            Text(
+                text = timeFmt.format(Date(trace.timestampMillis)),
+                fontSize = 11.sp,
+                color = ICostTextSecondary
+            )
+        }
+        if (trace.headline.isNotBlank()) {
+            Text(
+                text = trace.headline,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = ICostTextPrimary
+            )
+        }
+        Text(
+            text = "① 采集：${trace.sourceCapture.captureSource} | ${trace.sourceCapture.packageName}" +
+                if (trace.sourceCapture.verifiedActivity.isNotBlank()) " (${trace.sourceCapture.verifiedActivity.substringAfterLast('.')})" else "",
+            fontSize = 11.sp,
+            color = ICostTextPrimary
+        )
+        Text(
+            text = "② 门禁：${trace.windowSessionGuard.guardRuleName.ifBlank { "-" }} | visit=${trace.windowSessionGuard.cashierVisitId} (${trace.windowSessionGuard.sessionAction.ifBlank { "-" }})",
+            fontSize = 11.sp,
+            color = ICostTextPrimary
+        )
+        Text(
+            text = "③ 路由：${trace.parseEngineRoute.routeSelected.ifBlank { "-" }}" +
+                if (trace.parseEngineRoute.fallbackOrSkipReason.isNotBlank()) " · ${trace.parseEngineRoute.fallbackOrSkipReason}" else "",
+            fontSize = 11.sp,
+            color = ICostTextPrimary
+        )
+        Text(
+            text = "④ 提取：${trace.fieldExtraction.amountRuleBranch.ifBlank { trace.fieldExtraction.directionType }}" +
+                (if (trace.fieldExtraction.strippedSafeguardPhrases.isNotEmpty()) " · 已剥离[${trace.fieldExtraction.strippedSafeguardPhrases.joinToString()}]" else "") +
+                (trace.fieldExtraction.linkedExpenseId?.let { " · 冲抵原单#$it" }.orEmpty()),
+            fontSize = 11.sp,
+            color = ICostTextPrimary
+        )
+        Text(
+            text = "⑤ 归类：${trace.categoryWalletMapping.finalCategory.ifBlank { "-" }} (${trace.categoryWalletMapping.categoryDecisionSource}) → ${trace.categoryWalletMapping.finalWalletName.ifBlank { "不关联账户" }} (${trace.categoryWalletMapping.walletMatchBasis})",
+            fontSize = 11.sp,
+            color = ICostTextPrimary
+        )
+        Text(
+            text = "⑥ 管线：${trace.pipelineDedupFusion.matchedRuleId.ifBlank { "-" }}" +
+                if (trace.pipelineDedupFusion.fusedFieldsDiff.isNotEmpty()) {
+                    "\n   融合改写：${trace.pipelineDedupFusion.fusedFieldsDiff.joinToString(" ； ")}"
+                } else "",
+            fontSize = 11.sp,
+            color = ICostTextPrimary,
+            lineHeight = 15.sp
         )
     }
 }
