@@ -35,17 +35,18 @@ import kotlin.math.abs
 import kotlin.math.roundToLong
 
 /**
- * 收银台单次访问会话防滞留与立减动画刷新追踪器（`AC-5`）：
- * 1. 同一收银台访问（Visit）内停留或上下滚动推荐区不重复派发（即使停留超过 15s 也不重记）；
+ * 收银台单次访问会话防滞留、多任务往返防重与立减动画刷新追踪器（`AC-1` / `AC-2` / `AC-5`）：
+ * 1. 同一收银台访问（Visit）内停留、上下滚动推荐区，或未点击「完成/关闭」直接切去桌面、微信聊天主任务、打开默记查看账单并在 10 分钟内多次切回同一未关闭完成页（核心商户+实付+优惠未变且未经历新支付前置信号），复用原 `visitId` 静默拦截（`0` 新增入账、`0` 新增通知）；
  * 2. 首帧录了原价（无立减优惠）、紧接着立减动画完成刷出更低实付金额与优惠金额时，放行触发协调器原位立减校准；
  * 3. 若用户在同一页面展开露出了此前未出现的订单号，放行触发原位单号补全；
- * 4. 离开专用收银台容器、切换应用或进入待付款（`确认付款`）/密码核身页时立即重置会话并分配新 `visitId`，
- *    确保 15s 内连续两笔同金额真实支付绝不被旧签名误拦。
+ * 4. 一旦经历任意新支付前置信号（待付款收银台词 `确认付款/立即支付`、密码/生物核身窗口或密码节点、发起支付桥接页 `WalletBrandUI/BaseScanUI`、关闭收银台返回宿主 `AppBrandUI*` / `WebViewUI` / 电商宿主），立即重置会话并分配新 `visitId`，确保连续两笔同金额真实消费 100% 独立入账。
  */
 internal class CashierVisitSessionTracker {
     data class LiveCashierDispatchDecision(
         val shouldDispatch: Boolean,
-        val visitId: Long
+        val visitId: Long,
+        val sessionAction: String = "",
+        val lastResetReason: String = ""
     )
 
     private var visitSequence: Long = 0L
@@ -56,44 +57,118 @@ internal class CashierVisitSessionTracker {
     var activePackage: String = ""
         private set
 
+    var completedActivity: String = ""
+        private set
+
     var hasDispatchedInCurrentVisit: Boolean = false
+        private set
+
+    var leftCashierWindow: Boolean = false
+        private set
+
+    var lastResetReason: String = "初始会话"
         private set
 
     private var lastPaidCents: Long = 0L
     private var lastDiscountCents: Long = 0L
     private var lastHasExplicitOrderNo: Boolean = false
+    private var lastMerchantHint: String = ""
+    private var lastDispatchedAtMillis: Long = 0L
 
     @Synchronized
-    fun resetSession(): Boolean {
+    fun resetSession(reason: String = "手动或状态重置"): Boolean {
         val hadActive = activeVisitId != 0L || hasDispatchedInCurrentVisit
         activeVisitId = 0L
         activePackage = ""
+        completedActivity = ""
         hasDispatchedInCurrentVisit = false
+        leftCashierWindow = false
         lastPaidCents = 0L
         lastDiscountCents = 0L
         lastHasExplicitOrderNo = false
+        lastMerchantHint = ""
+        lastDispatchedAtMillis = 0L
+        lastResetReason = reason
         return hadActive
     }
+
+    /**
+     * 当焦点临时切到非白名单外部应用（如系统桌面 Launcher、默记 `com.moji.ai*` 查看账单）或内置电商宿主时调用：
+     * - 切回内置电商宿主（拼多多/淘宝/京东/美团等）代表已离开独立收银台回到购物端，立即重置会话；
+     * - 切去桌面、默记自身或其他普通应用时仅标记 `leftCashierWindow = true`，保留 10 分钟内切回同一未关闭完成页的防重记忆（`AC-1`）。
+     */
+    @Synchronized
+    fun onExternalAppFocused(packageName: String): Boolean {
+        if (activeVisitId == 0L && !hasDispatchedInCurrentVisit) return false
+        val pkg = packageName.trim()
+        if (pkg.isEmpty()) return false
+        if (CaptureWindowGuard.isBuiltinEcommerceHostPackage(pkg)) {
+            return resetSession("离开收银台返回电商宿主($pkg)")
+        }
+        if (pkg != activePackage) {
+            leftCashierWindow = true
+        }
+        return false
+    }
+
+    /**
+     * 当原收银台窗口被移除关闭且焦点回到同包非专用宿主页面（如关闭 `WxaLiteAppTransparentLiteUI` 回到 `AppBrandUI*`）时调用（`AC-2`）。
+     */
+    @Synchronized
+    fun onCashierWindowClosedToHost(): Boolean = resetSession("原收银台窗口关闭返回宿主")
 
     @Synchronized
     fun onContainerOrRejectTransition(
         packageName: String,
         containerRole: WindowContainerRole,
-        rejectReason: WindowRejectReason? = null
+        rejectReason: WindowRejectReason? = null,
+        verifiedActivity: String = ""
     ): Boolean {
         if (activeVisitId == 0L && !hasDispatchedInCurrentVisit) return false
-        if (packageName != activePackage) {
-            return resetSession()
+        if (CaptureWindowGuard.isNewPaymentInitiationActivity(packageName, verifiedActivity)) {
+            return resetSession("拉起新支付发起桥接页(${verifiedActivity.substringAfterLast('.')})")
         }
-        if (containerRole != WindowContainerRole.DEDICATED_PAYMENT_OR_BILL) {
-            return resetSession()
+        if (containerRole == WindowContainerRole.SENSITIVE_AUTH_BLOCKED) {
+            return resetSession("进入密码/生物核身窗口(${verifiedActivity.substringAfterLast('.')})")
         }
         if (rejectReason == WindowRejectReason.CASHIER_OR_UNPAID_STATE ||
             rejectReason == WindowRejectReason.SENSITIVE_AUTH_PAGE ||
-            rejectReason == WindowRejectReason.CLOSED_FAILED_OR_REFUND_PENDING ||
-            rejectReason == WindowRejectReason.NON_TRANSACTION_CONTAINER
+            rejectReason == WindowRejectReason.CLOSED_FAILED_OR_REFUND_PENDING
         ) {
-            return resetSession()
+            return resetSession("检测到新支付前置或关闭状态(${rejectReason.name})")
+        }
+        if (packageName != activePackage) {
+            if (CaptureWindowGuard.isBuiltinEcommerceHostPackage(packageName) &&
+                !CaptureWindowGuard.isEmbeddedAlipayCashierActivity(verifiedActivity)
+            ) {
+                return resetSession("切换至电商宿主页面($packageName)")
+            }
+            if (containerRole == WindowContainerRole.DEDICATED_PAYMENT_OR_BILL) {
+                return resetSession("切换至另一支付应用专用窗口($packageName)")
+            }
+            if (containerRole == WindowContainerRole.SHARED_OR_WEB_STRICT &&
+                (verifiedActivity.isNotBlank() || rejectReason == null)
+            ) {
+                return resetSession("切换至另一应用业务容器($packageName)")
+            }
+            leftCashierWindow = true
+            return false
+        }
+
+        // 同包内切去微信聊天主界面/朋友圈/账单列表（NON_TRANSACTION_BLOCKED）：小程序任务栈顶的收银台可能并未关闭，仅标记暂时离开
+        if (containerRole == WindowContainerRole.NON_TRANSACTION_BLOCKED ||
+            rejectReason == WindowRejectReason.NON_TRANSACTION_CONTAINER ||
+            rejectReason == WindowRejectReason.CHAT_FEED_OR_BILL_LIST
+        ) {
+            leftCashierWindow = true
+            return false
+        }
+
+        // 同包内回到共享业务宿主（如点击「完成/关闭」从 WxaLiteAppTransparentLiteUI 返回小程序 AppBrandUI*、WebViewUI 或支付宝 AlipayLogin）：立即重置会话
+        if (containerRole == WindowContainerRole.SHARED_OR_WEB_STRICT &&
+            (verifiedActivity.isNotBlank() || rejectReason == null)
+        ) {
+            return resetSession("关闭收银台返回宿主容器(${verifiedActivity.substringAfterLast('.')})")
         }
         return false
     }
@@ -103,28 +178,95 @@ internal class CashierVisitSessionTracker {
         packageName: String,
         rawText: String,
         hasExplicitOrderNo: Boolean,
-        forceManual: Boolean = false
+        forceManual: Boolean = false,
+        verifiedActivity: String = "",
+        nowMillis: Long = System.currentTimeMillis()
     ): LiveCashierDispatchDecision {
         if (forceManual) {
             val manualVisitId = ++visitSequence
-            return LiveCashierDispatchDecision(shouldDispatch = true, visitId = manualVisitId)
+            return LiveCashierDispatchDecision(
+                shouldDispatch = true,
+                visitId = manualVisitId,
+                sessionAction = "MANUAL_FORCE_VISIT",
+                lastResetReason = "控制中心磁贴手动触发"
+            )
         }
-        if (activeVisitId == 0L || activePackage != packageName) {
-            activeVisitId = ++visitSequence
-            activePackage = packageName
-            hasDispatchedInCurrentVisit = false
-            lastPaidCents = 0L
-            lastDiscountCents = 0L
-            lastHasExplicitOrderNo = false
+        if (hasDispatchedInCurrentVisit &&
+            lastDispatchedAtMillis > 0L &&
+            nowMillis - lastDispatchedAtMillis > REENTRY_TTL_MS
+        ) {
+            resetSession("超过10分钟会话防重TTL")
         }
 
         val (paidCents, discountCents) = extractQuickCashierPaidAndDiscountCents(rawText)
+        val merchantHint = extractQuickCashierMerchantHint(rawText)
+
+        if (activeVisitId != 0L && activePackage == packageName && hasDispatchedInCurrentVisit) {
+            val activityChanged = completedActivity.isNotBlank() &&
+                verifiedActivity.isNotBlank() &&
+                !completedActivity.equals(verifiedActivity, ignoreCase = true)
+            if (activityChanged) {
+                resetSession("收银台Activity变更(${completedActivity.substringAfterLast('.')}->${verifiedActivity.substringAfterLast('.')})")
+            } else if (leftCashierWindow) {
+                val samePaidAndDiscount = paidCents > 0L &&
+                    paidCents == lastPaidCents &&
+                    discountCents == lastDiscountCents
+                val sameMerchant = lastMerchantHint.isBlank() ||
+                    merchantHint.isBlank() ||
+                    lastMerchantHint.equals(merchantHint, ignoreCase = true)
+                val revealedNewOrderNo = !lastHasExplicitOrderNo && hasExplicitOrderNo
+                if (samePaidAndDiscount && sameMerchant && !revealedNewOrderNo) {
+                    leftCashierWindow = false
+                    return LiveCashierDispatchDecision(
+                        shouldDispatch = false,
+                        visitId = activeVisitId,
+                        sessionAction = "REUSED_UNCLOSED_MULTITASK_BLOCK",
+                        lastResetReason = lastResetReason
+                    )
+                } else if (samePaidAndDiscount && sameMerchant && revealedNewOrderNo) {
+                    leftCashierWindow = false
+                    lastHasExplicitOrderNo = true
+                    lastDispatchedAtMillis = nowMillis
+                    return LiveCashierDispatchDecision(
+                        shouldDispatch = true,
+                        visitId = activeVisitId,
+                        sessionAction = "ORDER_NO_REVEALED_IN_SAME_VISIT",
+                        lastResetReason = lastResetReason
+                    )
+                } else {
+                    resetSession("切回后实付金额或商户已变化，判定新订单")
+                }
+            }
+        }
+
+        if (activeVisitId == 0L || activePackage != packageName) {
+            activeVisitId = ++visitSequence
+            activePackage = packageName
+            completedActivity = verifiedActivity
+            hasDispatchedInCurrentVisit = false
+            leftCashierWindow = false
+            lastPaidCents = 0L
+            lastDiscountCents = 0L
+            lastHasExplicitOrderNo = false
+            lastMerchantHint = ""
+            lastDispatchedAtMillis = 0L
+        }
+
         if (!hasDispatchedInCurrentVisit) {
             hasDispatchedInCurrentVisit = true
+            leftCashierWindow = false
+            if (verifiedActivity.isNotBlank()) completedActivity = verifiedActivity
             lastPaidCents = paidCents
             lastDiscountCents = discountCents
             lastHasExplicitOrderNo = hasExplicitOrderNo
-            return LiveCashierDispatchDecision(shouldDispatch = true, visitId = activeVisitId)
+            lastMerchantHint = merchantHint
+            lastDispatchedAtMillis = nowMillis
+            return LiveCashierDispatchDecision(
+                shouldDispatch = true,
+                visitId = activeVisitId,
+                sessionAction = "NEW_VISIT_CREATED",
+                lastResetReason = lastResetReason
+            )
         }
 
         // 立减动画完成帧：首帧尚未刷出立减（discount=0），当前帧出现明确立减且实付低于首帧原价
@@ -138,13 +280,27 @@ internal class CashierVisitSessionTracker {
             if (paidCents > 0L) lastPaidCents = paidCents
             if (discountCents > 0L) lastDiscountCents = discountCents
             if (hasExplicitOrderNo) lastHasExplicitOrderNo = true
-            return LiveCashierDispatchDecision(shouldDispatch = true, visitId = activeVisitId)
+            if (merchantHint.isNotBlank()) lastMerchantHint = merchantHint
+            lastDispatchedAtMillis = nowMillis
+            return LiveCashierDispatchDecision(
+                shouldDispatch = true,
+                visitId = activeVisitId,
+                sessionAction = if (isPostDiscountAnimationFrame) "POST_DISCOUNT_ANIMATION_CALIBRATION" else "ORDER_NO_REVEALED_IN_SAME_VISIT",
+                lastResetReason = lastResetReason
+            )
         }
 
-        return LiveCashierDispatchDecision(shouldDispatch = false, visitId = activeVisitId)
+        return LiveCashierDispatchDecision(
+            shouldDispatch = false,
+            visitId = activeVisitId,
+            sessionAction = "SAME_VISIT_RESCAN_BLOCK",
+            lastResetReason = lastResetReason
+        )
     }
 
     companion object {
+        const val REENTRY_TTL_MS = 10 * 60_000L
+
         private val DISCOUNT_QUICK_REGEX = Regex(
             """(?:百次立减|随机立减|笔笔立减|支付立减|银行卡立减|碰一下立减|官方立减|支付优惠|立减优惠|已优惠|共减|优惠|立减|抵扣|减免)\s*(?:[:：,，\s]|\|)*\s*(?:[-−]\s*)?(?:¥|￥)?\s*(?:[-−]\s*)?([0-9]{1,5}(?:\.[0-9]{1,2})?)\s*元?"""
         )
@@ -155,6 +311,42 @@ internal class CashierVisitSessionTracker {
             """(?:¥|￥)\s*([0-9]{1,7}(?:\.[0-9]{1,2})?)|([0-9]{1,7}(?:\.[0-9]{1,2})?)\s*元"""
         )
         private val DISCOUNT_TOKEN_HINTS = listOf("优惠", "立减", "抵扣", "减免", "补贴", "红包", "代金券")
+        private val QUICK_MERCHANT_IGNORE_EXACT = setOf(
+            "支付成功", "付款成功", "交易成功", "扣款成功", "转账成功", "收款成功", "代付成功",
+            "完成", "关闭", "返回", "更多", "返回商家", "返回商户", "返回应用", "完成付款", "付款完成",
+            "点击给商家对账", "给商家对账", "出示给商家", "查看订单", "进入小程序",
+            "支付方式", "付款方式", "收款方式", "扣款方式", "商品", "商品说明", "收款方", "商户全称",
+            "微信支付", "微信", "零钱", "零钱通", "支付宝", "余额宝", "花呗", "蚂蚁花呗", "白条"
+        )
+
+        internal fun extractQuickCashierMerchantHint(rawText: String): String {
+            val segments = rawText
+                .replace(Regex("""\[AI_[A-Z0-9_]+\s*\|[^\]]+\]:\s*"""), "")
+                .split('|', '\n')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+            var skipNextPayValue = false
+            for (seg in segments) {
+                if (skipNextPayValue) {
+                    skipNextPayValue = false
+                    continue
+                }
+                if (seg in setOf("支付方式", "付款方式", "收款方式", "扣款方式")) {
+                    skipNextPayValue = true
+                    continue
+                }
+                if (seg.length !in 2..28 || seg in QUICK_MERCHANT_IGNORE_EXACT) continue
+                if (seg.startsWith("¥") || seg.startsWith("￥") || seg.startsWith("-") || seg.startsWith("+") || seg.startsWith("−")) continue
+                if (CURRENCY_QUICK_REGEX.containsMatchIn(seg) || seg.all { it.isDigit() || it == '.' || it == '-' || it == ':' }) continue
+                if (DISCOUNT_TOKEN_HINTS.any { seg.contains(it) }) continue
+                if (seg.contains("银行") || seg.contains("信用卡") || seg.contains("储蓄卡") || seg.contains("借记卡") ||
+                    seg.contains("尾号") || seg.contains("给商家对账") || seg.contains("出示给商家") ||
+                    seg.contains("返回商家") || seg.contains("返回商户") || seg.startsWith("202")
+                ) continue
+                return seg
+            }
+            return ""
+        }
 
         internal fun extractQuickCashierPaidAndDiscountCents(rawText: String): Pair<Long, Long> {
             val normalized = rawText
@@ -254,9 +446,43 @@ open class PaymentAccessibilityService : AccessibilityService() {
         private val PAGE_IDENTITY_TIME_REGEX = Regex(
             """(?:支付时间|付款时间|下单时间|拼单时间|创建时间|转账时间|收款时间|退款时间)\s*(?:[:：,，\s]|\|)*\s*(20\d{2}[-年/]\d{1,2}[-月/]\d{1,2}日?\s+\d{1,2}[:时]\d{2}(?:[:分]\d{2}秒?)?)"""
         )
-        private val PAGE_IDENTITY_AMOUNT_REGEX = Regex(
-            """(?:实付款|实付金额|合计实付|实扣|实付|应付总额|应付金额|应付款|需付款|合计|到手价|到手|支出|收入|付款|收款)\s*(?:[:：,，\s]|\|)*\s*(?:¥|￥)?\s*\d{1,7}(?:\.\d{1,2})?\s*[元)）]?|[-+−]?\d{1,7}\.\d{1,2}"""
+        private val PAGE_IDENTITY_STRONG_AMOUNT_REGEX = Regex(
+            """(?<!订单|不支持)(?:实付款|实付金额|合计实付|实际支付|实扣金额|实扣|实付)\s*(?:[:：,，\s]|\|)*\s*(?:¥|￥)?\s*\d{1,7}(?:\.\d{1,2})?\s*[元)）]?"""
         )
+        private val PAGE_IDENTITY_FALLBACK_AMOUNT_REGEX = Regex(
+            """(?:应付总额|应付金额|应付款|需付款|合计|到手价|到手|支出|收入|付款|收款)\s*(?:[:：,，\s]|\|)*\s*(?:¥|￥)?\s*\d{1,7}(?:\.\d{1,2})?\s*[元)）]?|[-+−]?\d{1,7}\.\d{1,2}"""
+        )
+
+        /**
+         * 生成包含「详情丰富度」的稳定页面指纹（`AC-4`）：
+         * - 仅提取显式标签后的真实订单号、下单/支付时间与优先强实付金额（忽略动态取餐码/排队进度/倒计时变化）；
+         * - 停留在同一小程序订单/取餐页 15s~10min 动态刷新时指纹恒定，0 重复触发；
+         * - 若用户点开「更多」新露出了订单号、支付方式或商品说明，指纹立即变化并触发原位增量补全。
+         */
+        internal fun extractStablePageIdentity(pkg: String, fullPageText: String): String {
+            val cleanText = com.moji.ai.ai.AiAccountingEngine.stripEcommerceRecommendationFooter(fullPageText)
+            val orders = PAGE_IDENTITY_ORDER_REGEX.findAll(cleanText)
+                .map { it.groupValues[1].trim() }
+                .filter { it.count { ch -> ch.isDigit() } >= 8 }
+                .distinct()
+                .joinToString(",")
+            val timeMatch = PAGE_IDENTITY_TIME_REGEX.find(cleanText)?.groupValues?.getOrNull(1).orEmpty()
+            val amtMatch = PAGE_IDENTITY_STRONG_AMOUNT_REGEX.find(cleanText)?.value
+                ?: PAGE_IDENTITY_FALLBACK_AMOUNT_REGEX.find(cleanText)?.value.orEmpty()
+            val detailFlags = buildString {
+                if (cleanText.contains("交易单号") || cleanText.contains("订单号") || cleanText.contains("订单编号") || cleanText.contains("转账单号")) append("O")
+                if (cleanText.contains("商户单号") || cleanText.contains("商家订单号")) append("M")
+                if (cleanText.contains("支付方式") || cleanText.contains("付款方式") || cleanText.contains("收款方式")) append("P")
+                if (cleanText.contains("商品说明") || cleanText.contains("商户全称") || cleanText.contains("收款方全称")) append("G")
+                if (cleanText.contains("下单时间") || cleanText.contains("拼单时间") || cleanText.contains("支付时间") || cleanText.contains("退款时间")) append("T")
+                if (cleanText.contains("合计") || cleanText.contains("到手") || cleanText.contains("共减")) append("D")
+            }
+            return if (orders.isNotBlank() || timeMatch.isNotBlank() || amtMatch.isNotBlank()) {
+                "$pkg|orders:$orders|time:$timeMatch|amt:$amtMatch|flags:$detailFlags"
+            } else {
+                "$pkg|${cleanText.take(200)}"
+            }
+        }
     }
 
     private data class CapturedWindowSnapshot(
@@ -311,6 +537,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
     }
 
     private val cashierVisitTracker = CashierVisitSessionTracker()
+    private val stablePageDedupTracker = StablePageDedupTracker()
     private var activePackage: String = ""
     private var activeVerifiedActivity: String = ""
     private var lastContentInspectMillis: Long = 0L
@@ -324,6 +551,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
         lastDispatchedMillis = 0L
         isCurrentlyOnBillDetailPage = false
         cashierVisitTracker.resetSession()
+        stablePageDedupTracker.clear()
     }
 
     private fun isAccessibilityAllowedForWindow(pkg: String, verifiedActivity: String): Boolean {
@@ -377,8 +605,25 @@ open class PaymentAccessibilityService : AccessibilityService() {
             (event.windowChanges and AccessibilityEvent.WINDOWS_CHANGE_REMOVED) != 0 &&
             event.windowId >= 0
         ) {
-            windowActivities.remove(event.windowId)
-            windowPackages.remove(event.windowId)
+            val removedAct = windowActivities.remove(event.windowId)
+            val removedPkg = windowPackages.remove(event.windowId)
+            if (!removedPkg.isNullOrBlank() &&
+                !removedAct.isNullOrBlank() &&
+                CaptureWindowGuard.classifyActivityContainer(removedPkg, removedAct) == WindowContainerRole.DEDICATED_PAYMENT_OR_BILL
+            ) {
+                val stillFocusedWin = resolveFocusedApplicationWindow()
+                val stillFocusedPkg = stillFocusedWin?.packageName?.takeIf { it !in systemOverlayPackages }
+                if (stillFocusedPkg == removedPkg) {
+                    val underlyingAct = stillFocusedWin.id.takeIf { it >= 0 }?.let { winId ->
+                        if (windowPackages[winId] == stillFocusedPkg) windowActivities[winId] else null
+                    }.orEmpty()
+                    if (underlyingAct.isNotBlank() &&
+                        CaptureWindowGuard.classifyActivityContainer(stillFocusedPkg, underlyingAct) == WindowContainerRole.SHARED_OR_WEB_STRICT
+                    ) {
+                        cashierVisitTracker.onCashierWindowClosedToHost()
+                    }
+                }
+            }
         }
 
         val app = applicationContext as? MoJiApp ?: return
@@ -419,7 +664,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
                     isCurrentlyOnBillDetailPage = false
                     lastDispatchedSignature = ""
                     lastDispatchedMillis = 0L
-                    cashierVisitTracker.resetSession()
+                    cashierVisitTracker.onExternalAppFocused(pkg)
                     clearScheduledProbes()
                 }
                 return
@@ -447,13 +692,32 @@ open class PaymentAccessibilityService : AccessibilityService() {
             }
 
             val currentRole = CaptureWindowGuard.classifyActivityContainer(pkg, activeVerifiedActivity)
-            if (cashierVisitTracker.onContainerOrRejectTransition(pkg, currentRole)) {
+            if (cashierVisitTracker.onContainerOrRejectTransition(
+                    packageName = pkg,
+                    containerRole = currentRole,
+                    verifiedActivity = activeVerifiedActivity
+                )
+            ) {
                 lastDispatchedSignature = ""
                 lastDispatchedMillis = 0L
             }
             if (currentRole == WindowContainerRole.SENSITIVE_AUTH_BLOCKED ||
                 currentRole == WindowContainerRole.NON_TRANSACTION_BLOCKED
             ) {
+                if (currentRole == WindowContainerRole.SENSITIVE_AUTH_BLOCKED) {
+                    CaptureDebugTraceStore.managerOrNull()?.recordWindowGuardBlocked(
+                        packageName = pkg,
+                        verifiedActivity = activeVerifiedActivity,
+                        structureFingerprint = "",
+                        whitelistAllowed = true,
+                        whitelistSummary = "宿主白名单已放行",
+                        containerRole = currentRole.name,
+                        guardRuleName = "SENSITIVE_AUTH_CONTAINER",
+                        detailReason = "敏感密码/生物核身容器前置阻断",
+                        sessionResetReason = cashierVisitTracker.lastResetReason,
+                        capturedAtMillis = now
+                    )
+                }
                 clearScheduledProbes()
                 isCurrentlyOnBillDetailPage = false
                 lastDispatchedSignature = ""
@@ -496,7 +760,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
                     isCurrentlyOnBillDetailPage = false
                     lastDispatchedSignature = ""
                     lastDispatchedMillis = 0L
-                    cashierVisitTracker.resetSession()
+                    cashierVisitTracker.onExternalAppFocused(focused)
                     clearScheduledProbes()
                     return
                 }
@@ -737,13 +1001,37 @@ open class PaymentAccessibilityService : AccessibilityService() {
         ) ?: return false
 
         if (!forceManual && (snapshot.blockedByContainer || snapshot.isSignatureBlocked)) {
+            if (snapshot.isSignatureBlocked) {
+                CaptureDebugTraceStore.managerOrNull()?.recordWindowGuardBlocked(
+                    packageName = pkg,
+                    verifiedActivity = snapshot.verifiedActivity,
+                    structureFingerprint = snapshot.structureFingerprint,
+                    whitelistAllowed = false,
+                    whitelistSummary = "命中用户手动屏蔽页面签名",
+                    containerRole = CaptureWindowGuard.classifyActivityContainer(pkg, snapshot.verifiedActivity).name,
+                    guardRuleName = "USER_BLOCKED_WINDOW_SIGNATURE",
+                    detailReason = "页面 5 层骨架指纹已被加入黑名单屏蔽",
+                    sessionResetReason = cashierVisitTracker.lastResetReason
+                )
+            }
             return false
         }
         if (snapshot.hasVisiblePasswordNode) {
-            if (cashierVisitTracker.resetSession()) {
+            if (cashierVisitTracker.resetSession("检测到可见密码输入节点")) {
                 lastDispatchedSignature = ""
                 lastDispatchedMillis = 0L
             }
+            CaptureDebugTraceStore.managerOrNull()?.recordWindowGuardBlocked(
+                packageName = pkg,
+                verifiedActivity = snapshot.verifiedActivity,
+                structureFingerprint = snapshot.structureFingerprint,
+                whitelistAllowed = true,
+                whitelistSummary = "宿主白名单已放行",
+                containerRole = CaptureWindowGuard.classifyActivityContainer(pkg, snapshot.verifiedActivity).name,
+                guardRuleName = "VISIBLE_PASSWORD_NODE",
+                detailReason = "检测到可见密码输入框节点，强制保护隐私",
+                sessionResetReason = cashierVisitTracker.lastResetReason
+            )
             if (forceManual) {
                 onManualBlocked?.invoke("当前为密码或身份核验敏感页面，已拦截识屏")
             }
@@ -778,10 +1066,28 @@ open class PaymentAccessibilityService : AccessibilityService() {
         )
 
         if (!eval.accepted) {
-            if (cashierVisitTracker.onContainerOrRejectTransition(pkg, eval.containerRole, eval.reason)) {
+            if (cashierVisitTracker.onContainerOrRejectTransition(
+                    packageName = pkg,
+                    containerRole = eval.containerRole,
+                    rejectReason = eval.reason,
+                    verifiedActivity = snapshot.verifiedActivity
+                )
+            ) {
                 lastDispatchedSignature = ""
                 lastDispatchedMillis = 0L
             }
+            CaptureDebugTraceStore.managerOrNull()?.recordWindowGuardBlocked(
+                packageName = pkg,
+                verifiedActivity = snapshot.verifiedActivity,
+                structureFingerprint = snapshot.structureFingerprint,
+                whitelistAllowed = true,
+                whitelistSummary = "宿主白名单已放行",
+                containerRole = eval.containerRole.name,
+                guardRuleName = eval.reason.name,
+                detailReason = eval.reason.summary,
+                rawTextSample = eval.sanitizedText.ifBlank { rawJoinedText },
+                sessionResetReason = cashierVisitTracker.lastResetReason
+            )
             if (forceManual && eval.reason in setOf(
                     WindowRejectReason.SENSITIVE_AUTH_PAGE,
                     WindowRejectReason.NON_TRANSACTION_CONTAINER,
@@ -818,6 +1124,8 @@ open class PaymentAccessibilityService : AccessibilityService() {
             pkg = pkg,
             verifiedActivity = snapshot.verifiedActivity,
             structureFingerprint = snapshot.structureFingerprint,
+            containerRole = eval.containerRole.name,
+            guardRuleName = if (eval.isLiveCashierFallback) "ACCEPTED_LIVE_CASHIER" else "ACCEPTED_BILL_WINDOW",
             captureSource = resolvedSource,
             hasExplicitOrderNo = eval.hasExplicitOrderNo,
             forceManual = forceManual
@@ -829,6 +1137,8 @@ open class PaymentAccessibilityService : AccessibilityService() {
         pkg: String,
         verifiedActivity: String = "",
         structureFingerprint: String = "",
+        containerRole: String = "",
+        guardRuleName: String = "",
         captureSource: String,
         screenshotPath: String = "",
         screenshotSha256: String = "",
@@ -836,28 +1146,80 @@ open class PaymentAccessibilityService : AccessibilityService() {
         forceManual: Boolean = false
     ): Boolean {
         val now = System.currentTimeMillis()
+        val pageIdentity = extractStablePageIdentity(pkg, fullPageText)
+        val resolvedRole = containerRole.ifBlank {
+            CaptureWindowGuard.classifyActivityContainer(pkg, verifiedActivity).name
+        }
+        val isDirectHostAllowed = CaptureAppWhitelistManager.isAccessibilityAllowed(pkg, this)
+        val whitelistSummary = if (isDirectHostAllowed) {
+            "应用无障碍白名单放行($pkg)"
+        } else {
+            "电商宿主内嵌支付宝专用收银台窄口放行"
+        }
+
         var cashierVisitId = 0L
+        var sessionAction = "STATELESS_PAGE_DISPATCH"
+        var sessionResetReason = cashierVisitTracker.lastResetReason
+
         if (captureSource == "AI_LIVE_CASHIER") {
             val visitDecision = cashierVisitTracker.evaluateLiveCashierFrame(
                 packageName = pkg,
                 rawText = fullPageText,
                 hasExplicitOrderNo = hasExplicitOrderNo,
-                forceManual = forceManual
+                forceManual = forceManual,
+                verifiedActivity = verifiedActivity,
+                nowMillis = now
             )
+            sessionAction = visitDecision.sessionAction
+            sessionResetReason = visitDecision.lastResetReason
             if (!visitDecision.shouldDispatch) {
+                val blockReasonText = if (visitDecision.sessionAction == "REUSED_UNCLOSED_MULTITASK_BLOCK") {
+                    "10分钟内多任务切回未关闭支付完成页，复用会话(visit=${visitDecision.visitId})静默防重拦截"
+                } else {
+                    "同一收银台会话(visit=${visitDecision.visitId})内停留或滚动复扫防重拦截"
+                }
+                CaptureDebugTraceStore.managerOrNull()?.recordWindowGuardBlocked(
+                    packageName = pkg,
+                    verifiedActivity = verifiedActivity,
+                    structureFingerprint = structureFingerprint,
+                    whitelistAllowed = true,
+                    whitelistSummary = whitelistSummary,
+                    containerRole = resolvedRole,
+                    guardRuleName = visitDecision.sessionAction,
+                    detailReason = blockReasonText,
+                    rawTextSample = fullPageText,
+                    cashierVisitId = visitDecision.visitId,
+                    sessionAction = visitDecision.sessionAction,
+                    sessionResetReason = visitDecision.lastResetReason,
+                    stablePageDedupHit = false,
+                    capturedAtMillis = now
+                )
                 return true
             }
             cashierVisitId = visitDecision.visitId
         } else {
-            val pageIdentity = extractStablePageIdentity(pkg, fullPageText)
-            if (!forceManual && pageIdentity == lastDispatchedSignature && (now - lastDispatchedMillis) < 15_000L) {
+            if (stablePageDedupTracker.shouldSkipDispatch(pageIdentity, forceManual = forceManual, nowMillis = now)) {
+                CaptureDebugTraceStore.managerOrNull()?.recordWindowGuardBlocked(
+                    packageName = pkg,
+                    verifiedActivity = verifiedActivity,
+                    structureFingerprint = structureFingerprint,
+                    whitelistAllowed = true,
+                    whitelistSummary = whitelistSummary,
+                    containerRole = resolvedRole,
+                    guardRuleName = "STABLE_PAGE_DEDUP_BLOCK",
+                    detailReason = "小程序/订单详情页稳定身份10分钟幂等锁拦截",
+                    rawTextSample = fullPageText,
+                    cashierVisitId = 0L,
+                    sessionAction = "STABLE_PAGE_DEDUP_HIT",
+                    sessionResetReason = sessionResetReason,
+                    stablePageDedupHit = true,
+                    capturedAtMillis = now
+                )
                 return true
             }
-            lastDispatchedSignature = pageIdentity
-            lastDispatchedMillis = now
+            sessionAction = "STABLE_PAGE_NEW_OR_ENRICHED"
         }
 
-        val pageIdentity = extractStablePageIdentity(pkg, fullPageText)
         lastDispatchedSignature = if (cashierVisitId > 0L) "$pageIdentity|visit:$cashierVisitId" else pageIdentity
         lastDispatchedMillis = now
         Log.d(
@@ -876,6 +1238,20 @@ open class PaymentAccessibilityService : AccessibilityService() {
         }
 
         val app = applicationContext as? MoJiApp ?: return false
+        val upstreamCtx = UpstreamWindowCaptureContext(
+            verifiedActivity = verifiedActivity,
+            structureFingerprint = structureFingerprint,
+            whitelistAllowed = true,
+            whitelistSummary = whitelistSummary,
+            containerRole = resolvedRole,
+            guardRuleName = guardRuleName.ifBlank {
+                if (captureSource == "AI_LIVE_CASHIER") "ACCEPTED_LIVE_CASHIER" else "ACCEPTED_BILL_WINDOW"
+            },
+            cashierVisitId = cashierVisitId,
+            sessionAction = sessionAction,
+            sessionResetReason = sessionResetReason,
+            stablePageDedupHit = false
+        )
         app.captureCoordinator.onRawFinancialEventCaptured(
             rawText = fullPageText,
             packageName = pkg,
@@ -883,7 +1259,9 @@ open class PaymentAccessibilityService : AccessibilityService() {
             screenshotPath = screenshotPath,
             screenshotSha256 = screenshotSha256,
             capturedAtMillis = now,
-            cashierVisitId = cashierVisitId
+            cashierVisitId = cashierVisitId,
+            verifiedActivity = verifiedActivity,
+            upstreamContext = upstreamCtx
         )
         return true
     }
@@ -1010,6 +1388,19 @@ open class PaymentAccessibilityService : AccessibilityService() {
                                     )
                                     if (!ocrEval.accepted) {
                                         BillScreenshotStorage.deleteIfExists(savedScreenshot?.absolutePath)
+                                        CaptureDebugTraceStore.managerOrNull()?.recordWindowGuardBlocked(
+                                            packageName = pkg,
+                                            verifiedActivity = currentAct,
+                                            structureFingerprint = expectedFingerprint,
+                                            whitelistAllowed = true,
+                                            whitelistSummary = "宿主白名单已放行(OCR兜底)",
+                                            containerRole = ocrEval.containerRole.name,
+                                            guardRuleName = "OCR_${ocrEval.reason.name}",
+                                            detailReason = "OCR回退未通过门禁：${ocrEval.reason.summary}",
+                                            rawTextSample = orderedText,
+                                            sessionResetReason = cashierVisitTracker.lastResetReason,
+                                            capturedAtMillis = capturedAtMillis
+                                        )
                                         if (isManualTrigger) {
                                             val msg = "屏幕未满足有效账单要素（${ocrEval.reason.summary}）"
                                             if (onResultMessage == null) {
@@ -1030,6 +1421,8 @@ open class PaymentAccessibilityService : AccessibilityService() {
                                         pkg = pkg,
                                         verifiedActivity = currentAct,
                                         structureFingerprint = expectedFingerprint,
+                                        containerRole = ocrEval.containerRole.name,
+                                        guardRuleName = if (ocrEval.isLiveCashierFallback) "OCR_ACCEPTED_LIVE_CASHIER" else "OCR_ACCEPTED_BILL_WINDOW",
                                         captureSource = resolvedOcrSource,
                                         screenshotPath = savedScreenshot?.absolutePath.orEmpty(),
                                         screenshotSha256 = savedScreenshot?.sha256.orEmpty(),
@@ -1534,36 +1927,6 @@ open class PaymentAccessibilityService : AccessibilityService() {
         }
     }
 
-    /**
-     * 生成包含「详情丰富度」的稳定页面指纹：
-     * - 仅提取显式标签后的真实订单号（排除拼多多图片文件名/MD5 哈希，防止滚动页面时因图片哈希变化重复触发）；
-     * - 如果停留在同一账单页且未展开任何新字段，指纹不变，0 重复触发；
-     * - 如果用户在账单详情页点开了「更多 / 查看更多订单信息」（新露出了订单号、商家订单号、支付时间、商品说明或付款方式），指纹立即变化并触发增量详情补全！
-     */
-    private fun extractStablePageIdentity(pkg: String, fullPageText: String): String {
-        val cleanText = stripEcommerceRecommendationFooter(fullPageText)
-        val orders = PAGE_IDENTITY_ORDER_REGEX.findAll(cleanText)
-            .map { it.groupValues[1].trim() }
-            .filter { it.count { ch -> ch.isDigit() } >= 10 }
-            .distinct()
-            .joinToString(",")
-        val timeMatch = PAGE_IDENTITY_TIME_REGEX.find(cleanText)?.groupValues?.getOrNull(1).orEmpty()
-        val amtMatch = PAGE_IDENTITY_AMOUNT_REGEX.find(cleanText)?.value.orEmpty()
-        val detailFlags = buildString {
-            if (cleanText.contains("交易单号") || cleanText.contains("订单号") || cleanText.contains("订单编号") || cleanText.contains("转账单号")) append("O")
-            if (cleanText.contains("商户单号") || cleanText.contains("商家订单号")) append("M")
-            if (cleanText.contains("支付方式") || cleanText.contains("付款方式") || cleanText.contains("收款方式")) append("P")
-            if (cleanText.contains("商品说明") || cleanText.contains("商户全称") || cleanText.contains("收款方全称")) append("G")
-            if (cleanText.contains("下单时间") || cleanText.contains("拼单时间") || cleanText.contains("支付时间") || cleanText.contains("退款时间")) append("T")
-            if (cleanText.contains("合计") || cleanText.contains("到手") || cleanText.contains("共减")) append("D")
-        }
-        return if (orders.isNotBlank() || timeMatch.isNotBlank() || amtMatch.isNotBlank()) {
-            "$pkg|orders:$orders|time:$timeMatch|amt:$amtMatch|flags:$detailFlags"
-        } else {
-            "$pkg|${cleanText.take(200)}"
-        }
-    }
-
     override fun onInterrupt() {
         clearScheduledProbes()
     }
@@ -1571,6 +1934,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         clearScheduledProbes()
         cashierVisitTracker.resetSession()
+        stablePageDedupTracker.clear()
         windowActivities.clear()
         windowPackages.clear()
         if (instance === this) {
@@ -1583,6 +1947,7 @@ open class PaymentAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         clearScheduledProbes()
         cashierVisitTracker.resetSession()
+        stablePageDedupTracker.clear()
         windowActivities.clear()
         windowPackages.clear()
         mainHandler.removeCallbacksAndMessages(null)
@@ -1597,5 +1962,70 @@ open class PaymentAccessibilityService : AccessibilityService() {
             _isConnectedFlow.value = false
         }
         super.onDestroy()
+    }
+}
+
+/**
+ * 小程序/订单详情页长时停留与往返防重追踪器（`AC-4`）：
+ * - 对携带明确订单号或下单/支付时间的结构化页面身份保留 10 分钟幂等锁，杜绝在小程序取餐页停留 >15s 且取餐码/制作状态动态刷新时重复派发或重复弹通知；
+ * - 对无单号无时间的普通文本回退保留 15 秒防抖；
+ * - 若点开「更多」露出了新字段，或下了第二笔单（单号/时间/实付变化），`pageIdentity` 立即改变并正常放行。
+ */
+internal class StablePageDedupTracker {
+    companion object {
+        const val STRUCTURED_PAGE_TTL_MS = 10 * 60_000L
+        const val FALLBACK_PAGE_TTL_MS = 15_000L
+        private const val MAX_ENTRIES = 64
+    }
+
+    private val recentIdentities = LinkedHashMap<String, Long>(32, 0.75f, true)
+
+    @Synchronized
+    fun clear() {
+        recentIdentities.clear()
+    }
+
+    @Synchronized
+    fun shouldSkipDispatch(
+        pageIdentity: String,
+        forceManual: Boolean = false,
+        nowMillis: Long = System.currentTimeMillis()
+    ): Boolean {
+        val iter = recentIdentities.entries.iterator()
+        while (iter.hasNext()) {
+            val entry = iter.next()
+            val ttl = ttlForIdentity(entry.key)
+            if (nowMillis - entry.value > ttl) {
+                iter.remove()
+            }
+        }
+
+        if (!forceManual) {
+            val lastSeen = recentIdentities[pageIdentity]
+            if (lastSeen != null && nowMillis - lastSeen <= ttlForIdentity(pageIdentity)) {
+                return true
+            }
+        }
+
+        if (recentIdentities.size >= MAX_ENTRIES) {
+            val eldestKey = recentIdentities.keys.firstOrNull()
+            if (eldestKey != null) {
+                recentIdentities.remove(eldestKey)
+            }
+        }
+        recentIdentities[pageIdentity] = nowMillis
+        return false
+    }
+
+    private fun ttlForIdentity(identity: String): Long {
+        val hasStructuredOrder = identity.contains("|orders:") &&
+            !identity.substringAfter("|orders:").startsWith("|")
+        val hasStructuredTime = identity.contains("|time:") &&
+            !identity.substringAfter("|time:").startsWith("|")
+        return if (hasStructuredOrder || hasStructuredTime) {
+            STRUCTURED_PAGE_TTL_MS
+        } else {
+            FALLBACK_PAGE_TTL_MS
+        }
     }
 }

@@ -24,6 +24,7 @@ import com.moji.ai.data.repository.LedgerRepository
 import com.moji.ai.notification.DailyReminderScheduler
 import com.moji.ai.notification.SilentBookkeepingNotifier
 import com.moji.ai.service.BillScreenshotStorage
+import com.moji.ai.service.CaptureDebugTraceStore
 import com.moji.ai.service.CapturePipelineCoordinator
 import com.moji.ai.update.AppUpdateManager
 import com.moji.ai.widget.MoJiLedgerWidgetUpdater
@@ -137,6 +138,7 @@ class MoJiApp : Application() {
         database = AppDatabase.getInstance(this)
         repository = LedgerRepository(database)
         aiConfigManager = AiConfigManager(this)
+        CaptureDebugTraceStore.init(this, aiConfigManager)
         merchantMemoryManager = MerchantMemoryManager(this)
         smartRuleEngine = SmartRuleEngine(this)
         aiEngine = AiAccountingEngine(aiConfigManager, merchantMemoryManager)
@@ -147,7 +149,8 @@ class MoJiApp : Application() {
             repository = repository,
             aiEngine = aiEngine,
             notifier = notifier,
-            smartRuleEngine = smartRuleEngine
+            smartRuleEngine = smartRuleEngine,
+            debugTraceStore = CaptureDebugTraceStore.managerOrNull()
         )
         registerSyncedPreferenceListeners()
 

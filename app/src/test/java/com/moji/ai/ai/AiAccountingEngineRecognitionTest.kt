@@ -479,4 +479,130 @@ class AiAccountingEngineRecognitionTest {
         assertNotNull(matchedHuabei)
         assertEquals(6L, matchedHuabei!!.id)
     }
+
+    @Test
+    fun ac6_creditCardReturnAndReversalNotifications_parseAsRefundOffsetAndNeverFallThroughToExpense() {
+        val orderTime = Calendar.getInstance().apply {
+            set(2026, Calendar.NOVEMBER, 26, 19, 12, 15)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val refundTime = orderTime + 25 * 60_000L // 19:37:15
+
+        val nayukiOrder1 = TransactionEntity(
+            id = 201L,
+            type = TransactionType.EXPENSE,
+            amountCents = 1_980L,
+            amountCnyCents = 1_980L,
+            category = "餐饮-奶茶果茶",
+            merchant = "奈雪的茶",
+            sourceWalletId = 4L,
+            timestamp = orderTime
+        )
+
+        // 1. 招行掌上生活 cmb.pb 信用卡标准「退货」通知（无书名号【招商银行】，仅靠包名 cmb.pb + 尾号3354 + 退货）
+        val cmbReturnPush = "[AI_NOTIFICATION | cmb.pb]: 交易提醒 | 您尾号3354的信用卡11月26日19:37在财付通-奈雪的茶退货人民币19.80元"
+        val parsedCmbReturn = engine.localSmartFallbackParse(
+            rawText = cmbReturnPush,
+            sourceAppPackage = "cmb.pb",
+            wallets = testWallets,
+            recentExpenses = listOf(nayukiOrder1),
+            referenceMillis = refundTime,
+            captureMode = "AI_NOTIFICATION"
+        )
+        assertNotNull(parsedCmbReturn)
+        assertEquals("CMB '退货' push must NEVER be recorded as EXPENSE", TransactionType.REFUND_OFFSET.name, parsedCmbReturn!!.type)
+        assertEquals(19.80, parsedCmbReturn.amount, 0.001)
+        assertEquals("招商银行信用卡(3354)", parsedCmbReturn.paymentMethodRaw)
+        assertEquals(4L, parsedCmbReturn.targetWalletId)
+        assertNull(parsedCmbReturn.sourceWalletId)
+        assertEquals("Must auto-link and offset the 19:12 Nayuki expense", 201L, parsedCmbReturn.relatedExpenseId)
+
+        // 2. 覆盖其余银行/小程序退款词：已退款 / 已退单 / 退款到账 / 退款通知 / 消费撤销 / 交易冲正 / 冲正
+        val refundSamples = listOf(
+            "【招商银行】您尾号3354信用卡11月26日19:37消费撤销人民币19.80元（财付通-奈雪的茶）" to "com.android.mms",
+            "【招商银行】您尾号3354信用卡11月26日19:37交易冲正人民币19.80元" to "com.android.mms",
+            "交易提醒 | 尾号3354个人消费卡冲正19.80元" to "cmb.pb",
+            "退款通知 | 奈雪的茶订单已退款19.80元，将退回招商银行信用卡(3354)" to "com.tencent.mm",
+            "服务通知 | 奈雪的茶 | 已退单 | 退款到账 ¥19.80 | 退回支付卡(3354)" to "com.tencent.mm"
+        )
+        for ((sampleText, pkg) in refundSamples) {
+            val parsed = engine.localSmartFallbackParse(
+                rawText = sampleText,
+                sourceAppPackage = pkg,
+                wallets = testWallets,
+                recentExpenses = listOf(nayukiOrder1),
+                referenceMillis = refundTime,
+                captureMode = "AI_NOTIFICATION"
+            )
+            assertNotNull("Refund sample should parse: $sampleText", parsed)
+            assertEquals("Sample must be REFUND_OFFSET: $sampleText", TransactionType.REFUND_OFFSET.name, parsed!!.type)
+            assertEquals(19.80, parsed.amount, 0.001)
+        }
+
+        // 3. 反例必测：含「7天无理由退货 / 退货包运费 / 无理由退货 / 申请退款 / 支持退货」的正向消费订单必须识别为 EXPENSE，绝不误判为退款！
+        val forwardOrderWithSafeguards = "[AI_ACCESSIBILITY | com.xunmeng.pinduoduo]: 订单详情 | 交易成功 | 蓝月亮官方旗舰店 | 深层洁净洗衣液 | 7天无理由退货 | 退货包运费 | 无理由退货 | 支持7天退货 | 实付 ¥29.90 | 订单编号 261126-112233445566 | 支付时间 2026-11-26 19:20:00 | 支付方式 微信支付 | 申请退款"
+        val parsedForward = engine.localSmartFallbackParse(
+            rawText = forwardOrderWithSafeguards,
+            sourceAppPackage = "com.xunmeng.pinduoduo",
+            wallets = testWallets,
+            recentExpenses = listOf(nayukiOrder1),
+            referenceMillis = refundTime,
+            captureMode = "AI_ACCESSIBILITY"
+        )
+        assertNotNull(parsedForward)
+        assertEquals("Forward order with '7天无理由退货 / 申请退款' must stay EXPENSE", TransactionType.EXPENSE.name, parsedForward!!.type)
+        assertEquals(29.90, parsedForward.amount, 0.001)
+    }
+
+    @Test
+    fun ac7_actualPaidStrictlyPrioritizedOverTotalSummary_andStandaloneCancelledOrderBlockedInEngine() {
+        val refTime = Calendar.getInstance().apply {
+            set(2026, Calendar.NOVEMBER, 26, 19, 38, 25)
+            set(Calendar.MILLISECOND, 0)
+        }.timeInMillis
+
+        // 1. 小程序页上方写「实付 ¥19.80」，下方商品区写原价小计「合计 ¥26.00」-> 必须严格锁定实付 19.80，严禁被下方合计覆盖！
+        val miniProgramOrderUpperPaidLowerTotal = "[AI_ACCESSIBILITY | com.tencent.mm | act=com.tencent.mm.plugin.appbrand.ui.AppBrandUI00]: 奈雪的茶 | 制作中 | 取餐码 A086 | 实付 ¥19.80 | 霸气茉莉初雪 ×1 | ¥26.00 | 优惠券 -¥6.20 | 合计 ¥26.00 | 订单号 NY20261126193818 | 下单时间 2026-11-26 19:38:18 | 支付方式 微信支付"
+        val parsedPaidFirst = engine.localSmartFallbackParse(
+            rawText = miniProgramOrderUpperPaidLowerTotal,
+            sourceAppPackage = "com.tencent.mm",
+            wallets = testWallets,
+            recentExpenses = emptyList(),
+            referenceMillis = refTime,
+            captureMode = "AI_ACCESSIBILITY"
+        )
+        assertNotNull(parsedPaidFirst)
+        assertEquals(TransactionType.EXPENSE.name, parsedPaidFirst!!.type)
+        assertEquals("Strong '实付' must beat trailing '合计'", 19.80, parsedPaidFirst.amount, 0.001)
+        assertEquals(620L, parsedPaidFirst.discountCents)
+
+        // 2. 仅有弱汇总标签（应付总额 / 合计）而无「实付」标签时，正常回退提取弱汇总金额
+        val weakSummaryOnly = "[AI_ACCESSIBILITY | com.tencent.mm | act=com.tencent.mm.plugin.appbrand.ui.AppBrandUI00]: 喜茶GO | 已完成 | 多肉葡萄 ×1 | 合计 ¥18.50 | 订单编号 HY20261126190011 | 下单时间 2026-11-26 19:00:11 | 支付方式 微信支付"
+        val parsedWeakOnly = engine.localSmartFallbackParse(
+            rawText = weakSummaryOnly,
+            sourceAppPackage = "com.tencent.mm",
+            wallets = testWallets,
+            recentExpenses = emptyList(),
+            referenceMillis = refTime,
+            captureMode = "AI_ACCESSIBILITY"
+        )
+        assertNotNull(parsedWeakOnly)
+        assertEquals(18.50, parsedWeakOnly!!.amount, 0.001)
+
+        // 3. 即使绕过窗口门禁直接送入引擎，独立状态为「已取消 / 已退单 / 取消成功 / 退款中」的小程序页面也必须返回 null
+        for (blockedState in listOf("已取消", "取消成功", "已退单", "退款中")) {
+            val cancelledRaw = "[AI_ACCESSIBILITY | com.tencent.mm | act=com.tencent.mm.plugin.appbrand.ui.AppBrandUI00]: 奈雪的茶 | $blockedState | 霸气茉莉初雪 | 实付 ¥19.80 | 订单号 NY20261126191215 | 下单时间 2026-11-26 19:12:15"
+            assertNull(
+                "Engine must reject standalone '$blockedState' order page",
+                engine.localSmartFallbackParse(
+                    rawText = cancelledRaw,
+                    sourceAppPackage = "com.tencent.mm",
+                    wallets = testWallets,
+                    recentExpenses = emptyList(),
+                    referenceMillis = refTime,
+                    captureMode = "AI_ACCESSIBILITY"
+                )
+            )
+        }
+    }
 }
