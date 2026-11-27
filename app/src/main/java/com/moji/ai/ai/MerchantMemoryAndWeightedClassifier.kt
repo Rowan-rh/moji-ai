@@ -471,59 +471,91 @@ object WeightedCategoryClassifier {
             .toSet()
     }
 
+    data class WeightedClassificationDetail(
+        val category: String,
+        val confidence: Float,
+        val bestScore: Int,
+        val matchedKeywords: List<String>,
+        val excludedCategories: List<String>
+    )
+
     fun classifyExpense(rawText: String, merchant: String = ""): Pair<String, Float> {
+        val detail = classifyExpenseDetailed(rawText, merchant)
+        return detail.category to detail.confidence
+    }
+
+    fun classifyExpenseDetailed(rawText: String, merchant: String = ""): WeightedClassificationDetail {
         val combined = "$merchant $rawText"
         val activeExpenseCats = CategoryCatalog.expenseCategories
         var bestCategory = activeExpenseCats.firstOrNull()?.name ?: "餐饮"
         var bestScore = 0
-        val excludedCategories = mutableSetOf<String>()
+        var bestKeywords = emptyList<String>()
+        val excludedCategories = LinkedHashSet<String>()
 
         for (rule in rules) {
-            if (rule.excludeKeywords.any { combined.contains(it, ignoreCase = true) }) {
-                excludedCategories.add(rule.category)
+            val hitExclude = rule.excludeKeywords.firstOrNull { combined.contains(it, ignoreCase = true) }
+            if (hitExclude != null) {
+                excludedCategories.add("${rule.category}(排除:$hitExclude)")
                 continue
             }
             var score = 0
+            val matchedForRule = ArrayList<String>()
             rule.strongKeywords.forEach { kw ->
-                if (combined.contains(kw, ignoreCase = true)) score += 10
+                if (combined.contains(kw, ignoreCase = true)) {
+                    score += 10
+                    matchedForRule.add("强信号:$kw(+10)")
+                }
             }
             rule.brandKeywords.forEach { kw ->
-                if (combined.contains(kw, ignoreCase = true)) score += 8
+                if (combined.contains(kw, ignoreCase = true)) {
+                    score += 8
+                    matchedForRule.add("品牌词:$kw(+8)")
+                }
             }
             rule.itemKeywords.forEach { kw ->
-                if (combined.contains(kw, ignoreCase = true)) score += 6
+                if (combined.contains(kw, ignoreCase = true)) {
+                    score += 6
+                    matchedForRule.add("品类词:$kw(+6)")
+                }
             }
             if (score > bestScore) {
                 bestScore = score
                 bestCategory = rule.category
+                bestKeywords = matchedForRule
             }
         }
+
+        val excludedCatNames = excludedCategories.mapTo(hashSetOf()) { it.substringBefore("(") }
 
         // 动态感知用户在 CategoryCatalog 中新增的自定义一级/二级分类名称（不绕过 excludeKeywords，也不覆盖已命中的内置默认规则）
         for (cat in activeExpenseCats) {
             for (sub in cat.subCategories) {
                 val fullSub = "${cat.name}-${sub.name}"
-                if (fullSub in excludedCategories) continue
+                if (fullSub in excludedCatNames) continue
                 val isCustomSub = sub.name !in defaultExpenseSubNames
                 if (sub.name.length >= 2 && combined.contains(sub.name, ignoreCase = true)) {
                     if (isCustomSub && (bestScore == 0 || bestCategory == cat.name || bestCategory.startsWith("${cat.name}-"))) {
                         bestScore = maxOf(bestScore, 14)
                         bestCategory = fullSub
+                        bestKeywords = listOf("自定义子类:${sub.name}(+14)")
                     } else if (bestScore == 0) {
                         bestScore = 10
                         bestCategory = fullSub
+                        bestKeywords = listOf("目录子类:${sub.name}(+10)")
                     }
                 }
             }
-            if (cat.name in excludedCategories) continue
+            if (cat.name in excludedCatNames) continue
             val isCustomMain = cat.name !in defaultExpenseMainNames
             if (cat.name.length >= 2 && combined.contains(cat.name, ignoreCase = true)) {
                 if (isCustomMain && bestScore < 11) {
                     bestScore = 11
                     bestCategory = cat.name
+                    bestKeywords = listOf("自定义主类:${cat.name}(+11)")
                 } else if (bestScore == 0) {
                     bestScore = 8
                     bestCategory = cat.name
+                    bestKeywords = listOf("目录主类:${cat.name}(+8)")
                 }
             }
         }
@@ -556,6 +588,12 @@ object WeightedCategoryClassifier {
             bestScore >= 6 -> 0.88f
             else -> 0.80f
         }
-        return bestCategory to confidence
+        return WeightedClassificationDetail(
+            category = bestCategory,
+            confidence = confidence,
+            bestScore = bestScore,
+            matchedKeywords = bestKeywords,
+            excludedCategories = excludedCategories.toList()
+        )
     }
 }

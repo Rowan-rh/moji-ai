@@ -160,8 +160,13 @@ import com.moji.ai.data.model.TransactionType
 import com.moji.ai.data.model.UserProfileConfig
 import com.moji.ai.data.model.UserProfileManager
 import com.moji.ai.service.AccessibilityHealthState
+import com.moji.ai.service.CaptureDebugTraceEntry
+import com.moji.ai.service.CaptureDebugTraceStore
 import com.moji.ai.service.CaptureEventOutcome
 import com.moji.ai.service.CaptureObservabilityLogEntry
+import com.moji.ai.service.DebugTraceOutcome
+import com.moji.ai.service.DebugTraceQuotaTier
+import com.moji.ai.service.DebugTraceStorageStats
 import com.moji.ai.service.PaymentAccessibilityService
 import com.moji.ai.service.RomKeepAliveGuideHelper
 import com.moji.ai.update.AppUpdateConfig
@@ -170,6 +175,7 @@ import com.moji.ai.update.ReleaseUpdateInfo
 import com.moji.ai.update.UpdateCheckState
 import com.moji.ai.ui.components.AgentTriageBottomSheet
 import com.moji.ai.ui.components.ICostCalculatorSheet
+import com.moji.ai.ui.components.ICostConfirmDialog
 import com.moji.ai.ui.components.MonthlyCalendarSheet
 import com.moji.ai.ui.components.TransactionDetailSheet
 import com.moji.ai.ui.screens.AppLockUnlockOverlay
@@ -211,7 +217,9 @@ import com.moji.ai.ui.theme.formatMoneyCents
 import com.moji.ai.ui.theme.iCostHorizontalSwipeTrigger
 import com.moji.ai.ui.theme.iCostPressScale
 import com.moji.ai.ui.theme.preloadAllICostAssets
+import java.text.SimpleDateFormat
 import java.util.Calendar
+import java.util.Date
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -265,6 +273,20 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
     val triageReport by viewModel.triageReport.collectAsState()
     val isTriaging by viewModel.isTriaging.collectAsState()
     val showAgentTriageSheet by viewModel.showAgentTriageSheet.collectAsState()
+    val debugTraceStats by viewModel.debugTraceStats.collectAsState()
+    val mainUiScope = rememberCoroutineScope()
+    var showDebugTraceViewerSheet by remember { mutableStateOf(false) }
+    var showClearDebugTraceConfirm by remember { mutableStateOf(false) }
+
+    val exportDebugTraceLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/octet-stream")
+    ) { targetUri ->
+        if (targetUri != null) {
+            mainUiScope.launch {
+                viewModel.exportDebugTracesToUri(targetUri)
+            }
+        }
+    }
 
     var selectedTab by rememberSaveable { mutableIntStateOf(0) } // 0: 账本, 1: 资产, 2: 统计
     // 每个 Tab 独立保存 rememberSaveable 状态（搜索词、折叠状态、统计周期等），切换 Tab 回来不丢失
@@ -1009,6 +1031,16 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 observabilityLogs = observabilityLogs,
                 onReplayLog = { entry -> viewModel.simulateCapturedEvent(entry.rawText, entry.packageName) },
                 onClearLogs = { viewModel.clearObservabilityLogs() },
+                debugTraceStats = debugTraceStats,
+                onRefreshDebugTraceStats = { viewModel.refreshDebugTraceStats() },
+                onToggleDebugTrace = { enabled -> viewModel.setDebugTraceEnabled(enabled) },
+                onSelectDebugQuotaTier = { tier -> viewModel.setDebugTraceQuotaTier(tier) },
+                onOpenDebugTraceViewer = { showDebugTraceViewerSheet = true },
+                onExportDebugTraceJsonl = {
+                    val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.CHINA).format(Date())
+                    exportDebugTraceLauncher.launch("moji_capture_debug_traces_$stamp.jsonl")
+                },
+                onRequestClearDebugTraces = { showClearDebugTraceConfirm = true },
                 onOpenAgentTriage = { viewModel.openAgentTriageSheet() },
                 onBack = { showSmartBookkeepingPage = false }
             )
@@ -1096,7 +1128,9 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                     },
                     onDuplicate = { tx -> viewModel.duplicateTransactionNow(tx) },
                     allTransactions = transactions,
-                    onInspectRelatedTransaction = { relTx -> inspectingTx = relTx }
+                    onInspectRelatedTransaction = { relTx -> inspectingTx = relTx },
+                    onLoadProvenance = { targetTx -> viewModel.loadTransactionProvenance(targetTx) },
+                    onShowMessage = { msg -> viewModel.showUiMessage(msg) }
                 )
             }
         }
@@ -1167,6 +1201,39 @@ fun MoJiMainScreen(viewModel: MainViewModel) {
                 onApplySelected = { bills, newCats, newRules, newMemories ->
                     viewModel.applyAgentTriageProposal(bills, newCats, newRules, newMemories)
                 }
+            )
+        }
+
+        if (showDebugTraceViewerSheet) {
+            ICostSmoothBottomSheet(
+                onDismissRequest = { showDebugTraceViewerSheet = false },
+                containerColor = ICostBgGray,
+                showDragHandle = false
+            ) { requestDismiss ->
+                CaptureDebugTraceViewerSheetContent(
+                    stats = debugTraceStats,
+                    onLoadTraces = { viewModel.loadAllDebugTraces() },
+                    onExportJsonl = {
+                        val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.CHINA).format(Date())
+                        exportDebugTraceLauncher.launch("moji_capture_debug_traces_$stamp.jsonl")
+                    },
+                    onRequestClear = { showClearDebugTraceConfirm = true },
+                    onShowMessage = { msg -> viewModel.showUiMessage(msg) },
+                    onClose = requestDismiss
+                )
+            }
+        }
+
+        if (showClearDebugTraceConfirm) {
+            ICostConfirmDialog(
+                title = "清空识账推理日志？",
+                message = "清空后将永久删除本地已录制的 ${debugTraceStats.entryCount} 条（${debugTraceStats.usedMbText} MB）推理轨迹，已入账的真实账单不受任何影响。",
+                confirmText = "确认清空",
+                onConfirm = {
+                    showClearDebugTraceConfirm = false
+                    viewModel.clearDebugTraces()
+                },
+                onDismiss = { showClearDebugTraceConfirm = false }
             )
         }
         // AI 静默识账沙盒测试面板
@@ -2100,10 +2167,20 @@ private fun ICostSmartBookkeepingFullScreen(
     observabilityLogs: List<CaptureObservabilityLogEntry> = emptyList(),
     onReplayLog: (CaptureObservabilityLogEntry) -> Unit = {},
     onClearLogs: () -> Unit = {},
+    debugTraceStats: DebugTraceStorageStats = DebugTraceStorageStats(),
+    onRefreshDebugTraceStats: () -> Unit = {},
+    onToggleDebugTrace: (Boolean) -> Unit = {},
+    onSelectDebugQuotaTier: (DebugTraceQuotaTier) -> Unit = {},
+    onOpenDebugTraceViewer: () -> Unit = {},
+    onExportDebugTraceJsonl: () -> Unit = {},
+    onRequestClearDebugTraces: () -> Unit = {},
     onOpenAgentTriage: () -> Unit = {},
     onBack: () -> Unit
 ) {
     BackHandler(onBack = onBack)
+    LaunchedEffect(Unit) {
+        onRefreshDebugTraceStats()
+    }
     val context = LocalContext.current
     val resumeTick = rememberResumeTick()
     val isAccessibilityBound by PaymentAccessibilityService.isConnectedFlow.collectAsState()
@@ -2435,6 +2512,229 @@ private fun ICostSmartBookkeepingFullScreen(
                                 }
                                 if (idx < visibleMemories.lastIndex) {
                                     HorizontalDivider(color = ICostDivider)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 识账调试模式（AC-1 / AC-4 / AC-5.1：默认关闭、4档环形空间配额、本地留存与一键导出）
+            item {
+                SettingsSectionTitle("诊断与调试")
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = ICostCardWhite,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                        SmartSwitchRow(
+                            title = "识账调试模式",
+                            subtitle = "开启后记录 6 步详细推理过程，用于排查异常账单来源",
+                            checked = debugTraceStats.enabled,
+                            onCheckedChange = onToggleDebugTrace
+                        )
+
+                        if (debugTraceStats.enabled) {
+                            HorizontalDivider(color = ICostDivider)
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Text(
+                                    text = "日志空间上限（触顶按 FIFO 自动淘汰最旧 20%）",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = ICostTextSecondary
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    DebugTraceQuotaTier.entries.forEach { tier ->
+                                        val isSelected = debugTraceStats.tier == tier
+                                        Surface(
+                                            shape = RoundedCornerShape(12.dp),
+                                            color = if (isSelected) ICostBlueAccent else ICostBgGray,
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .iCostPressScale(pressedScale = 0.95f) {
+                                                    onSelectDebugQuotaTier(tier)
+                                                }
+                                        ) {
+                                            Box(
+                                                contentAlignment = Alignment.Center,
+                                                modifier = Modifier.padding(vertical = 8.dp, horizontal = 4.dp)
+                                            ) {
+                                                Text(
+                                                    text = if (tier.isDefault) "5M默认" else tier.label,
+                                                    fontSize = 12.sp,
+                                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                                                    color = if (isSelected) Color.White else ICostTextPrimary,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+
+                                val oldestText = if (debugTraceStats.oldestTimestampMillis > 0L) {
+                                    "最早 " + SimpleDateFormat("MM-dd HH:mm", Locale.CHINA)
+                                        .format(Date(debugTraceStats.oldestTimestampMillis))
+                                } else {
+                                    "等待新识账事件"
+                                }
+                                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.SpaceBetween,
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            text = "已用 ${debugTraceStats.usedMbText} MB / ${debugTraceStats.maxMbText} MB",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = ICostTextPrimary
+                                        )
+                                        Text(
+                                            text = "${debugTraceStats.entryCount} 条 · $oldestText",
+                                            fontSize = 11.sp,
+                                            color = ICostTextSecondary
+                                        )
+                                    }
+                                    LinearProgressIndicator(
+                                        progress = { debugTraceStats.usageFraction },
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .height(6.dp)
+                                            .clip(RoundedCornerShape(3.dp)),
+                                        color = if (debugTraceStats.usageFraction >= 0.85f) ICostAmberGold else ICostBlueAccent,
+                                        trackColor = ICostBgGray
+                                    )
+                                    Text(
+                                        text = "仅存本机私有目录，不触发云同步；API Key / SyncKey / WebDAV 密码全程自动脱敏。",
+                                        fontSize = 11.sp,
+                                        color = ICostTextMuted
+                                    )
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = ICostBlueAccent.copy(alpha = 0.12f),
+                                        modifier = Modifier
+                                            .weight(1.1f)
+                                            .iCostPressScale(pressedScale = 0.96f) { onOpenDebugTraceViewer() }
+                                    ) {
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier.padding(vertical = 9.dp, horizontal = 6.dp)
+                                        ) {
+                                            Text(
+                                                text = "查看推理日志",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = ICostBlueAccent,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = ICostBgGray,
+                                        modifier = Modifier
+                                            .weight(1.25f)
+                                            .iCostPressScale(pressedScale = 0.96f) {
+                                                if (debugTraceStats.entryCount > 0) {
+                                                    onExportDebugTraceJsonl()
+                                                } else {
+                                                    onOpenDebugTraceViewer()
+                                                }
+                                            }
+                                    ) {
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier.padding(vertical = 9.dp, horizontal = 6.dp)
+                                        ) {
+                                            Text(
+                                                text = "导出诊断包 (.jsonl)",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Medium,
+                                                color = if (debugTraceStats.entryCount > 0) ICostTextPrimary else ICostTextMuted,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                    Surface(
+                                        shape = RoundedCornerShape(12.dp),
+                                        color = ICostCoralRed.copy(alpha = 0.10f),
+                                        modifier = Modifier
+                                            .weight(0.85f)
+                                            .iCostPressScale(pressedScale = 0.96f) {
+                                                if (debugTraceStats.entryCount > 0) {
+                                                    onRequestClearDebugTraces()
+                                                }
+                                            }
+                                    ) {
+                                        Box(
+                                            contentAlignment = Alignment.Center,
+                                            modifier = Modifier.padding(vertical = 9.dp, horizontal = 6.dp)
+                                        ) {
+                                            Text(
+                                                text = "清空日志",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = if (debugTraceStats.entryCount > 0) ICostCoralRed else ICostTextMuted,
+                                                maxLines = 1
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (debugTraceStats.entryCount > 0) {
+                            HorizontalDivider(color = ICostDivider)
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "本地留存 ${debugTraceStats.usedMbText} MB · ${debugTraceStats.entryCount} 条",
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = ICostTextPrimary
+                                    )
+                                    Text(
+                                        text = "已停止新写入，历史轨迹仍可查看或导出",
+                                        fontSize = 11.sp,
+                                        color = ICostTextSecondary
+                                    )
+                                }
+                                TextButton(
+                                    onClick = onOpenDebugTraceViewer,
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Text("查看", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = ICostBlueAccent)
+                                }
+                                TextButton(
+                                    onClick = onExportDebugTraceJsonl,
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Text("导出", fontSize = 12.sp, fontWeight = FontWeight.Medium, color = ICostTextPrimary)
+                                }
+                                TextButton(
+                                    onClick = onRequestClearDebugTraces,
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Text("清空", fontSize = 12.sp, color = ICostCoralRed)
                                 }
                             }
                         }
@@ -5510,4 +5810,477 @@ private fun AppUpdateSheetContent(
         }
     }
 }
+
+/**
+ * 「设置 → 智能记账 → 查看推理日志」底部面板（AC-5.1）：
+ * - 展示当前开关状态、4 档配额占用进度、导出 `.jsonl` 与清空日志操作；
+ * - 支持按 7 大落点状态胶囊筛选（全部 / 已记账 / 退货冲抵 / 跨道融合 / 防重拦截 / 疑似重复 / 噪音忽略 / 窗口拦截）及关键词实时搜索；
+ * - 点击任意记录展开查看 6 阶段完整结构化推理详情，并支持一键复制单条脱敏 JSON。
+ */
+@Composable
+private fun CaptureDebugTraceViewerSheetContent(
+    stats: DebugTraceStorageStats,
+    onLoadTraces: suspend () -> List<CaptureDebugTraceEntry>,
+    onExportJsonl: () -> Unit,
+    onRequestClear: () -> Unit,
+    onShowMessage: (String) -> Unit,
+    onClose: () -> Unit
+) {
+    val context = LocalContext.current
+    var allTraces by remember { mutableStateOf<List<CaptureDebugTraceEntry>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+    var selectedOutcome by remember { mutableStateOf<DebugTraceOutcome?>(null) }
+    var searchQuery by remember { mutableStateOf("") }
+    var expandedTraceId by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(stats.entryCount, stats.usedBytes, stats.enabled) {
+        isLoading = true
+        allTraces = onLoadTraces()
+        isLoading = false
+    }
+
+    val filteredTraces = remember(allTraces, selectedOutcome, searchQuery) {
+        val q = searchQuery.trim().lowercase(Locale.ROOT)
+        allTraces.filter { entry ->
+            val outcomePass = selectedOutcome == null || entry.outcome == selectedOutcome
+            if (!outcomePass) return@filter false
+            if (q.isEmpty()) return@filter true
+            entry.merchant.lowercase(Locale.ROOT).contains(q) ||
+                entry.headline.lowercase(Locale.ROOT).contains(q) ||
+                entry.orderKey.lowercase(Locale.ROOT).contains(q) ||
+                (entry.transactionId?.toString()?.contains(q) == true) ||
+                entry.sourceCapture.packageName.lowercase(Locale.ROOT).contains(q) ||
+                entry.sourceCapture.rawTextPreview.lowercase(Locale.ROOT).contains(q) ||
+                entry.windowSessionGuard.guardRuleName.lowercase(Locale.ROOT).contains(q) ||
+                entry.pipelineDedupFusion.matchedRuleId.lowercase(Locale.ROOT).contains(q)
+        }
+    }
+
+    val timeFmt = remember { SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.CHINA) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .fillMaxHeight(0.92f)
+            .navigationBarsPadding()
+    ) {
+        ICostSheetHeader(
+            title = "识账 6 阶段推理日志",
+            onClose = onClose
+        )
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            // 顶部容量与操作条
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = ICostCardWhite,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = if (stats.enabled) {
+                                    "录制中 · ${stats.tier.label} 环形上限"
+                                } else {
+                                    "已暂停录制（保留历史日志）"
+                                },
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (stats.enabled) ICostBlueAccent else ICostTextPrimary
+                            )
+                            Text(
+                                text = "已存 ${stats.entryCount} / ${stats.tier.maxEntries} 条 · ${stats.usedMbText} / ${stats.maxMbText} MB",
+                                fontSize = 11.sp,
+                                color = ICostTextSecondary
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                enabled = stats.entryCount > 0,
+                                onClick = onExportJsonl,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Text("导出 .jsonl", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                            OutlinedButton(
+                                enabled = stats.entryCount > 0,
+                                onClick = onRequestClear,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                shape = RoundedCornerShape(12.dp),
+                                modifier = Modifier.height(32.dp)
+                            ) {
+                                Text("清空", fontSize = 12.sp, color = ICostCoralRed, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+
+                    ICostFormField(
+                        value = searchQuery,
+                        onValueChange = { searchQuery = it },
+                        label = "搜索商户 / 单号 / 包名 / 规则名 / 原文",
+                        placeholder = "如：奈雪、cmb.pb、FUSED、3354",
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    // 状态筛选胶囊横向滚动
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        FilterChip(
+                            selected = selectedOutcome == null,
+                            onClick = { selectedOutcome = null },
+                            label = { Text("全部 (${allTraces.size})", fontSize = 12.sp) }
+                        )
+                        DebugTraceOutcome.entries.forEach { outcome ->
+                            val cnt = allTraces.count { it.outcome == outcome }
+                            FilterChip(
+                                selected = selectedOutcome == outcome,
+                                onClick = {
+                                    selectedOutcome = if (selectedOutcome == outcome) null else outcome
+                                },
+                                label = { Text("${outcome.badgeLabel} ($cnt)", fontSize = 12.sp) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        if (isLoading) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                CircularProgressIndicator(color = ICostBlueAccent, modifier = Modifier.size(28.dp))
+            }
+        } else if (filteredTraces.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(horizontal = 32.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = if (allTraces.isEmpty()) {
+                        if (stats.enabled) "暂无推理记录，触发通知或支付页面识屏后将在此实时显示 6 阶段推理链路。"
+                        else "当前未开启识账调试模式，且本地暂无已录制的推理日志。"
+                    } else {
+                        "没有匹配当前筛选条件的推理记录。"
+                    },
+                    fontSize = 13.sp,
+                    color = ICostTextSecondary
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                items(
+                    count = filteredTraces.size,
+                    key = { idx -> filteredTraces[idx].traceId }
+                ) { idx ->
+                    val entry = filteredTraces[idx]
+                    val isExpanded = expandedTraceId == entry.traceId
+                    DebugTraceStageDetailBlock(
+                        entry = entry,
+                        timeText = timeFmt.format(Date(entry.timestampMillis)),
+                        expanded = isExpanded,
+                        onToggleExpand = {
+                            expandedTraceId = if (isExpanded) null else entry.traceId
+                        },
+                        onCopyJson = {
+                            val json = CaptureDebugTraceStore.encodeTracePrettyJson(entry)
+                            val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            cm?.setPrimaryClip(ClipData.newPlainText("MoJiDebugTraceJson", json))
+                            onShowMessage("已复制该条脱敏 JSON 推理轨迹")
+                        }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DebugTraceStageDetailBlock(
+    entry: CaptureDebugTraceEntry,
+    timeText: String,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
+    onCopyJson: () -> Unit
+) {
+    val badgeColor = when (entry.outcome) {
+        DebugTraceOutcome.RECORDED -> ICostGreenIncome
+        DebugTraceOutcome.REFUND_OFFSET -> Color(0xFF0D9488)
+        DebugTraceOutcome.FUSED_PATCH -> ICostBlueAccent
+        DebugTraceOutcome.DEDUP_BLOCKED -> ICostAmberGold
+        DebugTraceOutcome.DUPLICATE_SUSPECTED -> ICostCoralRed
+        DebugTraceOutcome.NOISE_IGNORED -> ICostTextSecondary
+        DebugTraceOutcome.WINDOW_GUARD_BLOCKED -> Color(0xFF7C3AED)
+    }
+
+    Surface(
+        shape = RoundedCornerShape(18.dp),
+        color = ICostCardWhite,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = onToggleExpand
+                    ),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = badgeColor.copy(alpha = 0.14f)
+                        ) {
+                            Text(
+                                text = entry.outcome.badgeLabel,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = badgeColor,
+                                modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp)
+                            )
+                        }
+                        if (entry.windowSessionGuard.suppressedRepeatCount > 0) {
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = ICostBgGray
+                            ) {
+                                Text(
+                                    text = "15s合并 +${entry.windowSessionGuard.suppressedRepeatCount}",
+                                    fontSize = 10.sp,
+                                    color = ICostTextSecondary,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            text = timeText,
+                            fontSize = 11.sp,
+                            color = ICostTextSecondary
+                        )
+                    }
+
+                    val titleLine = buildString {
+                        if (entry.merchant.isNotBlank()) {
+                            append(entry.merchant)
+                            if (entry.amountCents > 0L) {
+                                append(" · ")
+                                append(formatMoneyCents(entry.amountCents, entry.currency))
+                            }
+                        } else if (entry.headline.isNotBlank()) {
+                            append(entry.headline)
+                        } else {
+                            append(entry.sourceCapture.packageName.ifBlank { entry.sourceCapture.captureSource })
+                        }
+                    }
+                    Text(
+                        text = titleLine,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ICostTextPrimary,
+                        maxLines = if (expanded) 3 else 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    Text(
+                        text = "${entry.sourceCapture.captureSource} · ${entry.sourceCapture.packageName.ifBlank { "-" }}" +
+                            (entry.transactionId?.let { " · 账单#$it" }.orEmpty()),
+                        fontSize = 11.sp,
+                        color = ICostTextSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = if (expanded) "收起详情" else "展开详情",
+                    tint = ICostTextSecondary,
+                    modifier = Modifier
+                        .size(20.dp)
+                        .graphicsLayer { rotationZ = if (expanded) 90f else 0f }
+                )
+            }
+
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    HorizontalDivider(color = ICostDivider)
+
+                    DebugStageItem(
+                        stageTitle = "1. SOURCE_CAPTURE（原始来源采集）",
+                        body = buildString {
+                            appendLine("通道: ${entry.sourceCapture.captureSource} | 包名: ${entry.sourceCapture.packageName.ifBlank { "-" }}")
+                            if (entry.sourceCapture.verifiedActivity.isNotBlank() || entry.sourceCapture.structureFingerprint.isNotBlank()) {
+                                appendLine("核验Activity: ${entry.sourceCapture.verifiedActivity.ifBlank { "-" }} | 5层指纹: ${entry.sourceCapture.structureFingerprint.ifBlank { "-" }}")
+                            }
+                            if (entry.sourceCapture.screenshotRef.isNotBlank() || entry.sourceCapture.screenshotSha256.isNotBlank()) {
+                                appendLine("截图引用: ${entry.sourceCapture.screenshotRef} (sha256=${entry.sourceCapture.screenshotSha256.take(16)})")
+                            }
+                            append("原文预览: ${entry.sourceCapture.rawTextPreview.ifBlank { "(空)" }}")
+                        }
+                    )
+
+                    DebugStageItem(
+                        stageTitle = "2. WINDOW_SESSION_GUARD（窗口与会话门禁）",
+                        body = buildString {
+                            appendLine("白名单: ${if (entry.windowSessionGuard.whitelistAllowed) "放行" else "拦截"} (${entry.windowSessionGuard.whitelistSummary.ifBlank { "-" }})")
+                            appendLine("容器角色: ${entry.windowSessionGuard.containerRole.ifBlank { "-" }} | 门禁规则: ${entry.windowSessionGuard.guardRuleName.ifBlank { "-" }}")
+                            append("会话Visit: #${entry.windowSessionGuard.cashierVisitId} (${entry.windowSessionGuard.sessionAction.ifBlank { "-" }})" +
+                                (if (entry.windowSessionGuard.sessionResetReason.isNotBlank()) " · 重置原因=${entry.windowSessionGuard.sessionResetReason}" else "") +
+                                " | 稳定页命中=${entry.windowSessionGuard.stablePageDedupHit}")
+                        }
+                    )
+
+                    DebugStageItem(
+                        stageTitle = "3. PARSE_ENGINE_ROUTE（解析引擎路由）",
+                        body = buildString {
+                            appendLine("路由选择: ${entry.parseEngineRoute.routeSelected.ifBlank { "-" }} | 耗时: ${entry.parseEngineRoute.latencyMs} ms")
+                            if (entry.parseEngineRoute.provider.isNotBlank() || entry.parseEngineRoute.modelName.isNotBlank()) {
+                                appendLine("模型配置: ${entry.parseEngineRoute.provider} / ${entry.parseEngineRoute.modelName} (${entry.parseEngineRoute.maskedEndpoint})")
+                            }
+                            append("原因/响应摘要: ${entry.parseEngineRoute.fallbackOrSkipReason.ifBlank { entry.parseEngineRoute.llmResponseSummary.ifBlank { "-" } }}")
+                        }
+                    )
+
+                    DebugStageItem(
+                        stageTitle = "4. FIELD_EXTRACTION（字段提取与方向清洗）",
+                        body = buildString {
+                            appendLine("金额分支: ${entry.fieldExtraction.amountRuleBranch.ifBlank { "-" }} | 实付=${entry.fieldExtraction.actualPaidCents}分 原价=${entry.fieldExtraction.originalPriceCents}分 优惠=${entry.fieldExtraction.discountCents}分")
+                            if (entry.fieldExtraction.candidateAmounts.isNotEmpty()) {
+                                appendLine("候选金额: ${entry.fieldExtraction.candidateAmounts.joinToString()}")
+                            }
+                            appendLine("收支方向: ${entry.fieldExtraction.directionType.ifBlank { "-" }} | 命中词: ${entry.fieldExtraction.matchedDirectionKeywords.joinToString().ifBlank { "-" }}" +
+                                (entry.fieldExtraction.linkedExpenseId?.let { " | 冲抵原单#$it" }.orEmpty()))
+                            if (entry.fieldExtraction.strippedSafeguardPhrases.isNotEmpty()) {
+                                appendLine("剥离保障词: ${entry.fieldExtraction.strippedSafeguardPhrases.joinToString()}")
+                            }
+                            append("商户=${entry.fieldExtraction.merchantSummary.ifBlank { "-" }} | 单号=${entry.fieldExtraction.orderNoSummary.ifBlank { "-" }} | 时间=${entry.fieldExtraction.occurredAtSummary.ifBlank { "-" }}")
+                        }
+                    )
+
+                    DebugStageItem(
+                        stageTitle = "5. CATEGORY_WALLET_MAPPING（分类与账户映射）",
+                        body = buildString {
+                            appendLine("分类结论: ${entry.categoryWalletMapping.finalCategory.ifBlank { "-" }} (来源=${entry.categoryWalletMapping.categoryDecisionSource.ifBlank { "-" }})")
+                            if (entry.categoryWalletMapping.smartRuleSummary.isNotBlank()) {
+                                appendLine("智能规则: ${entry.categoryWalletMapping.smartRuleSummary}")
+                            }
+                            if (entry.categoryWalletMapping.merchantMemorySummary.isNotBlank()) {
+                                appendLine("商户记忆: ${entry.categoryWalletMapping.merchantMemorySummary}")
+                            }
+                            if (entry.categoryWalletMapping.weightedKeywordsHit.isNotEmpty()) {
+                                appendLine("加权词根: ${entry.categoryWalletMapping.weightedKeywordsHit.joinToString()} (置信度=${entry.categoryWalletMapping.weightedConfidence})")
+                            }
+                            append("账户映射: ${entry.categoryWalletMapping.finalWalletName.ifBlank { "不关联账户" }} (${entry.categoryWalletMapping.walletMatchBasis.ifBlank { "-" }})")
+                        }
+                    )
+
+                    DebugStageItem(
+                        stageTitle = "6. PIPELINE_DEDUP_FUSION（防重与跨通道融合）",
+                        body = buildString {
+                            appendLine("滑窗聚合: ${entry.pipelineDedupFusion.slidingWindowBatchSize} 条 (${entry.pipelineDedupFusion.slidingWindowMergedSources.joinToString().ifBlank { "-" }})")
+                            if (entry.pipelineDedupFusion.dbCandidatesInspected.isNotEmpty()) {
+                                appendLine("检索候选: ${entry.pipelineDedupFusion.dbCandidatesInspected.joinToString(" ； ")}")
+                            }
+                            appendLine("命中规则: ${entry.pipelineDedupFusion.matchedRuleId.ifBlank { "-" }} | 关联单=#${entry.pipelineDedupFusion.matchedCandidateId ?: "-"} | 最终单=#${entry.pipelineDedupFusion.finalTransactionId ?: "-"}")
+                            if (entry.pipelineDedupFusion.fusedFieldsDiff.isNotEmpty()) {
+                                appendLine("融合改写明细: ${entry.pipelineDedupFusion.fusedFieldsDiff.joinToString(" ； ")}")
+                            }
+                            append("最终摘要: ${entry.pipelineDedupFusion.finalSummary.ifBlank { "-" }}")
+                        }
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        OutlinedButton(
+                            onClick = onCopyJson,
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                            modifier = Modifier.height(34.dp)
+                        ) {
+                            Text("复制单条 JSON", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = ICostBlueAccent)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DebugStageItem(
+    stageTitle: String,
+    body: String
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(ICostBgGray)
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Text(
+            text = stageTitle,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Bold,
+            color = ICostBlueAccent
+        )
+        Text(
+            text = body,
+            fontSize = 11.sp,
+            color = ICostTextPrimary,
+            lineHeight = 15.sp
+        )
+    }
+}
+
 
