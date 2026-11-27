@@ -12,6 +12,8 @@ use crate::auth::now_millis;
 use crate::error::AppError;
 
 const MAX_MISSING_CHECK_BATCH: usize = 20_000;
+pub const MIN_USER_AVATAR_BYTES: usize = 16;
+pub const MAX_USER_AVATAR_BYTES: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccountSummary {
@@ -25,6 +27,10 @@ pub struct AccountSummary {
     pub updated_by_device: String,
     pub updated_by_member: String,
     pub updated_at_ms: i64,
+    #[serde(default)]
+    pub avatar_sha256: String,
+    #[serde(default)]
+    pub avatar_updated_at_ms: i64,
 }
 
 impl Default for AccountSummary {
@@ -40,8 +46,41 @@ impl Default for AccountSummary {
             updated_by_device: String::new(),
             updated_by_member: String::new(),
             updated_at_ms: 0,
+            avatar_sha256: String::new(),
+            avatar_updated_at_ms: 0,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FamilyMemberSummary {
+    pub user_id: String,
+    pub display_name: String,
+    pub last_device_name: String,
+    pub tx_count: usize,
+    pub wallet_count: usize,
+    pub screenshot_count: usize,
+    pub latest_revision: i64,
+    pub updated_at_ms: i64,
+    pub has_avatar: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DeviceBoundSession {
+    pub user_id: String,
+    pub display_name: String,
+    pub key_hint: String,
+    pub is_new_account: bool,
+    pub avatar_sha256: String,
+    pub summary: AccountSummary,
+}
+
+#[derive(Debug, Clone)]
+pub enum DeviceLoginOutcome {
+    Bound(DeviceBoundSession),
+    SelectionRequired {
+        existing_members: Vec<FamilyMemberSummary>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -120,6 +159,8 @@ impl CloudStore {
             .map_err(|e| format!("create snapshots dir: {e}"))?;
         fs::create_dir_all(data_dir.join("screenshots"))
             .map_err(|e| format!("create screenshots dir: {e}"))?;
+        fs::create_dir_all(data_dir.join("avatars"))
+            .map_err(|e| format!("create avatars dir: {e}"))?;
 
         let db_path = data_dir.join("moji_cloud.db");
         let conn = Connection::open(&db_path)
@@ -138,6 +179,8 @@ impl CloudStore {
                 display_name TEXT NOT NULL DEFAULT '',
                 app_env TEXT NOT NULL DEFAULT 'prod',
                 status TEXT NOT NULL DEFAULT 'active',
+                avatar_sha256 TEXT NOT NULL DEFAULT '',
+                avatar_updated_at_ms INTEGER NOT NULL DEFAULT 0,
                 created_at_ms INTEGER NOT NULL,
                 updated_at_ms INTEGER NOT NULL
             );
@@ -207,9 +250,17 @@ impl CloudStore {
         )
         .map_err(|e| format!("init sqlite schema: {e}"))?;
 
-        // 兼容开发期早期未带 updated_by_member 列的本地库文件
+        // 兼容开发期早期未带 updated_by_member / avatar_* 列的存量库文件（非破坏性幂等迁移）
         let _ = conn.execute(
             "ALTER TABLE cloud_snapshot_history ADD COLUMN updated_by_member TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE users ADD COLUMN avatar_sha256 TEXT NOT NULL DEFAULT ''",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE users ADD COLUMN avatar_updated_at_ms INTEGER NOT NULL DEFAULT 0",
             [],
         );
 
@@ -359,6 +410,385 @@ impl CloudStore {
             is_new_account,
             summary,
         })
+    }
+
+    pub fn device_login_or_probe<F>(
+        &self,
+        identifier_hash: &str,
+        fp_hint: &str,
+        app_env: &str,
+        member_label: &str,
+        device_id: &str,
+        device_name: &str,
+        app_version: &str,
+        create_if_missing: bool,
+        max_users: usize,
+        authorize_new_registration: F,
+    ) -> Result<DeviceLoginOutcome, AppError>
+    where
+        F: FnOnce() -> Result<(), AppError>,
+    {
+        let now = now_millis();
+        let clean_member = sanitize_short_text(member_label, 48);
+        let clean_device_id = sanitize_short_text(device_id, 64);
+        let clean_device_name = sanitize_short_text(device_name, 64);
+        let clean_version = sanitize_short_text(app_version, 32);
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| AppError::Internal(format!("begin device_login tx: {e}")))?;
+
+        let existing: Option<(String, String, String, String)> = tx
+            .query_row(
+                r#"
+                SELECT u.user_id, u.app_env, u.status, u.display_name
+                FROM user_identities i
+                JOIN users u ON u.user_id = i.user_id
+                WHERE i.provider = 'device_fp' AND i.identifier_hash = ?1
+                "#,
+                params![identifier_hash],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(|e| AppError::Internal(format!("query device_fp identity: {e}")))?;
+
+        if let Some((uid, stored_env, status, existing_display_name)) = existing {
+            if status != "active" {
+                return Err(AppError::Forbidden(
+                    "account_disabled",
+                    "该云端账号已被停用".to_string(),
+                ));
+            }
+            if stored_env != app_env {
+                return Err(AppError::Forbidden(
+                    "env_mismatch",
+                    "设备指纹所属环境与当前客户端包类型不匹配".to_string(),
+                ));
+            }
+
+            tx.execute(
+                "UPDATE user_identities SET last_used_at_ms = ?1, key_hint = ?2 WHERE provider = 'device_fp' AND identifier_hash = ?3",
+                params![now, fp_hint, identifier_hash],
+            )
+            .map_err(|e| AppError::Internal(format!("update device_fp ts: {e}")))?;
+
+            let should_update_display_name = !clean_member.is_empty()
+                && (existing_display_name.trim().is_empty()
+                    || !is_default_or_device_member_label(&clean_member, &clean_device_name));
+            let final_display_name = if should_update_display_name {
+                tx.execute(
+                    "UPDATE users SET display_name = ?1, updated_at_ms = ?2 WHERE user_id = ?3",
+                    params![clean_member, now, uid],
+                )
+                .map_err(|e| AppError::Internal(format!("update user name: {e}")))?;
+                clean_member.clone()
+            } else {
+                existing_display_name
+            };
+
+            upsert_user_device(
+                &tx,
+                &uid,
+                &clean_device_id,
+                &clean_device_name,
+                &clean_member,
+                &clean_version,
+                now,
+            )?;
+
+            let summary = query_account_summary(&tx, &uid)?;
+            let avatar_sha256 = summary.avatar_sha256.clone();
+            tx.commit()
+                .map_err(|e| AppError::Internal(format!("commit device_login bound tx: {e}")))?;
+
+            return Ok(DeviceLoginOutcome::Bound(DeviceBoundSession {
+                user_id: uid,
+                display_name: final_display_name,
+                key_hint: fp_hint.to_string(),
+                is_new_account: false,
+                avatar_sha256,
+                summary,
+            }));
+        }
+
+        // 当前指纹尚未绑定：检查同环境下是否已有活跃家庭成员
+        let active_in_env: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM users WHERE app_env = ?1 AND status = 'active'",
+                params![app_env],
+                |r| r.get(0),
+            )
+            .map_err(|e| AppError::Internal(format!("count active users in env: {e}")))?;
+
+        if active_in_env > 0 && !create_if_missing {
+            let existing_members = query_family_members(&tx, app_env)?;
+            return Ok(DeviceLoginOutcome::SelectionRequired { existing_members });
+        }
+
+        if max_users > 0 {
+            let total_users: i64 = tx
+                .query_row("SELECT COUNT(*) FROM users", [], |row| row.get(0))
+                .map_err(|e| AppError::Internal(format!("count users: {e}")))?;
+            let active_count = usize::try_from(total_users.max(0)).unwrap_or(usize::MAX);
+            if active_count >= max_users {
+                return Err(AppError::Forbidden(
+                    "max_users_reached",
+                    format!(
+                        "此云端服务器已达到最大账号绑定上限（{max_users}），请联系管理员调整 MOJI_MAX_USERS"
+                    ),
+                ));
+            }
+        }
+
+        authorize_new_registration()?;
+        let uid = Uuid::new_v4().to_string();
+        let initial_name = if is_default_or_device_member_label(&clean_member, &clean_device_name) {
+            clean_member.clone()
+        } else {
+            clean_member.clone()
+        };
+
+        tx.execute(
+            "INSERT INTO users (user_id, display_name, app_env, status, created_at_ms, updated_at_ms) VALUES (?1, ?2, ?3, 'active', ?4, ?4)",
+            params![uid, initial_name, app_env, now],
+        )
+        .map_err(|e| AppError::Internal(format!("insert user: {e}")))?;
+
+        tx.execute(
+            "INSERT INTO user_identities (user_id, provider, identifier_hash, key_hint, created_at_ms, last_used_at_ms) VALUES (?1, 'device_fp', ?2, ?3, ?4, ?4)",
+            params![uid, identifier_hash, fp_hint, now],
+        )
+        .map_err(|e| AppError::Internal(format!("insert device_fp identity: {e}")))?;
+
+        upsert_user_device(
+            &tx,
+            &uid,
+            &clean_device_id,
+            &clean_device_name,
+            &clean_member,
+            &clean_version,
+            now,
+        )?;
+
+        let summary = query_account_summary(&tx, &uid)?;
+        let avatar_sha256 = summary.avatar_sha256.clone();
+        tx.commit()
+            .map_err(|e| AppError::Internal(format!("commit device_login new tx: {e}")))?;
+
+        Ok(DeviceLoginOutcome::Bound(DeviceBoundSession {
+            user_id: uid,
+            display_name: initial_name,
+            key_hint: fp_hint.to_string(),
+            is_new_account: true,
+            avatar_sha256,
+            summary,
+        }))
+    }
+
+    pub fn claim_family_member(
+        &self,
+        target_user_id: &str,
+        identifier_hash: &str,
+        fp_hint: &str,
+        app_env: &str,
+        member_label: &str,
+        device_id: &str,
+        device_name: &str,
+        app_version: &str,
+    ) -> Result<DeviceBoundSession, AppError> {
+        validate_uuid(target_user_id)?;
+        let now = now_millis();
+        let clean_member = sanitize_short_text(member_label, 48);
+        let clean_device_id = sanitize_short_text(device_id, 64);
+        let clean_device_name = sanitize_short_text(device_name, 64);
+        let clean_version = sanitize_short_text(app_version, 32);
+
+        let mut orphan_empty_uid_to_cleanup: Option<String> = None;
+
+        let session = {
+            let mut conn = self
+                .conn
+                .lock()
+                .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+            let tx = conn
+                .transaction()
+                .map_err(|e| AppError::Internal(format!("begin claim_member tx: {e}")))?;
+
+            let target_row: Option<(String, String, String)> = tx
+                .query_row(
+                    "SELECT display_name, app_env, status FROM users WHERE user_id = ?1",
+                    params![target_user_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()
+                .map_err(|e| AppError::Internal(format!("query target member: {e}")))?;
+
+            let Some((existing_display_name, target_env, target_status)) = target_row else {
+                return Err(AppError::NotFound(
+                    "target_member_not_found",
+                    "未找到要认领的家庭成员账号，请刷新列表后重试".to_string(),
+                ));
+            };
+
+            if target_status != "active" {
+                return Err(AppError::Forbidden(
+                    "account_disabled",
+                    "该家庭成员云端账号已被停用".to_string(),
+                ));
+            }
+            if target_env != app_env {
+                return Err(AppError::Forbidden(
+                    "env_mismatch",
+                    "目标成员所属环境与当前客户端包类型不匹配".to_string(),
+                ));
+            }
+
+            let bound_uid_opt: Option<String> = tx
+                .query_row(
+                    "SELECT user_id FROM user_identities WHERE provider = 'device_fp' AND identifier_hash = ?1",
+                    params![identifier_hash],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(|e| AppError::Internal(format!("query existing fp binding: {e}")))?;
+
+            match bound_uid_opt {
+                None => {
+                    tx.execute(
+                        "INSERT INTO user_identities (user_id, provider, identifier_hash, key_hint, created_at_ms, last_used_at_ms) VALUES (?1, 'device_fp', ?2, ?3, ?4, ?4)",
+                        params![target_user_id, identifier_hash, fp_hint, now],
+                    )
+                    .map_err(|e| AppError::Internal(format!("insert claimed device_fp: {e}")))?;
+                }
+                Some(ref current_uid) if current_uid == target_user_id => {
+                    tx.execute(
+                        "UPDATE user_identities SET key_hint = ?1, last_used_at_ms = ?2 WHERE provider = 'device_fp' AND identifier_hash = ?3",
+                        params![fp_hint, now, identifier_hash],
+                    )
+                    .map_err(|e| AppError::Internal(format!("update claimed device_fp: {e}")))?;
+                }
+                Some(other_uid) => {
+                    let other_has_data: bool = tx
+                        .query_row(
+                            r#"
+                            SELECT EXISTS(SELECT 1 FROM cloud_snapshots WHERE user_id = ?1)
+                                OR EXISTS(SELECT 1 FROM cloud_snapshot_history WHERE user_id = ?1)
+                                OR EXISTS(SELECT 1 FROM user_screenshots WHERE user_id = ?1)
+                                OR EXISTS(SELECT 1 FROM users WHERE user_id = ?1 AND avatar_sha256 != '')
+                            "#,
+                            params![other_uid],
+                            |r| r.get(0),
+                        )
+                        .map_err(|e| AppError::Internal(format!("check other_uid data: {e}")))?;
+
+                    if other_has_data {
+                        return Err(AppError::Conflict {
+                            code: "device_already_bound_with_data",
+                            message: "当前手机已绑定另一个含云端数据的成员账号，为防误丢数据无法直接改绑；请先在原账号解绑设备或新建独立账本".to_string(),
+                            account_summary: None,
+                        });
+                    }
+
+                    // 此前仅误绑过 0 笔快照的临时空账号：安全改绑到目标成员并清理孤儿临时空号
+                    tx.execute(
+                        "UPDATE user_identities SET user_id = ?1, key_hint = ?2, last_used_at_ms = ?3 WHERE provider = 'device_fp' AND identifier_hash = ?4",
+                        params![target_user_id, fp_hint, now, identifier_hash],
+                    )
+                    .map_err(|e| AppError::Internal(format!("rebind empty temp device_fp: {e}")))?;
+
+                    let remaining_identities: i64 = tx
+                        .query_row(
+                            "SELECT COUNT(*) FROM user_identities WHERE user_id = ?1",
+                            params![other_uid],
+                            |r| r.get(0),
+                        )
+                        .map_err(|e| AppError::Internal(format!("count other identities: {e}")))?;
+                    if remaining_identities == 0 {
+                        tx.execute("DELETE FROM users WHERE user_id = ?1", params![other_uid])
+                            .map_err(|e| AppError::Internal(format!("delete empty temp user: {e}")))?;
+                        orphan_empty_uid_to_cleanup = Some(other_uid);
+                    }
+                }
+            }
+
+            // 认领接管时保留原成员已有的自定义昵称；仅当原昵称为空且新设备传入了非默认昵称时补齐
+            let final_display_name = if existing_display_name.trim().is_empty()
+                && !clean_member.is_empty()
+                && !is_default_or_device_member_label(&clean_member, &clean_device_name)
+            {
+                tx.execute(
+                    "UPDATE users SET display_name = ?1, updated_at_ms = ?2 WHERE user_id = ?3",
+                    params![clean_member, now, target_user_id],
+                )
+                .map_err(|e| AppError::Internal(format!("fill claimed member name: {e}")))?;
+                clean_member.clone()
+            } else {
+                existing_display_name
+            };
+
+            let member_for_device = if !final_display_name.trim().is_empty() {
+                final_display_name.as_str()
+            } else {
+                clean_member.as_str()
+            };
+            upsert_user_device(
+                &tx,
+                target_user_id,
+                &clean_device_id,
+                &clean_device_name,
+                member_for_device,
+                &clean_version,
+                now,
+            )?;
+
+            let summary = query_account_summary(&tx, target_user_id)?;
+            let avatar_sha256 = summary.avatar_sha256.clone();
+            tx.commit()
+                .map_err(|e| AppError::Internal(format!("commit claim_member tx: {e}")))?;
+
+            DeviceBoundSession {
+                user_id: target_user_id.to_string(),
+                display_name: final_display_name,
+                key_hint: fp_hint.to_string(),
+                is_new_account: false,
+                avatar_sha256,
+                summary,
+            }
+        };
+
+        if let Some(orphan_uid) = orphan_empty_uid_to_cleanup {
+            if let Ok(snap_dir) = self.user_snapshot_dir(&orphan_uid) {
+                let _ = fs::remove_dir_all(snap_dir);
+            }
+            if let Ok(avatar_path) = self.user_avatar_path(&orphan_uid) {
+                let _ = fs::remove_file(avatar_path);
+            }
+        }
+
+        Ok(session)
+    }
+
+    pub fn unbind_device_fingerprint(
+        &self,
+        user_id: &str,
+        identifier_hash: &str,
+    ) -> Result<bool, AppError> {
+        validate_uuid(user_id)?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+        let affected = conn
+            .execute(
+                "DELETE FROM user_identities WHERE user_id = ?1 AND provider = 'device_fp' AND identifier_hash = ?2",
+                params![user_id, identifier_hash],
+            )
+            .map_err(|e| AppError::Internal(format!("delete device_fp binding: {e}")))?;
+        Ok(affected > 0)
     }
 
     pub fn verify_active_user(&self, user_id: &str, expected_env: &str) -> Result<String, AppError> {
@@ -575,6 +1005,15 @@ impl CloudStore {
             if current_summary.latest_revision > 0
                 && current_summary.snapshot_sha256 == snapshot_sha256
             {
+                if !clean_member.is_empty()
+                    && !is_default_or_device_member_label(&clean_member, &clean_dev_name)
+                {
+                    let _ = tx.execute(
+                        "UPDATE users SET display_name = ?1, updated_at_ms = ?2 WHERE user_id = ?3",
+                        params![clean_member, now, user_id],
+                    );
+                }
+
                 if !clean_dev_id.is_empty() {
                     let _ = tx.execute(
                         "UPDATE user_devices SET last_sync_at_ms = ?1 WHERE user_id = ?2 AND device_id = ?3",
@@ -648,6 +1087,15 @@ impl CloudStore {
                     ],
                 )
                 .map_err(|e| AppError::Internal(format!("insert snapshot history: {e}")))?;
+
+                if !clean_member.is_empty()
+                    && !is_default_or_device_member_label(&clean_member, &clean_dev_name)
+                {
+                    let _ = tx.execute(
+                        "UPDATE users SET display_name = ?1, updated_at_ms = ?2 WHERE user_id = ?3",
+                        params![clean_member, now, user_id],
+                    );
+                }
 
                 if !clean_dev_id.is_empty() {
                     tx.execute(
@@ -995,6 +1443,115 @@ impl CloudStore {
             .map_err(|e| AppError::Internal(format!("read screenshot {:?}: {e}", blob_path)))
     }
 
+    pub fn save_user_avatar(
+        &self,
+        user_id: &str,
+        webp_bytes: &[u8],
+    ) -> Result<(String, usize, i64), AppError> {
+        validate_uuid(user_id)?;
+        if webp_bytes.len() < MIN_USER_AVATAR_BYTES {
+            return Err(AppError::BadRequest(
+                "avatar_too_small",
+                "自定义头像文件过小（需至少 16 字节合法 WebP 图像）".to_string(),
+            ));
+        }
+        if webp_bytes.len() > MAX_USER_AVATAR_BYTES {
+            return Err(AppError::BadRequest(
+                "avatar_too_large",
+                "自定义头像文件超过上限（最大允许 512 KB WebP 图像）".to_string(),
+            ));
+        }
+        if &webp_bytes[0..4] != b"RIFF" || &webp_bytes[8..12] != b"WEBP" {
+            return Err(AppError::BadRequest(
+                "invalid_avatar_webp_format",
+                "自定义头像仅支持标准 WebP 图像格式（RIFF....WEBP）".to_string(),
+            ));
+        }
+
+        let avatar_sha = sha256_hex(webp_bytes);
+        let avatar_path = self.user_avatar_path(user_id)?;
+        if let Some(parent) = avatar_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| AppError::Internal(format!("create avatars dir: {e}")))?;
+        }
+        write_file_atomically(&avatar_path, webp_bytes)?;
+
+        let now = now_millis();
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+        conn.execute(
+            "UPDATE users SET avatar_sha256 = ?1, avatar_updated_at_ms = ?2, updated_at_ms = ?2 WHERE user_id = ?3",
+            params![avatar_sha, now, user_id],
+        )
+        .map_err(|e| AppError::Internal(format!("update user avatar_sha256: {e}")))?;
+
+        Ok((avatar_sha, webp_bytes.len(), now))
+    }
+
+    pub fn load_user_avatar(&self, user_id: &str) -> Result<Vec<u8>, AppError> {
+        validate_uuid(user_id)?;
+        let expected_sha: String = {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+            conn.query_row(
+                "SELECT avatar_sha256 FROM users WHERE user_id = ?1",
+                params![user_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| AppError::Internal(format!("query user avatar_sha256: {e}")))?
+            .unwrap_or_default()
+        };
+
+        if expected_sha.trim().is_empty() {
+            return Err(AppError::NotFound(
+                "avatar_not_found",
+                "当前账号尚未设置云端自定义头像".to_string(),
+            ));
+        }
+
+        let avatar_path = self.user_avatar_path(user_id)?;
+        if !avatar_path.exists() {
+            return Err(AppError::NotFound(
+                "avatar_blob_missing",
+                "云端自定义头像文件不存在".to_string(),
+            ));
+        }
+
+        fs::read(&avatar_path)
+            .map_err(|e| AppError::Internal(format!("read avatar {:?}: {e}", avatar_path)))
+    }
+
+    pub fn delete_user_avatar(&self, user_id: &str) -> Result<i64, AppError> {
+        validate_uuid(user_id)?;
+        let now = now_millis();
+        {
+            let conn = self
+                .conn
+                .lock()
+                .map_err(|_| AppError::Internal("sqlite mutex poisoned".to_string()))?;
+            conn.execute(
+                "UPDATE users SET avatar_sha256 = '', avatar_updated_at_ms = ?1, updated_at_ms = ?1 WHERE user_id = ?2",
+                params![now, user_id],
+            )
+            .map_err(|e| AppError::Internal(format!("clear user avatar_sha256: {e}")))?;
+        }
+        let avatar_path = self.user_avatar_path(user_id)?;
+        if avatar_path.exists() {
+            let _ = fs::remove_file(&avatar_path);
+        }
+        Ok(now)
+    }
+
+    fn user_avatar_path(&self, user_id: &str) -> Result<PathBuf, AppError> {
+        validate_uuid(user_id)?;
+        Ok(self.data_dir.join("avatars").join(format!("{user_id}.webp")))
+    }
+
     fn user_snapshot_dir(&self, user_id: &str) -> Result<PathBuf, AppError> {
         validate_uuid(user_id)?;
         Ok(self.data_dir.join("snapshots").join(user_id))
@@ -1014,6 +1571,129 @@ fn clean_device_id_or(s: &str) -> &str {
     s
 }
 
+fn upsert_user_device(
+    conn: &Connection,
+    user_id: &str,
+    clean_device_id: &str,
+    clean_device_name: &str,
+    clean_member: &str,
+    clean_version: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    if clean_device_id.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        r#"
+        INSERT INTO user_devices (device_id, user_id, device_name, member_label, app_version, last_sync_at_ms)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        ON CONFLICT(user_id, device_id) DO UPDATE SET
+            device_name = CASE WHEN excluded.device_name != '' THEN excluded.device_name ELSE user_devices.device_name END,
+            member_label = CASE WHEN excluded.member_label != '' THEN excluded.member_label ELSE user_devices.member_label END,
+            app_version = CASE WHEN excluded.app_version != '' THEN excluded.app_version ELSE user_devices.app_version END,
+            last_sync_at_ms = excluded.last_sync_at_ms
+        "#,
+        params![
+            clean_device_id,
+            user_id,
+            clean_device_name,
+            clean_member,
+            clean_version,
+            now
+        ],
+    )
+    .map_err(|e| AppError::Internal(format!("upsert device: {e}")))?;
+    Ok(())
+}
+
+fn query_family_members(
+    conn: &Connection,
+    app_env: &str,
+) -> Result<Vec<FamilyMemberSummary>, AppError> {
+    let mut stmt = conn
+        .prepare(
+            r#"
+            SELECT
+                u.user_id,
+                u.display_name,
+                u.avatar_sha256,
+                u.updated_at_ms,
+                COALESCE(s.revision, 0) AS latest_revision,
+                COALESCE(s.tx_count, 0) AS tx_count,
+                COALESCE(s.wallet_count, 0) AS wallet_count,
+                COALESCE(s.updated_by_device, '') AS snap_device_name,
+                COALESCE(s.updated_by_member, '') AS snap_member_name,
+                COALESCE(s.updated_at_ms, 0) AS snap_updated_at_ms,
+                (SELECT COUNT(*) FROM user_screenshots sc WHERE sc.user_id = u.user_id) AS screenshot_count,
+                COALESCE(
+                    (SELECT d.device_name FROM user_devices d WHERE d.user_id = u.user_id AND d.device_name != '' ORDER BY d.last_sync_at_ms DESC LIMIT 1),
+                    ''
+                ) AS recent_device_name,
+                COALESCE(
+                    (SELECT MAX(d2.last_sync_at_ms) FROM user_devices d2 WHERE d2.user_id = u.user_id),
+                    0
+                ) AS recent_device_sync_ms
+            FROM users u
+            LEFT JOIN cloud_snapshots s ON s.user_id = u.user_id
+            WHERE u.app_env = ?1 AND u.status = 'active'
+            ORDER BY COALESCE(s.updated_at_ms, u.updated_at_ms) DESC, u.created_at_ms ASC
+            "#,
+        )
+        .map_err(|e| AppError::Internal(format!("prepare query_family_members: {e}")))?;
+
+    let rows = stmt
+        .query_map(params![app_env], |r| {
+            let user_id: String = r.get(0)?;
+            let raw_display_name: String = r.get(1)?;
+            let avatar_sha256: String = r.get(2)?;
+            let user_updated_ms: i64 = r.get(3)?;
+            let latest_revision: i64 = r.get(4)?;
+            let tx_count: i64 = r.get(5)?;
+            let wallet_count: i64 = r.get(6)?;
+            let snap_device_name: String = r.get(7)?;
+            let snap_member_name: String = r.get(8)?;
+            let snap_updated_ms: i64 = r.get(9)?;
+            let screenshot_count: i64 = r.get(10)?;
+            let recent_device_name: String = r.get(11)?;
+            let recent_device_sync_ms: i64 = r.get(12)?;
+
+            let display_name = if !raw_display_name.trim().is_empty() {
+                raw_display_name
+            } else if !snap_member_name.trim().is_empty() {
+                snap_member_name
+            } else {
+                "家人成员".to_string()
+            };
+
+            let last_device_name = if !snap_device_name.trim().is_empty() {
+                snap_device_name
+            } else {
+                recent_device_name
+            };
+
+            let updated_at_ms = user_updated_ms
+                .max(snap_updated_ms)
+                .max(recent_device_sync_ms);
+
+            Ok(FamilyMemberSummary {
+                user_id,
+                display_name,
+                last_device_name,
+                tx_count: usize::try_from(tx_count.max(0)).unwrap_or(0),
+                wallet_count: usize::try_from(wallet_count.max(0)).unwrap_or(0),
+                screenshot_count: usize::try_from(screenshot_count.max(0)).unwrap_or(0),
+                latest_revision,
+                updated_at_ms,
+                has_avatar: !avatar_sha256.trim().is_empty(),
+            })
+        })
+        .map_err(|e| AppError::Internal(format!("map query_family_members: {e}")))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| AppError::Internal(format!("collect query_family_members: {e}")))?;
+
+    Ok(rows)
+}
+
 fn query_account_summary(conn: &Connection, user_id: &str) -> Result<AccountSummary, AppError> {
     let screenshot_count: i64 = conn
         .query_row(
@@ -1022,6 +1702,16 @@ fn query_account_summary(conn: &Connection, user_id: &str) -> Result<AccountSumm
             |r| r.get(0),
         )
         .map_err(|e| AppError::Internal(format!("count screenshots: {e}")))?;
+
+    let (avatar_sha256, avatar_updated_at_ms): (String, i64) = conn
+        .query_row(
+            "SELECT avatar_sha256, avatar_updated_at_ms FROM users WHERE user_id = ?1",
+            params![user_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| AppError::Internal(format!("query user avatar meta: {e}")))?
+        .unwrap_or_default();
 
     let snap_row: Option<AccountSummary> = conn
         .query_row(
@@ -1044,6 +1734,8 @@ fn query_account_summary(conn: &Connection, user_id: &str) -> Result<AccountSumm
                     updated_by_device: r.get(6)?,
                     updated_by_member: r.get(7)?,
                     updated_at_ms: r.get(8)?,
+                    avatar_sha256: avatar_sha256.clone(),
+                    avatar_updated_at_ms,
                 })
             },
         )
@@ -1052,6 +1744,8 @@ fn query_account_summary(conn: &Connection, user_id: &str) -> Result<AccountSumm
 
     Ok(snap_row.unwrap_or_else(|| AccountSummary {
         screenshot_count: screenshot_count as usize,
+        avatar_sha256,
+        avatar_updated_at_ms,
         ..AccountSummary::default()
     }))
 }

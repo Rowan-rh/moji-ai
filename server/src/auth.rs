@@ -117,6 +117,62 @@ pub fn hash_sync_key(normalized_key: &str, app_env: &str) -> String {
     hex::encode(digest)
 }
 
+/// 校验并规范化客户端上报的设备指纹摘要（32~128 位十六进制或安全标识符字符）
+pub fn normalize_and_validate_device_fingerprint(raw_fp: &str) -> Result<String, AppError> {
+    let cleaned = raw_fp.trim().to_ascii_lowercase();
+    if cleaned.len() < 32 || cleaned.len() > 128 {
+        return Err(AppError::BadRequest(
+            "invalid_device_fingerprint",
+            "设备指纹长度不合法（需为 32~128 位摘要字符）".to_string(),
+        ));
+    }
+    if !cleaned
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest(
+            "invalid_device_fingerprint",
+            "设备指纹包含非法字符".to_string(),
+        ));
+    }
+    Ok(cleaned)
+}
+
+/// 生成设备指纹脱敏提示（如 `FP-****-9A2F`），仅回显末尾 4 位
+pub fn mask_device_fingerprint(normalized_fp: &str) -> String {
+    let tail: String = normalized_fp
+        .chars()
+        .rev()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if tail.len() == 4 {
+        format!("FP-****-{}", tail.to_ascii_uppercase())
+    } else {
+        "FP-****".to_string()
+    }
+}
+
+/// 计算设备指纹多轮拉伸 SHA-256 身份哈希（按 app_env 域分离，数据库不落盘客户端原始指纹摘要）
+pub fn hash_device_fingerprint(normalized_fp: &str, app_env: &str) -> String {
+    let mut seed = Sha256::new();
+    seed.update(b"moji-device-fp-v1:");
+    seed.update(app_env.as_bytes());
+    seed.update(b":");
+    seed.update(normalized_fp.as_bytes());
+    let mut digest = seed.finalize();
+    for round in 0u32..4096 {
+        let mut h = Sha256::new();
+        h.update(digest);
+        h.update(round.to_le_bytes());
+        digest = h.finalize();
+    }
+    hex::encode(digest)
+}
+
 fn stretch_access_code_digest(code: &str) -> [u8; 32] {
     let mut seed = Sha256::new();
     seed.update(b"moji-access-code-v1:");
@@ -131,7 +187,7 @@ fn stretch_access_code_digest(code: &str) -> [u8; 32] {
     digest.into()
 }
 
-/// 定长多轮拉伸摘要常量时间校验服务端接入码，防止时序侧信道泄露长度或内容并提高暴力猜测成本
+/// 定长多轮拉伸摘要常量时间校验服务端接入码（供旧版 Sync Key 登录兼容使用：未配置时放行）
 pub fn verify_access_code(configured: Option<&str>, provided: Option<&str>) -> Result<(), AppError> {
     let Some(expected) = configured else {
         return Ok(());
@@ -150,6 +206,39 @@ pub fn verify_access_code(configured: Option<&str>, provided: Option<&str>) -> R
         return Err(AppError::Forbidden(
             "invalid_access_code",
             "服务器接入码不正确，请核对后重试".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// 免密设备指纹登录/成员认领专用强制 SK 门禁：
+/// - 若服务端未配置非空 `MOJI_SERVER_ACCESS_CODE`，一律以 `403 (server_sk_not_configured)` 拒绝，防止公网无口令裸奔；
+/// - 请求携带的 `SK` 采用 4,096 轮拉伸摘要 + 常量时间比对校验。
+pub fn verify_required_server_sk(
+    configured: Option<&str>,
+    provided: Option<&str>,
+) -> Result<(), AppError> {
+    let Some(expected) = configured.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err(AppError::Forbidden(
+            "server_sk_not_configured",
+            "服务端尚未配置 MOJI_SERVER_ACCESS_CODE，请管理员在 .env 中设置非空服务器密钥（SK）后重启服务"
+                .to_string(),
+        ));
+    };
+    let actual = provided.unwrap_or("").trim();
+    if actual.is_empty() {
+        return Err(AppError::Forbidden(
+            "access_code_required",
+            "请填写服务器密钥（SK）以验证家庭服务器访问权限".to_string(),
+        ));
+    }
+    let expected_digest = stretch_access_code_digest(expected);
+    let actual_digest = stretch_access_code_digest(actual);
+    let eq: bool = expected_digest.ct_eq(&actual_digest).into();
+    if !eq {
+        return Err(AppError::Forbidden(
+            "invalid_access_code",
+            "服务器密钥（SK）不正确，请核对后重试".to_string(),
         ));
     }
     Ok(())

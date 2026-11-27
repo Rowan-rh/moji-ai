@@ -3,7 +3,7 @@ use axum::extract::{ConnectInfo, DefaultBodyLimit, FromRequestParts, Path, Query
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
@@ -12,13 +12,15 @@ use tokio::task::spawn_blocking;
 use tower_http::trace::TraceLayer;
 
 use crate::auth::{
-    hash_sync_key, issue_access_token, mask_sync_key, normalize_and_validate_sync_key,
-    normalize_app_env, verify_access_code, verify_bearer_header, AuthRateLimiter, TokenClaims,
+    hash_device_fingerprint, hash_sync_key, issue_access_token, mask_device_fingerprint,
+    mask_sync_key, normalize_and_validate_device_fingerprint, normalize_and_validate_sync_key,
+    normalize_app_env, verify_access_code, verify_bearer_header, verify_required_server_sk,
+    AuthRateLimiter, TokenClaims,
 };
 use crate::config::ServerConfig;
 use crate::db::{
-    AccountSummary, BoundDeviceInfo, BoundIdentityInfo, CloudStore, PulledSnapshotData,
-    SnapshotHistoryItem,
+    AccountSummary, BoundDeviceInfo, BoundIdentityInfo, CloudStore, DeviceLoginOutcome,
+    FamilyMemberSummary, PulledSnapshotData, SnapshotHistoryItem,
 };
 use crate::error::AppError;
 
@@ -122,14 +124,27 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024));
 
+    let avatar_routes = Router::new()
+        .route(
+            "/api/v1/profile/avatar",
+            put(put_profile_avatar)
+                .get(get_profile_avatar)
+                .delete(delete_profile_avatar),
+        )
+        .layer(DefaultBodyLimit::max(1024 * 1024));
+
     Router::new()
         .route("/api/v1/health", get(health_check))
         .route("/api/v1/auth/key-login", post(key_login))
+        .route("/api/v1/auth/device-login", post(device_login))
+        .route("/api/v1/auth/claim-member", post(claim_member))
+        .route("/api/v1/auth/device-binding", delete(unbind_device_binding))
         .route("/api/v1/auth/identities", get(list_identities))
         .route("/api/v1/sync/status", get(get_sync_status))
         .route("/api/v1/screenshots/missing", post(check_missing_screenshots))
         .merge(snapshot_routes)
         .merge(screenshot_upload_routes)
+        .merge(avatar_routes)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -260,6 +275,274 @@ async fn key_login(
         is_new_account: outcome.is_new_account,
         account_summary: outcome.summary,
     }))
+}
+
+#[derive(Deserialize)]
+pub struct DeviceLoginRequest {
+    #[serde(default)]
+    pub server_access_code: Option<String>,
+    pub device_fingerprint: String,
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default)]
+    pub device_name: String,
+    #[serde(default)]
+    pub member_label: String,
+    #[serde(default = "default_prod_env")]
+    pub app_env: String,
+    #[serde(default)]
+    pub app_version: String,
+    #[serde(default)]
+    pub create_if_missing: bool,
+}
+
+#[derive(Serialize)]
+pub struct DeviceLoginResponse {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_new_account: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_summary: Option<AccountSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub existing_members: Vec<FamilyMemberSummary>,
+}
+
+async fn device_login(
+    State(state): State<Arc<AppState>>,
+    ClientRateLimitKey(client_key): ClientRateLimitKey,
+    Json(req): Json<DeviceLoginRequest>,
+) -> Result<Json<DeviceLoginResponse>, AppError> {
+    state.rate_limiter.check_allowed(&client_key)?;
+
+    if let Err(err) = verify_required_server_sk(
+        state.config.server_access_code.as_deref(),
+        req.server_access_code.as_deref(),
+    ) {
+        if !matches!(&err, AppError::Forbidden("server_sk_not_configured", _)) {
+            state.rate_limiter.record_failure(&client_key);
+        }
+        return Err(err);
+    }
+
+    let app_env = normalize_app_env(&req.app_env)?;
+    let normalized_fp = match normalize_and_validate_device_fingerprint(&req.device_fingerprint) {
+        Ok(fp) => fp,
+        Err(err) => {
+            state.rate_limiter.record_failure(&client_key);
+            return Err(err);
+        }
+    };
+
+    let fp_hint = mask_device_fingerprint(&normalized_fp);
+    let identifier_hash = hash_device_fingerprint(&normalized_fp, &app_env);
+    let member_label = req.member_label.clone();
+    let device_id = req.device_id.clone();
+    let device_name = req.device_name.clone();
+    let app_version = req.app_version.clone();
+    let create_if_missing = req.create_if_missing;
+    let max_users = state.config.max_users;
+
+    let state_for_db = Arc::clone(&state);
+    let env_for_db = app_env.clone();
+    let hint_for_db = fp_hint.clone();
+    let dev_for_db = device_id.clone();
+    let client_key_for_db = client_key.clone();
+
+    let outcome = spawn_blocking(move || {
+        state_for_db.store.device_login_or_probe(
+            &identifier_hash,
+            &hint_for_db,
+            &env_for_db,
+            &member_label,
+            &dev_for_db,
+            &device_name,
+            &app_version,
+            create_if_missing,
+            max_users,
+            || {
+                state_for_db
+                    .rate_limiter
+                    .try_record_registration(&client_key_for_db)
+            },
+        )
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("join device_login task: {e}")))??;
+
+    state.rate_limiter.clear_failures(&client_key);
+
+    match outcome {
+        DeviceLoginOutcome::Bound(session) => {
+            let (access_token, expires_at_ms) = issue_access_token(
+                &state.config.token_secret,
+                &session.user_id,
+                &app_env,
+                &device_id,
+            )?;
+            Ok(Json(DeviceLoginResponse {
+                status: "bound",
+                access_token: Some(access_token),
+                expires_at_ms: Some(expires_at_ms),
+                user_id: Some(session.user_id),
+                display_name: Some(session.display_name),
+                key_hint: Some(session.key_hint),
+                is_new_account: Some(session.is_new_account),
+                avatar_sha256: Some(session.avatar_sha256),
+                account_summary: Some(session.summary),
+                existing_members: Vec::new(),
+            }))
+        }
+        DeviceLoginOutcome::SelectionRequired { existing_members } => {
+            Ok(Json(DeviceLoginResponse {
+                status: "selection_required",
+                access_token: None,
+                expires_at_ms: None,
+                user_id: None,
+                display_name: None,
+                key_hint: Some(fp_hint),
+                is_new_account: None,
+                avatar_sha256: None,
+                account_summary: None,
+                existing_members,
+            }))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ClaimMemberRequest {
+    #[serde(default)]
+    pub server_access_code: Option<String>,
+    pub target_user_id: String,
+    pub device_fingerprint: String,
+    #[serde(default)]
+    pub device_id: String,
+    #[serde(default)]
+    pub device_name: String,
+    #[serde(default)]
+    pub member_label: String,
+    #[serde(default = "default_prod_env")]
+    pub app_env: String,
+    #[serde(default)]
+    pub app_version: String,
+}
+
+async fn claim_member(
+    State(state): State<Arc<AppState>>,
+    ClientRateLimitKey(client_key): ClientRateLimitKey,
+    Json(req): Json<ClaimMemberRequest>,
+) -> Result<Json<DeviceLoginResponse>, AppError> {
+    state.rate_limiter.check_allowed(&client_key)?;
+
+    if let Err(err) = verify_required_server_sk(
+        state.config.server_access_code.as_deref(),
+        req.server_access_code.as_deref(),
+    ) {
+        if !matches!(&err, AppError::Forbidden("server_sk_not_configured", _)) {
+            state.rate_limiter.record_failure(&client_key);
+        }
+        return Err(err);
+    }
+
+    let app_env = normalize_app_env(&req.app_env)?;
+    let normalized_fp = match normalize_and_validate_device_fingerprint(&req.device_fingerprint) {
+        Ok(fp) => fp,
+        Err(err) => {
+            state.rate_limiter.record_failure(&client_key);
+            return Err(err);
+        }
+    };
+
+    let fp_hint = mask_device_fingerprint(&normalized_fp);
+    let identifier_hash = hash_device_fingerprint(&normalized_fp, &app_env);
+    let target_user_id = req.target_user_id.trim().to_string();
+    let member_label = req.member_label.clone();
+    let device_id = req.device_id.clone();
+    let device_name = req.device_name.clone();
+    let app_version = req.app_version.clone();
+
+    let state_for_db = Arc::clone(&state);
+    let env_for_db = app_env.clone();
+    let dev_for_db = device_id.clone();
+
+    let session = spawn_blocking(move || {
+        state_for_db.store.claim_family_member(
+            &target_user_id,
+            &identifier_hash,
+            &fp_hint,
+            &env_for_db,
+            &member_label,
+            &dev_for_db,
+            &device_name,
+            &app_version,
+        )
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("join claim_member task: {e}")))??;
+
+    state.rate_limiter.clear_failures(&client_key);
+
+    let (access_token, expires_at_ms) = issue_access_token(
+        &state.config.token_secret,
+        &session.user_id,
+        &app_env,
+        &device_id,
+    )?;
+
+    Ok(Json(DeviceLoginResponse {
+        status: "bound",
+        access_token: Some(access_token),
+        expires_at_ms: Some(expires_at_ms),
+        user_id: Some(session.user_id),
+        display_name: Some(session.display_name),
+        key_hint: Some(session.key_hint),
+        is_new_account: Some(false),
+        avatar_sha256: Some(session.avatar_sha256),
+        account_summary: Some(session.summary),
+        existing_members: Vec::new(),
+    }))
+}
+
+#[derive(Deserialize)]
+struct UnbindDeviceRequest {
+    device_fingerprint: String,
+}
+
+#[derive(Serialize)]
+struct UnbindDeviceResponse {
+    unbound: bool,
+}
+
+async fn unbind_device_binding(
+    State(state): State<Arc<AppState>>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+    Json(req): Json<UnbindDeviceRequest>,
+) -> Result<Json<UnbindDeviceResponse>, AppError> {
+    let uid = claims.uid;
+    let env = claims.env;
+    let normalized_fp = normalize_and_validate_device_fingerprint(&req.device_fingerprint)?;
+    let identifier_hash = hash_device_fingerprint(&normalized_fp, &env);
+
+    let unbound = spawn_blocking(move || {
+        state.store.verify_active_user(&uid, &env)?;
+        state.store.unbind_device_fingerprint(&uid, &identifier_hash)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("join unbind_device_binding: {e}")))??;
+
+    Ok(Json(UnbindDeviceResponse { unbound }))
 }
 
 #[derive(Serialize)]
@@ -483,4 +766,81 @@ async fn get_screenshot(
         bytes,
     )
         .into_response())
+}
+
+#[derive(Serialize)]
+struct PutAvatarResponse {
+    avatar_sha256: String,
+    byte_size: usize,
+    updated_at_ms: i64,
+}
+
+async fn put_profile_avatar(
+    State(state): State<Arc<AppState>>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+    body: Bytes,
+) -> Result<Json<PutAvatarResponse>, AppError> {
+    let uid = claims.uid;
+    let env = claims.env;
+
+    let (avatar_sha256, byte_size, updated_at_ms) = spawn_blocking(move || {
+        state.store.verify_active_user(&uid, &env)?;
+        state.store.save_user_avatar(&uid, &body)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("join put_profile_avatar: {e}")))??;
+
+    Ok(Json(PutAvatarResponse {
+        avatar_sha256,
+        byte_size,
+        updated_at_ms,
+    }))
+}
+
+async fn get_profile_avatar(
+    State(state): State<Arc<AppState>>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+) -> Result<Response, AppError> {
+    let uid = claims.uid;
+    let env = claims.env;
+
+    let bytes = spawn_blocking(move || {
+        state.store.verify_active_user(&uid, &env)?;
+        state.store.load_user_avatar(&uid)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("join get_profile_avatar: {e}")))??;
+
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "image/webp")],
+        bytes,
+    )
+        .into_response())
+}
+
+#[derive(Serialize)]
+struct DeleteAvatarResponse {
+    deleted: bool,
+    updated_at_ms: i64,
+}
+
+async fn delete_profile_avatar(
+    State(state): State<Arc<AppState>>,
+    AuthenticatedUser(claims): AuthenticatedUser,
+) -> Result<Json<DeleteAvatarResponse>, AppError> {
+    let uid = claims.uid;
+    let env = claims.env;
+
+    let updated_at_ms = spawn_blocking(move || {
+        state.store.verify_active_user(&uid, &env)?;
+        state.store.delete_user_avatar(&uid)
+    })
+    .await
+    .map_err(|e| AppError::Internal(format!("join delete_profile_avatar: {e}")))??;
+
+    Ok(Json(DeleteAvatarResponse {
+        deleted: true,
+        updated_at_ms,
+    }))
 }
