@@ -138,7 +138,11 @@
 - **设置页与个人资料账号同步卡（`UserProfileManager` & `ICostSettingsFullScreen`）**：
   - 顶部设立 **「个人资料与账号同步卡」**：支持自定义昵称（默认 `默记用户`，上限 16 字，空白自动回退）、8 款莫兰迪插画预设头像（默认首项 `MINT_CLASSIC` 保持历史薄荷绿插画一致）及系统 Photo Picker（`ActivityResultContracts.PickVisualMedia`）零存储权限选取相册头像（自动 EXIF 方向校正、居中方形裁剪并以 WebP 落盘至 `files/profile/`，文件缺失或损坏自动回退预设插画，且通过 `backup_rules.xml` / `data_extraction_rules.xml` 排除系统明文云备份）；账本/资产/统计三主 Tab 顶栏头像实时同步更新；当已绑定默记云同步时修改昵称自动同步更新 `MoJiCloudConfig.memberLabel`，卡片下方胶囊联动展示本地状态或脱敏同步密钥（`MOJI-****-XXXX`）并预留后续微信/手机号账号体系挂载位；`.mojibackup` 与默记云快照通过 `userProfileJson` 非破坏性携带昵称与预设头像标识（100% 兼容历史旧快照）。
   - 下方按「记账 / 数据与更新 / 更多功能」分组：「多账本」支持直接弹窗切换或新建账本，「本地快照与 WebDAV」直达单行横向胶囊导航的 WebDAV 标签页，「更多功能」7 大模块（「分类管理」「标签管理」「记账模板」「货币和汇率」「密码保护」「定时提醒」「外观显示」）100% 全部开放并实时展示动态状态摘要。
-- **智能记账页**：无障碍与通知使用权状态在返回应用时自动刷新；未授权时给出可点击的提示；规则、商户记忆、识别日志均提供空状态说明。
+- **智能记账页与识账调试全链路溯源（`CaptureDebugTraceStore`、`MoJiMainScreen` & `TransactionDetailSheet`）**：
+  - 无障碍与通知使用权状态在返回应用时自动刷新；未授权时给出可点击的提示；规则、商户记忆、识别日志均提供空状态说明。
+  - **识账调试模式开关与云同步物理隔离**：在「设置 › 智能记账 › 诊断与调试」提供「识账调试模式」卡片，初始默认严格为关闭，配置持久化于独立私有 `SharedPreferences`（`moji_debug_trace_prefs`），不注册到 `MoJiApp` 云同步监听，切换开关或写入日志零云同步副作用；关闭态下对 `filesDir/diagnostics/capture_debug_traces.jsonl` 零追加写入，手动关闭时仅停止新写入并保留历史日志供查看/导出，点击「清空日志」经二次确认弹窗后才删除落盘文件。
+  - **6 阶段结构化推理轨迹与前置 15s 防刷屏去抖**：开启后针对 `RECORDED`（正常入账）、`REFUND_OFFSET`（退货冲抵）、`FUSED_PATCH`（小程序/收银台/通知跨通道融合）、`DEDUP_BLOCKED`（完成页多任务往返与稳定页幂等防重）、`DUPLICATE_SUSPECTED`（疑似重复）、`NOISE_IGNORED`（非账单噪音忽略）及 `WINDOW_GUARD_BLOCKED`（前置窗口门禁拦截，同一 `packageName + structureFingerprint + guardRuleName` 15 秒内合并计数去抖并忽略桌面与纯聊天列表切换），完整记录 `SOURCE_CAPTURE`、`WINDOW_SESSION_GUARD`、`PARSE_ENGINE_ROUTE`、`FIELD_EXTRACTION`、`CATEGORY_WALLET_MAPPING`、`PIPELINE_DEDUP_FUSION` 6 个结构化阶段（仅存截图文件名与 SHA-256 引用，不存图像二进制）。
+  - **4 档双阈值 FIFO 环形裁剪、敏感凭据脱敏红线与双入口溯源**：提供 `1 MB（300 条）`、`5 MB（默认，1,500 条）`、`10 MB（3,000 条）`、`20 MB（6,000 条）` 四档配额，字节数或条数任一触顶以及从大档切小档时立即按 FIFO 淘汰最旧 20% 并通过 `.tmp` + 原子重命名安全重写（自动跳过损坏 JSON 行）；落盘 `.jsonl`、系统 `CreateDocument` 导出诊断包与剪贴板溯源报告 100% 强制脱敏自定义 API Key、`Bearer` Token、`x-goog-api-key`、默记云 `SyncKey`/`AccessCode`/`AccessToken` 及 WebDAV `appPassword`；支持在设置页按状态胶囊筛选、关键词检索、展开 6 阶段详情与复制单条 JSON，并在非手动账单（`captureSource != "MANUAL"`）详情页底部默认折叠展示「数据来源与推理溯源」卡片（汇总 `capture_evidences` 多源凭据与按时间升序排列的多段融合推理轨迹，支持一键复制完整脱敏溯源报告）。
 - **状态保留**：三个主 Tab 通过 `SaveableStateHolder` 保留各自的搜索词、折叠状态、统计周期与筛选；非首页 Tab 按返回键先回到「账本」。
 - **统计按账本过滤**：统计页只统计当前账本的账单，并遵循「隐藏金额」设置。
 
